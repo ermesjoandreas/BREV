@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "brev-core",
+    "brev-proto",
+    "brev-relay",
+    "uniffi-bindgen",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "UNLICENSED"
+publish = false
+
+# Only dependencies from CLAUDE.md §4 may appear here.
+# Adding anything else requires asking first.
+[workspace.dependencies]
+uniffi = { version = "0.32", default-features = false }
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[profile.release]
+# Symbols are stripped so the shipped binary carries no source paths or
+# symbol names; panics keep unwinding so `Drop`-based zeroization runs.
+strip = true
+lto = true
+codegen-units = 1

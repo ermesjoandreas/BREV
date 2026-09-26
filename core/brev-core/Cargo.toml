@@ -1,0 +1,21 @@
+[package]
+name = "brev-core"
+description = "Brev core: storage, crypto and session state, exposed to Swift via UniFFI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "brev_core"
+# `lib` for Rust tests and the relay, `staticlib` for the macOS app,
+# `cdylib` so `uniffi-bindgen --library` can read metadata on any host.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+uniffi = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

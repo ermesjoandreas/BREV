@@ -1,0 +1,11 @@
+# UniFFI binding configuration for brev-core.
+# See https://mozilla.github.io/uniffi-rs/latest/swift/configuration.html
+
+[bindings.swift]
+# Name of the Swift-facing module and of the generated Swift file.
+module_name = "BrevCore"
+# Name of the C module that wraps the generated header; the app links the
+# Rust staticlib and imports this via its bridging header / module map.
+ffi_module_name = "BrevCoreFFI"
+generate_module_map = true
+omit_argument_labels = false

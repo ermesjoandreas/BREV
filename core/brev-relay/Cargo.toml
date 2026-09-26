@@ -1,0 +1,18 @@
+[package]
+name = "brev-relay"
+description = "Brev relay server: stores ciphertext envelopes and routing metadata only (Phase 3)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "brev-relay"
+path = "src/main.rs"
+
+[dependencies]
+brev-proto = { path = "../brev-proto" }
+
+[lints]
+workspace = true
