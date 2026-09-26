@@ -6,6 +6,10 @@ core/target/
 app/Generated/
 
 # XcodeGen output and Xcode state
+# Info.plist is generated from the `info:` block in app/project.yml on every
+# `xcodegen generate` (docs/DECISIONS.md D-0009). app/Brev.entitlements is NOT
+# listed here: it is checked in so the entitlement set is reviewable in a diff.
+app/Info.plist
 app/*.xcodeproj/
 app/*.xcworkspace/
 app/build/
@@ -15,8 +19,8 @@ xcuserdata/
 *.xcscmblueprint
 
 # Build products
-build/
-dist/
+/build/
+/dist/
 *.app
 *.dSYM/
 *.dSYM.zip

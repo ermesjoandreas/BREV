@@ -1,0 +1,15 @@
+/*
+  Localizable.strings — Brev, Norwegian bokmål (nb), UTF-8.
+
+  Every user-visible string in the app lives here (CLAUDE.md §3.2).
+  None of these strings may ever be derived from message content (§1.5).
+*/
+
+/* Title of the application menu. AppKit replaces it with the bundle name at runtime; this is the fallback. */
+"menu.app.title" = "Brev";
+
+/* Application menu item that quits the app. Key equivalent: ⌘Q. */
+"menu.app.quit" = "Avslutt Brev";
+
+/* Title of the main window. Always the app name; never message content or a sender name. */
+"window.main.title" = "Brev";

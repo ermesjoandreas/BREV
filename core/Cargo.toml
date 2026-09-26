@@ -27,9 +27,10 @@ missing_docs = "warn"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 
+# The release profile is deliberately cargo's default in Phase 0
+# (docs/DECISIONS.md D-0001): `strip` would remove the symbol table that
+# uniffi-bindgen reads from the cdylib, and `lto` is silently ignored for a
+# crate that also builds an rlib. Symbol stripping, LTO and universal builds
+# are Phase 5 items alongside the reproducible build. Panics keep unwinding
+# (the default) so `Drop`-based zeroization runs on the way out.
 [profile.release]
-# Symbols are stripped so the shipped binary carries no source paths or
-# symbol names; panics keep unwinding so `Drop`-based zeroization runs.
-strip = true
-lto = true
-codegen-units = 1
