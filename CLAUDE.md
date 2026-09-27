@@ -57,7 +57,7 @@ Accepted residual risk — known, reviewed, and not fixed:
 * The Secure Enclave key files are not bound to Brev. Another process of the same user that can read Brev's container can copy a key file and ask for Touch ID to use Brev's key (tested: an unsandboxed program unwrapped the DEK this way). It still needs the user's finger. The system dialog does not protect in practice: in a test the owner could not tell Brev's dialog from the other program's. The rule is therefore behavioural: Brev asks for Touch ID only right after the user clicks "Lås opp", and onboarding says to cancel any other Touch ID request.
 * File substitution: a process that can write Brev's container (Full Disk Access, or the user allowing access to other apps' data) can replace the key files and stores with its own, so that letters written after the user's next unlock are readable by it. The only visible sign is that the history is gone; onboarding says not to write new letters if that happens. If a login-keychain anchor of the KEK proves to work without prompts, Brev refuses to unlock when it does not match.
 * Keystrokes exist briefly in macOS event objects (one character per event) and in the window server; secure event input stops event taps, not those.
-* Pixels of an open letter live in the window's backing stores until blank-on-lock.
+* Pixels of an open letter live in the window's backing stores, and in the protected layer's pixel buffers, until blank-on-lock (the buffers are zeroed in place on lock).
 * Phase 2 only: the two built-in echo contacts keep copies of every letter in two more stores under the same key.
 * Freed memory inside Apple frameworks is overwritten by the documented malloc debugging variable `MallocScribble=1`, set in Info.plist (`LSEnvironment`); Brev refuses to unlock if it is not in effect.
 * Key files and stores are held only until keychain storage exists: before Brev holds real letters (Phase 5 at the latest), the keys move to the keychain under a Developer ID, which binds them to Brev and closes the two file risks above.
@@ -96,7 +96,7 @@ brev/
 * AppKit, not SwiftUI, for every view that can contain content (we need low-level control over rendering, events and accessibility). SwiftUI is allowed for settings/onboarding screens that never show content.
 * `SecureTextView: NSView` — renders text with Core Text directly into `draw(_:)`. No `NSTextView`, no `NSTextField` for content. Overrides `accessibilityRole`/`accessibilityValue` to expose nothing.
 * `SecureComposeView: NSView` — same rendering, custom key handling, calls `EnableSecureEventInput()` on focus and `DisableSecureEventInput()` on blur. Rejects events where `CGEventGetIntegerValueField(event, .eventSourceUnixProcessID) != 0` (synthetic input from another process).
-* Main window: `sharingType = .none`, `isExcludedFromWindowsMenu = true`, `titlebarAppearsTransparent`, no content in title.
+* Main window: `sharingType = .none`, `isExcludedFromWindowsMenu = true`, `titlebarAppearsTransparent`, no content in title. `sharingType = .none` alone is not enough on macOS 26: `CGDisplayStream` and `AVCaptureScreenInput` still capture such a window. So every view that can show content draws into pixel buffers shown through an `AVSampleBufferDisplayLayer` with `preventsCapture = true`; `sharingType = .none` stays as the first defence. Sheets and child windows get the same settings as their parent.
 * Auto-lock: on `NSApplication.didResignActiveNotification`, on screen lock, and after N minutes idle → call `core.lock()`, blank all views.
 * Touch ID gate: `LAContext` with `.deviceOwnerAuthenticationWithBiometrics` and `localizedFallbackTitle = ""` (no password button). Secure Enclave keys are CryptoKit `SecureEnclave.P256` keys created with `SecAccessControlCreateWithFlags(kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, [.privateKeyUsage, .biometryCurrentSet])`. Each key's `dataRepresentation` (usable only by this Mac's Secure Enclave) is stored as a file in the app container, mode 0600. Not in the keychain: an ad-hoc signed app gets `errSecMissingEntitlement` (-34018) there. Keychain storage returns in Phase 5 with a Developer ID.
 * Notifications via `UserNotifications`, text exactly "Ny melding" (no sender name, no content).
@@ -118,7 +118,7 @@ The Secure Enclave can only hold P-256 keys, so:
 
 Rust: `uniffi`, `rusqlite` (features `bundled`), `chacha20poly1305` (XChaCha), `x25519-dalek`, `ed25519-dalek` (relay-side only), `p256` (feature `ecdsa`; verifies Secure Enclave P-256 signatures in `brev-core` and `brev-relay`; Swift only signs), `poly1305` (feature `zeroize` only, to wipe the one-time MAC key), `zeroizing-alloc` (1Password; `brev-core`'s global allocator, zeroes every freed block), `hkdf`, `sha2`, `rand` (with `getrandom`), `zeroize`, `serde` + `serde_json`, `thiserror`, `anyhow` (bin crates only), `tokio` + `axum` + `reqwest` (relay/transport only), `tracing` (never log content).
 
-Swift: Foundation, AppKit, Security, LocalAuthentication, CryptoKit (only for Enclave interop), UserNotifications, DeviceCheck (Phase 4). No third-party Swift packages without asking.
+Swift: Foundation, AppKit, Security, LocalAuthentication, CryptoKit (only for Enclave interop), AVFoundation + CoreMedia + CoreVideo (only for the capture-protected content layer), UserNotifications, DeviceCheck (Phase 4). No third-party Swift packages without asking.
 
 Tooling: `cargo`, `uniffi-bindgen`, `xcodegen`, `xcodebuild`, `swiftlint` (optional), `cargo-audit`, `cargo-deny`.
 
@@ -152,7 +152,7 @@ Each phase ends with a short summary in `docs/DECISIONS.md` and passing `scripts
 * Unlock screen → Touch ID → `core.unlock(dek)`.
 * Three-pane AppKit window: contacts list, thread list, message view. Content panes use `SecureTextView`.
 * Compose sheet with `SecureComposeView` (secure event input, synthetic event rejection, no pasteboard, no autocorrect, `writingToolsBehavior = .none`).
-* Window capture exclusion, auto-lock, blank-on-lock.
+* Window capture exclusion, including the protected content layer (§3.2), auto-lock, blank-on-lock. The capture defence is part of the definition of done.
 * Two contacts hard-coded through `MockTransport` so you can send a message to yourself and see it arrive.
 * Stored content (contact names, subjects, bodies) padded to the envelope buckets with the padding function from `brev-proto` (schema v2), before any real store exists.
 * Manual verification checklist (write it to `docs/VERIFY.md` and run it):

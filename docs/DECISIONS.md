@@ -1299,3 +1299,36 @@ the new numbers.
 - **Numbering:** `docs/PHASE2_DESIGN.md` §13 planned D-0033 to D-0058. Those
   entries shift by one (D-0034 to D-0059); its D-0055 and D-0056 topics are
   covered here.
+
+### D-0034 — Capture defence: protected content layer, AVFoundation approved
+
+- **Date:** 2026-09-28
+- **Decision:** The product owner approved AVFoundation, CoreMedia and
+  CoreVideo (§4), only for the capture-protected content layer. Every view
+  that can show content draws into pixel buffers shown through an
+  `AVSampleBufferDisplayLayer` with `preventsCapture = true`, and
+  `sharingType = .none` stays as the first defence (§3.2). The pixel
+  buffers are zeroed in place on lock. This defence (design WP11) is part
+  of Phase 2's definition of done, not conditional.
+- **Reasoning:** Capture spike on macOS 26.2 (25C56), 2026-09-27, with a
+  sandboxed, hardened, ad-hoc-signed test app, checked by a second agent:
+  `sharingType = .none` kept the window out of ScreenCaptureKit (every valid
+  filter), `screencapture` and `CGWindowListCreateImage`/
+  `CGDisplayCreateImage`, but not out of `CGDisplayStream` (obsoleted for
+  new deployment targets, still reachable through `dlsym`) or
+  `AVCaptureScreenInput` (not deprecated). The checker viewed the images:
+  the marker text of the `.none` window was readable through both. A
+  default-sharing sheet or child window of a `.none` window was captured by
+  every path. In the same runs, a window drawn through the protected layer
+  showed as an empty dark area on the leaking paths. Detecting capture, and
+  window levels and collection behaviours, were tried and are not shown to
+  help. This breaks §1's promise and matches two §2 threats, so it is not
+  accepted as residual risk.
+- **Verified / still open:** Verified with preserved logs at window levels
+  4 and 25. Before WP11 is built on it, two runs are repeated because their
+  logs were overwritten: the leak at level 0 (Brev's windows), and the
+  negative control that shows the layer hides content only with
+  `preventsCapture = true`. Whether the leaking paths need the Screen
+  Recording permission is not documented and not yet tested.
+- **Numbering:** the entries planned in `docs/PHASE2_DESIGN.md` §13 now
+  shift by two (D-0035 to D-0060).
