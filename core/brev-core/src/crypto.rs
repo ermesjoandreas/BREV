@@ -101,10 +101,30 @@ impl Drop for Plaintext {
     }
 }
 
+/// The X25519 identity secret, built for one operation by [`static_secret`].
+/// `StaticSecret` wipes itself on drop. Test builds count the live ones, and
+/// their `Drop` forbids moving the secret out of this wrapper uncounted.
+pub(crate) struct Secret(StaticSecret);
+
+impl std::ops::Deref for Secret {
+    type Target = StaticSecret;
+    fn deref(&self) -> &StaticSecret {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for Secret {
+    fn drop(&mut self) {
+        LIVE_SECRETS.with(|n| n.set(n.get() - 1));
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static LIVE_PLAINTEXTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SECRETS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LIVE_SECRETS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Test only: `Plaintext` values alive on this thread.
@@ -118,6 +138,17 @@ pub(crate) fn live_plaintexts() -> usize {
 pub(crate) fn secrets_built() -> usize {
     SECRETS_BUILT.with(|n| n.get())
 }
+
+/// Test only: [`Secret`] values (X25519 identity secrets) alive on this thread.
+#[cfg(test)]
+pub(crate) fn live_secrets() -> usize {
+    LIVE_SECRETS.with(|n| n.get())
+}
+
+/// Test only: compiles only if `T` wipes itself on drop. Memory cannot be
+/// read back without `unsafe`, so this pins the wiping type instead.
+#[cfg(test)]
+pub(crate) fn wiped_on_drop<T: zeroize::ZeroizeOnDrop + ?Sized>(_: &T) {}
 
 /// True if every byte is zero. Used to refuse an all-zero DEK, which is also
 /// the value of a locked core's key buffer.
@@ -134,11 +165,13 @@ pub(crate) fn public_key(secret: &StaticSecret) -> [u8; 32] {
 }
 
 /// Builds a static secret from decrypted bytes.
-pub(crate) fn static_secret(bytes: &[u8]) -> Result<StaticSecret, Error> {
+pub(crate) fn static_secret(bytes: &[u8]) -> Result<Secret, Error> {
     let arr: [u8; 32] = bytes.try_into().map_err(|_| Error::Crypto)?;
     #[cfg(test)]
     SECRETS_BUILT.with(|n| n.set(n.get() + 1));
-    Ok(StaticSecret::from(arr))
+    #[cfg(test)]
+    LIVE_SECRETS.with(|n| n.set(n.get() + 1));
+    Ok(Secret(StaticSecret::from(arr)))
 }
 
 /// Encrypts a column value under the DEK: `nonce || ciphertext || tag`.
@@ -351,6 +384,33 @@ mod tests {
             open_message(&a, &pb, &reflected),
             Err(Error::Crypto)
         ));
+    }
+
+    /// With both X25519 keys unchanged, a letter relabelled with another
+    /// sender or recipient id does not open. Clients do not verify
+    /// signatures in Phase 1, so this binding is what stops a contact whose
+    /// bundle reuses someone's X25519 key from receiving their letters under
+    /// its own name.
+    #[test]
+    fn a_letter_is_bound_to_both_ids() {
+        let (a, b) = (secret(), secret());
+        let (pa, pb) = (public_key(&a), public_key(&b));
+        let env = seal_message(&a, &pb, [1; 32], [2; 32], b"x").unwrap();
+        assert_eq!(&open_message(&b, &pa, &env).unwrap()[..], b"x");
+        let mut e = env.clone();
+        e.sender = [3; 32];
+        assert!(matches!(open_message(&b, &pa, &e), Err(Error::Crypto)));
+        let mut e = env.clone();
+        e.recipient = [3; 32];
+        assert!(matches!(open_message(&b, &pa, &e), Err(Error::Crypto)));
+    }
+
+    /// Closing a letter wipes it: `Plaintext` holds a buffer that zeroizes
+    /// itself on drop (checked at compile time).
+    #[test]
+    fn plaintext_wipes_on_drop() {
+        let p = Plaintext::new(Zeroizing::new(vec![1]));
+        wiped_on_drop(&p.0);
     }
 
     /// Every seal draws a fresh nonce, so the same input never repeats a

@@ -11,7 +11,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::config::DbConfig;
 use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension};
-use x25519_dalek::StaticSecret;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::{self, column_ad, Plaintext};
@@ -153,11 +152,8 @@ pub struct Core {
 /// The own identity, decrypted for one operation.
 struct Me {
     id: [u8; 32],
-    secret: StaticSecret,
-    /// Test only: counts live `Me` values. A field, not `Drop for Me`, so
-    /// fields can still be moved out.
-    #[cfg(test)]
-    _live: tests::LiveMe,
+    /// Counted by itself in test builds, so it is seen even when moved out.
+    secret: crypto::Secret,
 }
 
 impl Core {
@@ -433,39 +429,49 @@ impl Core {
     /// authenticated by the static-static key agreement.
     pub fn receive(&mut self, env: &Envelope) -> Result<MessageId, Error> {
         let dek = self.dek()?;
-        let me = self.me()?;
-        if env.recipient != me.id {
-            return Err(Error::Malformed);
-        }
-        let their_x25519 = self.contact_bundle(&env.sender)?.x25519;
-        let payload = crypto::open_message(&me.secret, &their_x25519, env)?;
-        let (id, thread, subject, body) = decode_payload(&payload)?;
         let now = now();
-
-        let existing: Option<([u8; 32], i64, Vec<u8>)> = self
-            .db
-            .query_row(
-                "SELECT contact_id, created_at, subject FROM threads WHERE id = ?1",
-                [&thread[..]],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        let new_subject = match existing {
-            Some((owner, created_at, sealed)) => {
-                // Authenticates `owner` before trusting it.
-                crypto::open_column(dek, &subject_ad(&thread, &owner, created_at), &sealed)?;
-                if owner != env.sender {
-                    return Err(Error::Malformed);
-                }
-                None
+        // The identity secret and the decrypted letter live only inside this
+        // block, so neither is alive during the commit (a full fsync).
+        let (id, thread, new_subject, body) = {
+            let me = self.me()?;
+            if env.recipient != me.id {
+                return Err(Error::Malformed);
             }
-            None => Some(crypto::seal_column(
-                dek,
-                &subject_ad(&thread, &env.sender, now),
-                subject,
-            )?),
+            let their_x25519 = self.contact_bundle(&env.sender)?.x25519;
+            let payload = crypto::open_message(&me.secret, &their_x25519, env)?;
+            let (id, thread, subject, body) = decode_payload(&payload)?;
+
+            let existing: Option<([u8; 32], i64, Vec<u8>)> = self
+                .db
+                .query_row(
+                    "SELECT contact_id, created_at, subject FROM threads WHERE id = ?1",
+                    [&thread[..]],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let new_subject = match existing {
+                Some((owner, created_at, sealed)) => {
+                    // Authenticates `owner` before trusting it.
+                    crypto::open_column(dek, &subject_ad(&thread, &owner, created_at), &sealed)?;
+                    if owner != env.sender {
+                        return Err(Error::Malformed);
+                    }
+                    None
+                }
+                None => Some(crypto::seal_column(
+                    dek,
+                    &subject_ad(&thread, &env.sender, now),
+                    subject,
+                )?),
+            };
+            let ad = body_ad(&id, &thread, &env.sender, false, now);
+            (
+                id,
+                thread,
+                new_subject,
+                crypto::seal_column(dek, &ad, body)?,
+            )
         };
-        let body = crypto::seal_column(dek, &body_ad(&id, &thread, &env.sender, false, now), body)?;
 
         let tx = self.db.transaction()?;
         if let Some(subject) = new_subject {
@@ -512,17 +518,17 @@ impl Core {
     ) -> Result<Core, Error> {
         let mut core = Core::connect(path, slot)?;
         set_journal_mode(&core.db)?;
-        let mut secret = Zeroizing::new([0u8; 32]);
-        crypto::fill(secret.as_mut_slice())?;
-        let x25519 = crypto::public_key(&crypto::static_secret(secret.as_slice())?);
-        let id = crypto::identity_id(signing_key, &x25519);
-        let cap = 64 + signing_key.len();
-        let mut keys = Zeroizing::new(Vec::with_capacity(cap));
-        keys.extend_from_slice(secret.as_slice());
-        keys.extend_from_slice(&x25519);
-        keys.extend_from_slice(signing_key);
-        debug_assert_eq!(keys.capacity(), cap, "identity key buffer reallocated");
-        let sealed = crypto::seal_column(&core.dek, &column_ad("identity.keys", &[&id]), &keys)?;
+        // The X25519 secret lives only inside this block, so it is gone
+        // before the commit.
+        let (id, sealed) = {
+            let mut secret = Zeroizing::new([0u8; 32]);
+            crypto::fill(secret.as_mut_slice())?;
+            let x25519 = crypto::public_key(&*crypto::static_secret(secret.as_slice())?);
+            let id = crypto::identity_id(signing_key, &x25519);
+            let keys = identity_row(&secret, &x25519, signing_key);
+            let ad = column_ad("identity.keys", &[&id]);
+            (id, crypto::seal_column(&core.dek, &ad, &keys)?)
+        };
         let tx = core.db.transaction()?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.execute_batch(SCHEMA)?;
@@ -598,8 +604,6 @@ impl Core {
         let me = Me {
             id,
             secret: crypto::static_secret(secret)?,
-            #[cfg(test)]
-            _live: tests::LiveMe::new(),
         };
         // Reaches only the frames below this one. In release builds
         // `static_secret` is inlined here and `me()` may be inlined into its
@@ -691,13 +695,15 @@ fn verify_store(db: &Connection) -> Result<(), Error> {
 }
 
 /// A file SQLite cannot parse (random bytes, an encrypted or damaged
-/// database) is not a Brev store either: `Corrupt`, not `Storage`.
+/// database, a header naming an unsupported schema format) is not a Brev
+/// store either: `Corrupt`, not `Storage`.
 fn not_a_store(e: Error) -> Error {
     match &e {
         Error::Storage(s)
             if matches!(
                 s.sqlite_error_code(),
-                Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt)
+                // `Unknown` is plain SQLITE_ERROR: "unsupported file format".
+                Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt | ErrorCode::Unknown)
             ) =>
         {
             Error::Corrupt
@@ -722,6 +728,18 @@ fn set_journal_mode(db: &Connection) -> Result<(), Error> {
         return Err(Error::Corrupt);
     }
     Ok(())
+}
+
+/// The identity row: `X25519 secret (32) || X25519 public (32) || signing key`.
+/// Returned as a [`Plaintext`], so its type pins the wipe on drop.
+fn identity_row(secret: &[u8; 32], x25519: &[u8; 32], signing_key: &[u8]) -> Plaintext {
+    let cap = 64 + signing_key.len();
+    let mut keys = Zeroizing::new(Vec::with_capacity(cap));
+    keys.extend_from_slice(secret);
+    keys.extend_from_slice(x25519);
+    keys.extend_from_slice(signing_key);
+    debug_assert_eq!(keys.capacity(), cap, "identity key buffer reallocated");
+    Plaintext::new(keys)
 }
 
 /// Payload inside the message AEAD:
@@ -771,31 +789,6 @@ mod tests {
 
     use super::*;
 
-    thread_local! {
-        static LIVE_ME: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    }
-
-    /// The counting field of every [`Me`].
-    pub(super) struct LiveMe;
-
-    impl LiveMe {
-        pub(super) fn new() -> LiveMe {
-            LIVE_ME.with(|n| n.set(n.get() + 1));
-            LiveMe
-        }
-    }
-
-    impl Drop for LiveMe {
-        fn drop(&mut self) {
-            LIVE_ME.with(|n| n.set(n.get() - 1));
-        }
-    }
-
-    /// `Me` values (decrypted X25519 identity secrets) alive on this thread.
-    fn live_me() -> usize {
-        LIVE_ME.with(|n| n.get())
-    }
-
     fn temp_path() -> std::path::PathBuf {
         let r: [u8; 8] = crypto::random().unwrap();
         std::env::temp_dir().join(format!("brev-unit-{:016x}.db", u64::from_le_bytes(r)))
@@ -831,6 +824,8 @@ mod tests {
         assert_eq!(key, [0u8; 32], "caller's DEK copy must be wiped");
         assert_eq!(core.dek_for_test(), original, "positive control");
         let addr = core.dek_addr_for_test();
+        // A core dropped without lock() wipes the DEK too (compile time).
+        crypto::wiped_on_drop(&*core.dek);
 
         core.lock();
         assert_eq!(core.dek_for_test(), [0u8; 32]);
@@ -1046,7 +1041,8 @@ mod tests {
         struct Counts(std::cell::Cell<Option<(usize, usize)>>);
         impl Signer for Counts {
             fn sign(&self, _: &[u8]) -> Result<Vec<u8>, Error> {
-                self.0.set(Some((crypto::live_plaintexts(), live_me())));
+                self.0
+                    .set(Some((crypto::live_plaintexts(), crypto::live_secrets())));
                 Ok(Vec::new())
             }
         }
@@ -1063,12 +1059,44 @@ mod tests {
         assert_eq!(crypto::live_plaintexts(), 1);
         drop(payload);
         let me = a.me().unwrap();
-        assert_eq!(live_me(), 1);
+        assert_eq!(crypto::live_secrets(), 1);
         drop(me);
 
         let signer = Counts(std::cell::Cell::new(None));
         a.send(t, b"x", &signer).unwrap();
         assert_eq!(signer.0.get(), Some((0, 0)));
+        drop((a, b));
+        for p in &paths {
+            let _ = fs::remove_file(p);
+        }
+    }
+
+    thread_local! {
+        static AT_COMMIT: std::cell::RefCell<Vec<(usize, usize)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Nothing decrypted is alive while `receive` commits (a full fsync):
+    /// the letter and the X25519 secret are dropped first.
+    #[test]
+    fn nothing_decrypted_is_alive_while_receive_commits() {
+        fn at_commit(e: TraceEvent<'_>) {
+            if let TraceEvent::Stmt(_, "COMMIT") = e {
+                let live = (crypto::live_plaintexts(), crypto::live_secrets());
+                AT_COMMIT.with(|v| v.borrow_mut().push(live));
+            }
+        }
+        let paths = [temp_path(), temp_path()];
+        let (mut a, mut b) = (new_core(&paths[0]), new_core(&paths[1]));
+        let b_at_a = a.add_contact(&b.bundle().unwrap(), b"B").unwrap();
+        b.add_contact(&a.bundle().unwrap(), b"A").unwrap();
+        let t = a.new_thread(b_at_a, b"s").unwrap();
+        b.db.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(at_commit));
+        // The first letter makes a new thread, the second joins it.
+        for body in [b"x", b"y"] {
+            b.receive(&a.send(t, body, &NoSig).unwrap()).unwrap();
+        }
+        assert_eq!(AT_COMMIT.with(|v| v.take()), [(0, 0), (0, 0)]);
         drop((a, b));
         for p in &paths {
             let _ = fs::remove_file(p);

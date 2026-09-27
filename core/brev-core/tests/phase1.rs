@@ -139,6 +139,16 @@ fn round_trip_a_encrypts_b_decrypts() {
     assert_eq!(mine.len(), 2);
     assert!(mine[0].outgoing && !mine[1].outgoing);
     assert_eq!(&a.core.read_body(mine[1].id).unwrap()[..], b"Takk!");
+
+    // mark_read flags that message only, and the flag is not bound to the body.
+    send(&mut b, t, b"Og en til.");
+    a.core.receive(&a.net.poll()[0]).unwrap();
+    let before = a.core.messages(t).unwrap();
+    assert!(!before[1].read && !before[2].read);
+    a.core.mark_read(before[1].id).unwrap();
+    let after = a.core.messages(t).unwrap();
+    assert!(after[1].read && !after[1].outgoing && !after[2].read);
+    assert_eq!(&a.core.read_body(after[1].id).unwrap()[..], b"Takk!");
 }
 
 #[test]
@@ -235,10 +245,14 @@ fn no_plaintext_in_any_file() {
 #[test]
 fn locked_core_refuses_every_content_call() {
     let dir = TempDir::new();
-    let (mut a, _b, b_at_a, _) = pair(&dir.0);
+    let (mut a, mut b, b_at_a, _) = pair(&dir.0);
     let t = a.core.new_thread(b_at_a, b"s").unwrap();
     let env = send(&mut a, t, b"x");
     let msg = a.core.messages(t).unwrap()[0].id;
+    // An unread letter from B, to show that a locked mark_read writes nothing.
+    b.core.receive(&b.net.poll()[0]).unwrap();
+    send(&mut b, t, b"y");
+    let unread = a.core.receive(&a.net.poll()[0]).unwrap();
 
     a.core.lock();
     assert!(a.core.is_locked());
@@ -250,7 +264,7 @@ fn locked_core_refuses_every_content_call() {
     locked(a.core.threads().map(drop));
     locked(a.core.messages(t).map(drop));
     locked(a.core.read_body(msg).map(drop));
-    locked(a.core.mark_read(msg));
+    locked(a.core.mark_read(unread));
     locked(a.core.send(t, b"y", &a.signer).map(drop));
     locked(a.core.receive(&env).map(drop));
     locked(a.core.receive_all(&a.net).map(drop));
@@ -269,6 +283,14 @@ fn locked_core_refuses_every_content_call() {
     again.unlock(&mut dek).unwrap();
     assert_eq!(dek, [0u8; 32]);
     assert_eq!(&again.read_body(msg).unwrap()[..], b"x");
+    assert!(
+        again
+            .messages(t)
+            .unwrap()
+            .iter()
+            .any(|m| m.id == unread && !m.read),
+        "a locked mark_read wrote nothing"
+    );
 }
 
 #[test]
@@ -338,6 +360,18 @@ fn receive_rejects_strangers_misrouted_self_and_replays() {
         a.core.new_thread(IdentityId([9; 32]), b"s").map(drop),
         Err(Error::NotFound)
     ));
+    // A signing key must be 1..=255 bytes; a refused bundle adds no contact.
+    for signing_key in [vec![], vec![1; 256]] {
+        let bad = PublicBundle {
+            signing_key,
+            x25519: random(),
+        };
+        assert!(matches!(
+            a.core.add_contact(&bad, b"n").map(drop),
+            Err(Error::Malformed)
+        ));
+    }
+    assert_eq!(a.core.contacts().unwrap().len(), 1);
 
     // A subject over 65535 bytes is refused and makes no thread; an
     // unknown message cannot be marked read.
@@ -413,7 +447,12 @@ fn stored_metadata_is_bound_to_ciphertext() {
     let other = a.core.new_thread(m_at_a, b"s3").unwrap();
     send(&mut a, t, b"first");
     send(&mut a, t, b"second");
+    send(&mut a, t2, b"third");
     let ids: Vec<_> = a.core.messages(t).unwrap().iter().map(|m| m.id).collect();
+    // Each thread lists only its own messages.
+    let in_t2 = a.core.messages(t2).unwrap();
+    assert_eq!((ids.len(), in_t2.len()), (2, 1));
+    assert!(!ids.contains(&in_t2[0].id) && a.core.messages(other).unwrap().is_empty());
     let raw = rusqlite::Connection::open(dir.0.join("a.db")).unwrap();
     let sql = |q: &str, p: &[&[u8]]| {
         raw.execute(q, rusqlite::params_from_iter(p.iter()))
@@ -624,7 +663,8 @@ fn create_and_open_refuse_bad_files() {
     assert_eq!(fs::read(&foreign).unwrap(), before);
 
     // The same for a WAL-mode file (switching it to DELETE mode would
-    // rewrite it), a file that is not SQLite at all, and a truncated store.
+    // rewrite it), a file that is not SQLite at all, a truncated store, and
+    // a store whose header names a schema format SQLite does not support.
     let wal = dir.0.join("wal.db");
     let c = rusqlite::Connection::open(&wal).unwrap();
     let mode: String = c
@@ -636,9 +676,12 @@ fn create_and_open_refuse_bad_files() {
     let junk = dir.0.join("junk.db");
     fs::write(&junk, random::<64>().repeat(100)).unwrap();
     let short = dir.0.join("short.db");
-    let store = fs::read(&path).unwrap();
+    let mut store = fs::read(&path).unwrap();
     fs::write(&short, &store[..store.len() / 2]).unwrap();
-    for file in [wal, junk, short] {
+    let format = dir.0.join("format.db");
+    store[44..48].copy_from_slice(&5u32.to_be_bytes()); // schema format number
+    fs::write(&format, &store).unwrap();
+    for file in [wal, junk, short, format] {
         let before = fs::read(&file).unwrap();
         assert!(
             matches!(Core::open(&file).map(drop), Err(Error::Corrupt)),
