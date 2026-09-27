@@ -377,3 +377,47 @@ checklist has been run and any fix it needs is logged here.
   polling every N seconds means "immediate" is bounded by that interval.
 - **Verified:** Specification change only; no relay code exists yet. The
   §2 copy in `docs/THREAT_MODEL.md` was re-diffed against CLAUDE.md.
+
+### D-0014 — Contacts by address plus invite codes; key check is optional
+
+- **Date:** 2026-09-27
+- **Decision:** Mandatory out-of-band exchange of identity codes, by phone or
+  in person, is dropped. Contacts are made in two ways, as Signal does:
+  1. **By address, like email (Phase 3).** Each identity registers a short,
+     unique address with the relay. Adding a contact means typing their
+     address; the relay returns their public keys; the recipient approves
+     the contact request with one click (Phase 4). The app pins a contact's
+     identity key on first sight (trust on first use). If the relay later
+     returns a different key, the app shows a warning and sends nothing until
+     the user accepts the new key.
+  2. **By invite code (Phase 4).** A one-time text code carries the inviter's
+     address and identity-key fingerprint. Redeeming it makes the two people
+     approved contacts of each other, with the key checked against the
+     fingerprint, so the relay cannot substitute it. A new identity needs one
+     to register, which is the existing invite-graph requirement.
+  The identity code (base32 of the public-key hash) stays, shown per contact
+  as an optional safety code for people who want to compare it.
+  CLAUDE.md §2 now states that the relay serves the address directory and
+  what makes a false key detectable; `docs/THREAT_MODEL.md` is re-synced.
+- **Reasoning:** Product decision by the project owner: requiring a phone
+  call or a meeting before two people can write was too much friction for
+  an email-like product. Four options were compared: (1) address lookup,
+  (2) invite code sent over any channel, (3) searching a directory of
+  BankID-verified names, (4) matching phone numbers from the address book.
+  (1) is the simplest but trusts the relay at first contact; (2) is
+  verified by construction and fits the invite requirement Phase 4 already
+  has. (3) was rejected because it turns the relay into a searchable
+  register of who uses Brev; BankID stays a Phase 4 verification stub only.
+  (4) was rejected because it needs Contacts access and uploads the user's
+  address book, which conflicts with Brev's privacy stance. The trade-off
+  accepted: for contacts added by address, a malicious relay could hand out
+  a false key the first time. Pinning means any later swap is caught, the
+  optional safety code catches the first one for people who compare, and
+  invite codes avoid it entirely. Content protection under §1 is unchanged.
+  Invites are text rather than links because §1.4 forbids URL schemes.
+  Addresses and invite codes are not message content, so §1.3 does not
+  forbid copying them; copy and paste is limited to the contact screen so
+  it can never reach a content view.
+- **Verified:** Specification change only; no relay or contact code exists
+  yet. The §2 copy in `docs/THREAT_MODEL.md` was re-diffed against
+  CLAUDE.md.
