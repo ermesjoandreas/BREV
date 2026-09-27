@@ -18,7 +18,7 @@ NEVER:
 2. Expose message text through the macOS Accessibility tree (no `NSAccessibility` text/value for content views).
 3. Put message content on the pasteboard (`NSPasteboard`). No copy, no cut, no drag-and-drop of content. Copying is disabled by design.
 4. Add a Share menu, Services, Quick Look, printing, PDF export, AppleScript dictionary, Shortcuts/App Intents, URL scheme, plugin system, MCP server, or any programmatic interface that returns content.
-5. Show message content in notifications, the Dock, Spotlight, Handoff, or window titles. Notifications say only "Ny melding fra <navn>".
+5. Show message content in notifications, the Dock, Spotlight, Handoff, or window titles. Notifications say only "Ny melding": no sender name, no content. Contact names stay encrypted.
 6. Enable autocorrect, spell-check, predictive text, dictation, or Apple Writing Tools in any view that holds content.
 7. Implement your own cryptographic primitives. Use audited crates only (see §4). Ask before adding any dependency not listed here.
 8. Allow a password fallback for unlocking. Touch ID only (`.deviceOwnerAuthenticationWithBiometrics`, `.biometryCurrentSet`).
@@ -87,7 +87,7 @@ brev/
 * Main window: `sharingType = .none`, `isExcludedFromWindowsMenu = true`, `titlebarAppearsTransparent`, no content in title.
 * Auto-lock: on `NSApplication.didResignActiveNotification`, on screen lock, and after N minutes idle → call `core.lock()`, blank all views.
 * Touch ID gate: `LAContext` with `.deviceOwnerAuthenticationWithBiometrics`. Secure Enclave key created with `SecAccessControlCreateWithFlags(... [.privateKeyUsage, .biometryCurrentSet])` and `kSecAttrTokenIDSecureEnclave`, `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`.
-* Notifications via `UserNotifications`, sender name only.
+* Notifications via `UserNotifications`, text exactly "Ny melding" (no sender name, no content).
 * Bundle: Hardened Runtime ON, App Sandbox ON, `get-task-allow` OFF, library validation ON, no `NSAppleScriptEnabled`, no `NSServices`, no document types, no URL types.
 * UI language: Norwegian (bokmål). Keep strings in `Localizable.strings`.
 
@@ -104,7 +104,7 @@ The Secure Enclave can only hold P-256 keys, so:
 
 ## 4. Approved dependencies
 
-Rust: `uniffi`, `rusqlite` (features `bundled`), `chacha20poly1305` (XChaCha), `x25519-dalek`, `ed25519-dalek` (relay-side only), `hkdf`, `sha2`, `rand` (with `getrandom`), `zeroize`, `serde` + `serde_json`, `thiserror`, `anyhow` (bin crates only), `tokio` + `axum` + `reqwest` (relay/transport only), `tracing` (never log content).
+Rust: `uniffi`, `rusqlite` (features `bundled`), `chacha20poly1305` (XChaCha), `x25519-dalek`, `ed25519-dalek` (relay-side only), `p256` (feature `ecdsa`; verifies Secure Enclave P-256 signatures in `brev-core` and `brev-relay`; Swift only signs), `poly1305` (feature `zeroize` only, to wipe the one-time MAC key), `hkdf`, `sha2`, `rand` (with `getrandom`), `zeroize`, `serde` + `serde_json`, `thiserror`, `anyhow` (bin crates only), `tokio` + `axum` + `reqwest` (relay/transport only), `tracing` (never log content).
 
 Swift: Foundation, AppKit, Security, LocalAuthentication, CryptoKit (only for Enclave interop), UserNotifications, DeviceCheck (Phase 4). No third-party Swift packages without asking.
 
@@ -155,7 +155,8 @@ Each phase ends with a short summary in `docs/DECISIONS.md` and passing `scripts
 
 * `brev-relay`: minimal axum server. Endpoints: register public identity, submit envelope, poll envelopes for a recipient. Stores only ciphertext + routing metadata. Deletes envelopes after delivery. No accounts yet beyond a public key.
 * `RelayTransport` in `brev-core` (HTTP, polling every N seconds; no websockets yet).
-* Envelope signatures now come from the Secure Enclave via Swift: `core.sign_request(bytes) -> Swift signs with Touch ID → core.attach_signature()`. Relay verifies the P-256 signature against the registered identity.
+* Envelope signatures now come from the Secure Enclave via Swift: `core.sign_request(bytes) -> Swift signs with Touch ID → core.attach_signature()`. Relay verifies the P-256 signature against the registered identity; `brev-core` verifies it on receive (`p256`, §4). Swift never verifies.
+* Padding: the plaintext payload is padded to fixed buckets (256 B / 1 KiB / 4 KiB / 16 KiB) before encryption, as part of the envelope format in `brev-proto`. Test: payloads of different lengths within one bucket give ciphertexts of equal length.
 * Contact exchange: out-of-band by sharing a short identity code (base32 of public key hash) which the app renders; no QR codes yet.
 * Definition of done: two Macs (or two app instances with separate data dirs) exchange messages through a local relay; relay DB contains no plaintext (test it).
 

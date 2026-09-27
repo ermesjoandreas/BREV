@@ -3,6 +3,11 @@
 //! Nothing in this crate may ever hold plaintext message content: an envelope
 //! carries sender id, recipient id, nonce, ciphertext and a signature, and
 //! nothing else.
+//!
+//! TODO(Phase 3): pad the plaintext payload to fixed buckets (256 B / 1 KiB /
+//! 4 KiB / 16 KiB) before encryption, here as part of the envelope format,
+//! with a test that payloads of different lengths within one bucket give
+//! ciphertexts of equal length (CLAUDE.md §5 Phase 3).
 
 #![forbid(unsafe_code)]
 

@@ -16,7 +16,7 @@ NEVER:
 2. Expose message text through the macOS Accessibility tree (no `NSAccessibility` text/value for content views).
 3. Put message content on the pasteboard (`NSPasteboard`). No copy, no cut, no drag-and-drop of content. Copying is disabled by design.
 4. Add a Share menu, Services, Quick Look, printing, PDF export, AppleScript dictionary, Shortcuts/App Intents, URL scheme, plugin system, MCP server, or any programmatic interface that returns content.
-5. Show message content in notifications, the Dock, Spotlight, Handoff, or window titles. Notifications say only "Ny melding fra <navn>".
+5. Show message content in notifications, the Dock, Spotlight, Handoff, or window titles. Notifications say only "Ny melding": no sender name, no content. Contact names stay encrypted.
 6. Enable autocorrect, spell-check, predictive text, dictation, or Apple Writing Tools in any view that holds content.
 7. Implement your own cryptographic primitives. Use audited crates only (see §4). Ask before adding any dependency not listed here.
 8. Allow a password fallback for unlocking. Touch ID only (`.deviceOwnerAuthenticationWithBiometrics`, `.biometryCurrentSet`).
