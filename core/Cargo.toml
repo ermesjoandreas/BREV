@@ -30,6 +30,9 @@ hkdf = "0.13.0"
 sha2 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
 rand = { version = "0.10.3", default-features = false, features = ["sys_rng"] }
 zeroize = "1.9.0"
+# brev-core's global allocator: zeroes every freed heap block, including the
+# RustBuffers Swift frees through UniFFI (docs/DECISIONS.md D-0032 item 4).
+zeroizing-alloc = "0.1.1"
 ed25519-dalek = "3.0.0"
 
 [workspace.lints.rust]

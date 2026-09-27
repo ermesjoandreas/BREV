@@ -6,6 +6,7 @@
 //! into a fresh [`Plaintext`] owned by the caller.
 
 use std::fs::{self, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,7 +19,9 @@ use crate::{Envelope, Error, Signer, Transport};
 
 /// "BREV" in the SQLite header's application_id field.
 const APPLICATION_ID: i32 = 0x4252_4556;
-const SCHEMA_VERSION: i32 = 1;
+/// 2: every sealed column is padded (`crypto::seal_column`). The schema text
+/// is unchanged from 1; a version 1 store opens as `Corrupt`.
+const SCHEMA_VERSION: i32 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE identity (
@@ -161,8 +164,9 @@ impl Core {
     /// under `dek`. `signing_key` is this identity's signature public key.
     /// `dek` is zeroed before anything can fail, so after an error the caller
     /// must make a fresh DEK. Refuses a relative path, an all-zero DEK and an
-    /// existing path; on any later failure the new file is removed. The new
-    /// core is unlocked.
+    /// existing path; on any later failure the new file is removed. The file
+    /// is created with mode 0600 (SQLite gives its journal the same mode).
+    /// The new core is unlocked.
     pub fn create(path: &Path, dek: &mut [u8; 32], signing_key: &[u8]) -> Result<Core, Error> {
         let mut slot = Box::new(Zeroizing::new([0u8; 32]));
         slot.copy_from_slice(dek);
@@ -172,7 +176,11 @@ impl Core {
             return Err(Error::Malformed);
         }
         signing_key_len(signing_key)?;
-        OpenOptions::new().write(true).create_new(true).open(path)?;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
         let result = Core::init(path, slot, signing_key);
         if result.is_err() {
             let _ = fs::remove_file(path);
@@ -369,6 +377,17 @@ impl Core {
         )?;
         let ad = body_ad(&message.0, &thread, &contact, outgoing, created_at);
         crypto::open_column(dek, &ad, &body)
+    }
+
+    /// The thread a message belongs to. Metadata only: decrypts nothing, but
+    /// goes through the gate like every other call.
+    pub fn thread_of(&self, message: MessageId) -> Result<ThreadId, Error> {
+        self.dek()?;
+        Ok(ThreadId(self.db.query_row(
+            "SELECT thread_id FROM messages WHERE id = ?1",
+            [&message.0[..]],
+            |r| r.get(0),
+        )?))
     }
 
     /// Marks a message read.
@@ -927,7 +946,7 @@ mod tests {
         assert_eq!(q("fullfsync"), "Integer(1)");
         assert_eq!(q("trusted_schema"), "Integer(0)");
         assert_eq!(q("application_id"), format!("Integer({APPLICATION_ID})"));
-        assert_eq!(q("user_version"), "Integer(1)");
+        assert_eq!(q("user_version"), "Integer(2)");
         assert!(core
             .db
             .db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)

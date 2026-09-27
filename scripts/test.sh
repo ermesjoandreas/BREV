@@ -34,8 +34,9 @@ cargo clippy --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace 
 echo "==> cargo test"
 cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace
 
-# scrub_stack() must survive the optimiser, so its test also runs optimised.
-echo "==> cargo test --release (scrub_stack)"
+# scrub_stack() and scrub_stack_deep() must survive the optimiser, so their
+# tests also run optimised (the filter matches both test names).
+echo "==> cargo test --release (scrub_stack, scrub_stack_deep)"
 cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-core --lib scrub_stack
 
 # Wipe-on-drop of every key the crypto crates hold depends on their `zeroize`
@@ -44,7 +45,7 @@ cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p b
 # line for the crate must have it: a second version without the feature
 # (poly1305's direct dependency only works while both resolve to one version)
 # must fail the check, not hide behind the copy that has it.
-echo "==> zeroize features"
+echo "==> zeroize features and zeroing allocator"
 FEATURES="$(cargo tree --manifest-path "$MANIFEST" -p brev-core -e normal -f '{p} [{f}]')"
 for crate in chacha20poly1305 chacha20 poly1305 x25519-dalek curve25519-dalek sha2 block-buffer; do
   LINES="$(grep -E "(^|[^a-z0-9_-])$crate v" <<<"$FEATURES" || true)"
@@ -53,6 +54,12 @@ for crate in chacha20poly1305 chacha20 poly1305 x25519-dalek curve25519-dalek sh
     exit 1
   fi
 done
+# brev-core's global allocator zeroes every freed heap block, including the
+# buffers Swift frees through UniFFI (CLAUDE.md §3.1).
+if ! grep -Eq "(^|[^a-z0-9_-])zeroizing-alloc v" <<<"$FEATURES"; then
+  echo "error: brev-core does not depend on zeroizing-alloc" >&2
+  exit 1
+fi
 
 # cargo-audit is optional on a dev machine but required clean from Phase 1 on
 # (CLAUDE.md §5, Phase 1 definition of done; in CI from Phase 5), so skipping

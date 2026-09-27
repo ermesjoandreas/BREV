@@ -693,7 +693,7 @@ fn create_and_open_refuse_bad_files() {
 
     // open refuses a store whose header names another application or
     // schema version.
-    for (pragma, bad) in [("application_id", 1), ("user_version", 2)] {
+    for (pragma, bad) in [("application_id", 1), ("user_version", 1)] {
         let raw = rusqlite::Connection::open(&path).unwrap();
         let good: i32 = raw.pragma_query_value(None, pragma, |r| r.get(0)).unwrap();
         raw.pragma_update(None, pragma, bad).unwrap();

@@ -2,7 +2,9 @@
 //! (CLAUDE.md §1.7). Two uses of XChaCha20-Poly1305:
 //!
 //! * columns: key = DEK, random nonce, stored as `nonce || ct || tag`,
-//!   AD = column label and the row's immutable fields;
+//!   AD = column label and the row's immutable fields. The plaintext is
+//!   padded with `brev_proto::pad_into` first, so a stored length shows only
+//!   the bucket;
 //! * messages: key = HKDF-SHA256(salt = nonce, ikm = X25519(static, static),
 //!   info = label || sender id || recipient id), AD = envelope header.
 //!
@@ -126,6 +128,7 @@ thread_local! {
     static SECRETS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LIVE_SECRETS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SCRUBS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DEEP_SCRUBS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Test only: `Plaintext` values alive on this thread.
@@ -150,6 +153,12 @@ pub(crate) fn live_secrets() -> usize {
 #[cfg(test)]
 pub(crate) fn scrubs() -> usize {
     SCRUBS.with(|n| n.get())
+}
+
+/// Test only: how many times [`scrub_stack_deep`] has run on this thread.
+#[cfg(test)]
+pub(crate) fn deep_scrubs() -> usize {
+    DEEP_SCRUBS.with(|n| n.get())
 }
 
 /// Test only: compiles only if `T` wipes itself on drop. Memory cannot be
@@ -181,19 +190,35 @@ pub(crate) fn static_secret(bytes: &[u8]) -> Result<Secret, Error> {
     Ok(Secret(StaticSecret::from(arr)))
 }
 
-/// Encrypts a column value under the DEK: `nonce || ciphertext || tag`.
+/// Pads a column value and encrypts it under the DEK:
+/// `nonce || ciphertext || tag`, with the ciphertext exactly one bucket long.
+/// Content above the padding maximum gives `Malformed`.
 pub(crate) fn seal_column(dek: &[u8; 32], ad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
     let nonce: [u8; NONCE_LEN] = random()?;
-    let r = encrypt(dek, &nonce, ad, &nonce, plaintext);
+    let r = pad(plaintext).and_then(|padded| encrypt(dek, &nonce, ad, &nonce, &padded));
     scrub_stack();
     r
 }
 
-/// Decrypts a value written by [`seal_column`].
+/// `content` padded to its bucket, in a buffer of exactly that length that
+/// wipes itself.
+fn pad(content: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let n = brev_proto::padded_len(content.len()).ok_or(Error::Malformed)?;
+    let mut out = Zeroizing::new(vec![0u8; n]);
+    brev_proto::pad_into(content, &mut out).map_err(|_| Error::Malformed)?;
+    Ok(out)
+}
+
+/// Decrypts a value written by [`seal_column`] and strips the padding. The
+/// padded plaintext is wiped when it drops; the content is copied into a
+/// `Plaintext` of exact length. Bad padding under a valid tag gives `Crypto`.
 pub(crate) fn open_column(dek: &[u8; 32], ad: &[u8], stored: &[u8]) -> Result<Plaintext, Error> {
     let (nonce, rest) = stored.split_at_checked(NONCE_LEN).ok_or(Error::Crypto)?;
     let nonce: [u8; NONCE_LEN] = nonce.try_into().map_err(|_| Error::Crypto)?;
-    let r = decrypt(dek, &nonce, ad, rest);
+    let r = decrypt(dek, &nonce, ad, rest).and_then(|padded| {
+        let content = brev_proto::unpad(&padded).map_err(|_| Error::Crypto)?;
+        Ok(Plaintext::new(Zeroizing::new(content.to_vec())))
+    });
     scrub_stack();
     r
 }
@@ -258,6 +283,24 @@ pub(crate) fn scrub_stack() -> usize {
     #[cfg(test)]
     SCRUBS.with(|n| n.set(n.get() + 1));
     let mut buf = [0xA5u8; 16 * 1024];
+    std::hint::black_box(&mut buf);
+    buf.zeroize();
+    std::hint::black_box(&buf)
+        .iter()
+        .filter(|&&b| b != 0)
+        .count()
+}
+
+/// [`scrub_stack`] with a 64 KiB buffer (CLAUDE.md §2). Runs once at the end
+/// of every `Brev::unlock`, on the thread that has just run the Secure
+/// Enclave unwrap, where the Phase 2 spike found key-agreement residue up to
+/// 64 KiB deep. Best effort in the same way; a test asserts the result in
+/// release builds.
+#[inline(never)]
+pub(crate) fn scrub_stack_deep() -> usize {
+    #[cfg(test)]
+    DEEP_SCRUBS.with(|n| n.set(n.get() + 1));
+    let mut buf = [0xA5u8; 64 * 1024];
     std::hint::black_box(&mut buf);
     buf.zeroize();
     std::hint::black_box(&buf)
@@ -338,7 +381,7 @@ mod tests {
         let dek: [u8; 32] = random().unwrap();
         let ad = column_ad("messages.body", &[&[1; 16]]);
         let sealed = seal_column(&dek, &ad, b"hello").unwrap();
-        assert_eq!(sealed.len(), NONCE_LEN + 5 + TAG_LEN);
+        assert_eq!(sealed.len(), NONCE_LEN + 256 + TAG_LEN);
         assert_eq!(&open_column(&dek, &ad, &sealed).unwrap()[..], b"hello");
         let other_row = column_ad("messages.body", &[&[2; 16]]);
         assert!(matches!(
@@ -362,6 +405,35 @@ mod tests {
     #[test]
     fn scrub_stack_wipes_its_buffer() {
         assert_eq!(scrub_stack(), 0);
+    }
+
+    /// Also run with `--release` by scripts/test.sh.
+    #[test]
+    fn scrub_stack_deep_wipes_its_buffer() {
+        let before = deep_scrubs();
+        assert_eq!(scrub_stack_deep(), 0);
+        assert_eq!(deep_scrubs(), before + 1);
+    }
+
+    /// A value above the padding maximum is refused before anything is
+    /// encrypted, and a correctly tagged value with bad padding does not
+    /// open.
+    #[test]
+    fn column_padding_is_enforced() {
+        let dek: [u8; 32] = random().unwrap();
+        let big = vec![0u8; brev_proto::MAX_PADDED - 3];
+        assert!(matches!(
+            seal_column(&dek, b"ad", &big),
+            Err(Error::Malformed)
+        ));
+        let n = brev_proto::MAX_PADDED - 4;
+        let sealed = seal_column(&dek, b"ad", &big[..n]).unwrap();
+        assert_eq!(sealed.len(), NONCE_LEN + brev_proto::MAX_PADDED + TAG_LEN);
+        assert_eq!(open_column(&dek, b"ad", &sealed).unwrap().len(), n);
+        // Unpadded content sealed under the right key and AD (a v1 column).
+        let nonce: [u8; NONCE_LEN] = random().unwrap();
+        let raw = encrypt(&dek, &nonce, b"ad", &nonce, b"hello").unwrap();
+        assert!(matches!(open_column(&dek, b"ad", &raw), Err(Error::Crypto)));
     }
 
     /// Every operation on key material ends with one stack scrub, so
