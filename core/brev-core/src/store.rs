@@ -814,6 +814,23 @@ mod tests {
         }
     }
 
+    /// `me()` and `lock()` each end with their own stack scrub, on top of
+    /// the ones inside the crypto calls they make.
+    #[test]
+    fn me_and_lock_scrub_the_stack() {
+        let path = temp_path();
+        let mut core = new_core(&path);
+        let before = crypto::scrubs();
+        drop(core.me().unwrap());
+        // One inside open_column (identity_keys), one of me()'s own.
+        assert_eq!(crypto::scrubs() - before, 2);
+        let before = crypto::scrubs();
+        core.lock();
+        assert_eq!(crypto::scrubs() - before, 1);
+        drop(core);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Mandatory lock test, part 2: the DEK buffer itself is zeroed.
     #[test]
     fn lock_zeroes_the_dek_buffer() {

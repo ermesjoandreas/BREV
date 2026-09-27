@@ -14,6 +14,11 @@ MANIFEST="$REPO_ROOT/core/Cargo.toml"
 # where this script and app/project.yml look for them. `cargo fmt` and
 # `cargo audit` build nothing and have no such flag.
 TARGET_DIR="$REPO_ROOT/core/target"
+# Same deployment target as gen-bindings.sh, so the release test below and
+# the archive the app links share one SQLite build instead of rebuilding it.
+if [[ "$(uname -s)" == Darwin ]]; then
+  export MACOSX_DEPLOYMENT_TARGET=14.0
+fi
 
 if ! command -v cargo >/dev/null 2>&1; then
   echo "error: cargo not found. Install Rust with rustup: https://rustup.rs" >&2

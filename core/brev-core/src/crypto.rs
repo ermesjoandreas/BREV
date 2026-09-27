@@ -125,6 +125,7 @@ thread_local! {
     static LIVE_PLAINTEXTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SECRETS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LIVE_SECRETS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SCRUBS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Test only: `Plaintext` values alive on this thread.
@@ -143,6 +144,12 @@ pub(crate) fn secrets_built() -> usize {
 #[cfg(test)]
 pub(crate) fn live_secrets() -> usize {
     LIVE_SECRETS.with(|n| n.get())
+}
+
+/// Test only: how many times [`scrub_stack`] has run on this thread.
+#[cfg(test)]
+pub(crate) fn scrubs() -> usize {
+    SCRUBS.with(|n| n.get())
 }
 
 /// Test only: compiles only if `T` wipes itself on drop. Memory cannot be
@@ -248,6 +255,8 @@ pub(crate) fn open_message(
 /// result; a test asserts it in release builds (scripts/test.sh).
 #[inline(never)]
 pub(crate) fn scrub_stack() -> usize {
+    #[cfg(test)]
+    SCRUBS.with(|n| n.set(n.get() + 1));
     let mut buf = [0xA5u8; 16 * 1024];
     std::hint::black_box(&mut buf);
     buf.zeroize();
@@ -353,6 +362,33 @@ mod tests {
     #[test]
     fn scrub_stack_wipes_its_buffer() {
         assert_eq!(scrub_stack(), 0);
+    }
+
+    /// Every operation on key material ends with one stack scrub, so
+    /// deleting a call site fails here.
+    #[test]
+    fn every_key_operation_scrubs_the_stack() {
+        fn scrubs_in(f: impl FnOnce()) -> usize {
+            let before = scrubs();
+            f();
+            scrubs() - before
+        }
+        let dek: [u8; 32] = random().unwrap();
+        let (a, b) = (secret(), secret());
+        let (mut pa, mut pb, mut sealed, mut env) = ([0; 32], [0; 32], Vec::new(), None);
+        assert_eq!(scrubs_in(|| pa = public_key(&a)), 1);
+        assert_eq!(scrubs_in(|| pb = public_key(&b)), 1);
+        assert_eq!(
+            scrubs_in(|| sealed = seal_column(&dek, b"ad", b"x").unwrap()),
+            1
+        );
+        assert_eq!(scrubs_in(|| drop(open_column(&dek, b"ad", &sealed))), 1);
+        assert_eq!(
+            scrubs_in(|| env = seal_message(&a, &pb, [1; 32], [2; 32], b"x").ok()),
+            1
+        );
+        let env = env.unwrap();
+        assert_eq!(scrubs_in(|| drop(open_message(&b, &pa, &env))), 1);
     }
 
     #[test]

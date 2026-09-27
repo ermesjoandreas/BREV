@@ -21,6 +21,13 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
+# The app's deployment target (app/project.yml, D-0006). Without it the C
+# code in the archive (bundled SQLite, built by the cc crate) targets the SDK
+# version of this Mac, not the oldest macOS the app claims to run on.
+if [[ "$(uname -s)" == Darwin ]]; then
+  export MACOSX_DEPLOYMENT_TARGET=14.0
+fi
+
 echo "==> Building brev-core (release)"
 # One build produces both artefacts: libbrev_core.a, which the app links, and
 # the shared library (.dylib/.so) that bindgen reads UniFFI metadata from.
