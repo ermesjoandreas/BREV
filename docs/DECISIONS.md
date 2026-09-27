@@ -259,8 +259,8 @@ Numbering is `D-NNNN` and never reused.
      flag; a Debug build contains `get-task-allow` (expected).
   5. The app launches sandboxed, the window is titled "Brev", the app menu
      has only "Avslutt Brev", ⌘Q quits, closing the window quits.
-  6. `log stream --level info --predicate 'subsystem == "no.brev.app"'`,
-     started before launch, shows `brev-core ping: brev-core 0.0.1 ok`
+  6. `/usr/bin/log stream --level info --predicate 'subsystem == "no.brev.app"'`
+     (full path: `log` is a shell builtin in zsh), started before launch, shows `brev-core ping: brev-core 0.0.1 ok`
      (the line is `.info`, so Console.app hides it unless "Include Info
      Messages" is on, and `log show` after quit will not return it).
   7. Nothing appears under `~/Library/Containers/no.brev.app/Data/Library/Saved
@@ -323,6 +323,57 @@ Numbering is `D-NNNN` and never reused.
   without the build instructions around it.
 - **Verified:** Linux, 2026-09-26: `diff` of the extracted sections is empty.
 
+### D-0013 — Phase 0 Mac checklist run on macOS 26.2: all ten points pass
+
+- **Date:** 2026-09-27
+- **Decision:** Phase 0 is closed. The checklist in D-0010 was run on macOS
+  26.2 (25C56), Xcode 26.2 (17C52), Apple Silicon, at commit `bd41a4f`. No
+  source change was needed; `sharingType = .none` stays the only capture
+  defence for now.
+- **Verified:**
+  1. `xcodegen generate` accepted `project.yml`; `git status` clean afterwards.
+  2. The generated `Info.plist` has none of the keys forbidden in D-0009.
+  3. `scripts/build.sh` succeeded on the first run; no dylib linked; arm64.
+  4. Release: `flags=0x10002(adhoc,runtime)`, entitlements are only
+     `com.apple.security.app-sandbox`. Debug: `app-sandbox` plus
+     `get-task-allow`, as expected.
+  5. Window titled "Brev"; menu bar has the Apple menu and "Brev"; ⌘Q quits;
+     the red close button quits and the app leaves the Dock.
+  6. The log shows `brev-core ping: brev-core 0.0.1 ok`.
+  7. Nothing under `Saved Application State` after three launches.
+  8. With the Brev window frontmost (`CGWindowListCopyWindowInfo`: z-order 0,
+     `kCGWindowSharingState` 0): a full-screen `screencapture` shows the
+     desktop and the windows behind it, as if Brev were not there; a 3-second
+     `screencapture -V` recording likewise; `screencapture -l <window id>`
+     fails with "could not create image from window".
+  9. Fresh clone from GitHub → `scripts/build.sh` → the app launches, also
+     after `cargo clean --release -p brev-core`.
+  10. `scripts/test.sh` passes under bash 3.2.57 including the Debug compile;
+      in a fresh clone it prints the "xcodebuild skipped: run scripts/build.sh
+      first; missing:" message with all three paths and exits 0.
+- **Deviations and findings:**
+  - The capture result is stronger than the checklist wording: the window is
+    absent from the capture, not rendered empty. Only Apple's `screencapture`
+    was tested; a third-party ScreenCaptureKit client was not.
+  - Debug builds have no Hardened Runtime. Xcode prints "Disabling hardened
+    runtime with ad-hoc codesigning" and signs with `flags=0x2(adhoc)`.
+    Release is unaffected. Debug builds must never be used for the Phase 2
+    verification checklist.
+  - The `scripts/test.sh` Debug build lands in
+    `~/Library/Developer/Xcode/DerivedData`, not under `app/build`.
+  - The "Brev" menu has a second item, "Avslutt og behold vinduer". macOS
+    adds it itself as the Option-key alternate of Quit. Point 7 shows that no
+    window state is saved.
+  - Points 5 and 8 were driven through System Events (Accessibility), which
+    could read the window title and menu names, click the close button and
+    send ⌘Q. That is fine while the window is empty; Phase 2 must make content
+    views opaque to it and reject synthetic input (§1.2, §2).
+  - `cargo-audit` is not installed on this Mac, so `test.sh` skipped the
+    audit with its warning. It must be installed before Phase 1, whose
+    definition of done requires `cargo audit` clean.
+  - Point 6 as written failed in zsh, where `log` is a builtin; the checklist
+    now says `/usr/bin/log`.
+
 ---
 
 ## Phase 0 summary
@@ -341,7 +392,7 @@ with a hardened, sandboxed, ad-hoc-signed single target),
 `app/Brev.entitlements`, `app/Sources/main.swift`, `AppDelegate.swift`,
 `MainWindow.swift`, `Brev-Bridging-Header.h`, `nb.lproj/Localizable.strings`.
 
-**Definition of done status:** `cargo test` passes. "`scripts/build.sh`
-produces a runnable `.app` from a clean checkout" and "the window opens" are
-pending the Mac checklist in D-0010. Phase 1 must not start until that
-checklist has been run and any fix it needs is logged here.
+**Definition of done status:** met on 2026-09-27. `cargo test` passes,
+`scripts/build.sh` produces a runnable `.app` from a clean checkout, and the
+window opens (Mac checklist in D-0010, results in D-0013). Before Phase 1:
+install `cargo-audit`.
