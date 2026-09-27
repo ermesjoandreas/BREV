@@ -47,3 +47,7 @@ Out of scope — explicitly NOT defended against:
 * Kernel/root compromise of macOS, or hardware attacks.
 * A camera pointed at the screen, or the user retyping content elsewhere.
 * The recipient choosing to leak what they received.
+
+Accepted residual risk — known, reviewed, and not fixed:
+
+* Transient stack copies of key material inside audited crates that no `zeroize` feature reaches: (1) ChaCha20 intermediates when XChaCha derives its subkey (HChaCha20 state), (2) the HKDF intermediate key (PRK) inside `hkdf`, (3) by-value copies of the X25519 secret inside `x25519-dalek`. They cannot be wiped without `unsafe`, and even `unsafe` could not guarantee it. Mitigation: `scrub_stack()` overwrites 16 KiB of stack after each crypto operation, and a release-mode test proves the wipe is not optimised away. Out of the threat model: reading another process's memory already needs root or a kernel compromise (Hardened Runtime blocks debuggers, and macOS encrypts swap).

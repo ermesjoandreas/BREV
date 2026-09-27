@@ -29,6 +29,10 @@ cargo clippy --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace 
 echo "==> cargo test"
 cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace
 
+# scrub_stack() must survive the optimiser, so its test also runs optimised.
+echo "==> cargo test --release (scrub_stack)"
+cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-core --lib scrub_stack
+
 # Wipe-on-drop of every key the crypto crates hold depends on their `zeroize`
 # features (CLAUDE.md §1.10). Memory cannot be inspected without `unsafe`, so
 # check that each feature is actually enabled in brev-core's build.

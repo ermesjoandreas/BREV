@@ -169,14 +169,24 @@ pub(crate) fn open_message(
 
 /// Best-effort overwrite of the stack region that the cipher, HKDF and
 /// X25519 code just used. Those crates leave key-equivalent locals there
-/// (the HChaCha20 state, the HKDF PRK, by-value scalar copies) that their
-/// `zeroize` features do not reach. Unobservable without `unsafe`, so it is
-/// defence in depth, not a guarantee (DESIGN §8).
+/// (the HChaCha20 state, the HKDF intermediate key, by-value scalar copies)
+/// that no `zeroize` feature reaches. Unobservable without `unsafe`, so it is
+/// defence in depth, not a guarantee: an accepted residual risk (CLAUDE.md §2).
+///
+/// Fills a stack buffer with a pattern, wipes it with volatile writes, and
+/// returns how many bytes are still non-zero (always 0). The fill and the
+/// read-back both go through `black_box`, so the optimiser must do them on
+/// real memory and cannot drop the wipe as a dead store. Callers ignore the
+/// result; a test asserts it in release builds (scripts/test.sh).
 #[inline(never)]
-pub(crate) fn scrub_stack() {
-    let mut buf = [0u8; 16 * 1024];
+pub(crate) fn scrub_stack() -> usize {
+    let mut buf = [0xA5u8; 16 * 1024];
+    std::hint::black_box(&mut buf);
     buf.zeroize();
-    std::hint::black_box(&buf);
+    std::hint::black_box(&buf)
+        .iter()
+        .filter(|&&b| b != 0)
+        .count()
 }
 
 /// HKDF-SHA256(salt = nonce, ikm = X25519(mine, theirs),
@@ -268,6 +278,13 @@ mod tests {
             open_column(&other_dek, &ad, &sealed),
             Err(Error::Crypto)
         ));
+    }
+
+    /// Also run with `--release` by scripts/test.sh, where the optimiser
+    /// would drop a wipe it could prove dead.
+    #[test]
+    fn scrub_stack_wipes_its_buffer() {
+        assert_eq!(scrub_stack(), 0);
     }
 
     #[test]

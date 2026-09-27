@@ -50,6 +50,10 @@ Out of scope — explicitly NOT defended against:
 * A camera pointed at the screen, or the user retyping content elsewhere.
 * The recipient choosing to leak what they received.
 
+Accepted residual risk — known, reviewed, and not fixed:
+
+* Transient stack copies of key material inside audited crates that no `zeroize` feature reaches: (1) ChaCha20 intermediates when XChaCha derives its subkey (HChaCha20 state), (2) the HKDF intermediate key (PRK) inside `hkdf`, (3) by-value copies of the X25519 secret inside `x25519-dalek`. They cannot be wiped without `unsafe`, and even `unsafe` could not guarantee it. Mitigation: `scrub_stack()` overwrites 16 KiB of stack after each crypto operation, and a release-mode test proves the wipe is not optimised away. Out of the threat model: reading another process's memory already needs root or a kernel compromise (Hardened Runtime blocks debuggers, and macOS encrypts swap).
+
 ## 3. Architecture
 
 Two languages, strict separation:
@@ -156,7 +160,7 @@ Each phase ends with a short summary in `docs/DECISIONS.md` and passing `scripts
 * `brev-relay`: minimal axum server. Endpoints: register public identity, submit envelope, poll envelopes for a recipient. Stores only ciphertext + routing metadata. Deletes envelopes after delivery. No accounts yet beyond a public key.
 * `RelayTransport` in `brev-core` (HTTP, polling every N seconds; no websockets yet).
 * Envelope signatures now come from the Secure Enclave via Swift: `core.sign_request(bytes) -> Swift signs with Touch ID → core.attach_signature()`. Relay verifies the P-256 signature against the registered identity; `brev-core` verifies it on receive (`p256`, §4). Swift never verifies.
-* Padding: the plaintext payload is padded to fixed buckets (256 B / 1 KiB / 4 KiB / 16 KiB) before encryption, as part of the envelope format in `brev-proto`. Test: payloads of different lengths within one bucket give ciphertexts of equal length.
+* Padding: the plaintext payload is padded before encryption, as part of the envelope format in `brev-proto`, to fixed buckets of 256 B / 1 KiB / 4 KiB / 16 KiB, and above that to the next multiple of 16 KiB. The padding is unambiguous so the recipient can strip it (a length prefix; PKCS#7 cannot express more than 255 bytes of padding). Hard maximum: 1 MiB padded payload, defined in `brev-proto` and enforced by both the app and the relay. Tests: payloads within one bucket give ciphertexts of equal length; boundary sizes (exact bucket, bucket + 1, maximum, maximum + 1).
 * Contact exchange: out-of-band by sharing a short identity code (base32 of public key hash) which the app renders; no QR codes yet.
 * Definition of done: two Macs (or two app instances with separate data dirs) exchange messages through a local relay; relay DB contains no plaintext (test it).
 

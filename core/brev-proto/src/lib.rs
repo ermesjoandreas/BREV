@@ -4,10 +4,12 @@
 //! carries sender id, recipient id, nonce, ciphertext and a signature, and
 //! nothing else.
 //!
-//! TODO(Phase 3): pad the plaintext payload to fixed buckets (256 B / 1 KiB /
-//! 4 KiB / 16 KiB) before encryption, here as part of the envelope format,
-//! with a test that payloads of different lengths within one bucket give
-//! ciphertexts of equal length (CLAUDE.md §5 Phase 3).
+//! TODO(Phase 3): pad the plaintext payload before encryption, here as part
+//! of the envelope format: buckets of 256 B / 1 KiB / 4 KiB / 16 KiB, then the
+//! next multiple of 16 KiB; length-prefixed so the recipient can strip it;
+//! hard maximum 1 MiB, enforced by the app and the relay. Tests for equal
+//! ciphertext length within a bucket and for exact bucket, bucket + 1,
+//! maximum and maximum + 1 (CLAUDE.md §5 Phase 3).
 
 #![forbid(unsafe_code)]
 
