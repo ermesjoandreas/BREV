@@ -54,13 +54,11 @@ Accepted residual risk — known, reviewed, and not fixed:
 
 * Transient stack copies of key material inside audited crates that no `zeroize` feature reaches: (1) ChaCha20 intermediates when XChaCha derives its subkey (HChaCha20 state), (2) the HKDF intermediate key (PRK) inside `hkdf`, (3) by-value copies of the X25519 secret inside `x25519-dalek`. They cannot be wiped without `unsafe`, and even `unsafe` could not guarantee it. Mitigation: `scrub_stack()` overwrites 16 KiB of stack after each crypto operation, and a release-mode test proves the wipe is not optimised away. Out of the threat model: reading another process's memory already needs root or a kernel compromise (Hardened Runtime blocks debuggers, and macOS encrypts swap).
 * Internal copies inside Apple frameworks that Brev cannot wipe: Core Text / CoreGraphics while a line is drawn, and CryptoKit / Security while the Secure Enclave unwraps the DEK. Mitigation: content is drawn one line at a time from a wipeable buffer, never laid out as a whole body, and `unlock` overwrites 64 KiB of stack. Out of the threat model for the same reason as above.
-* The Secure Enclave key files are not bound to Brev. Another process of the same user that can read Brev's container can copy a key file and ask for Touch ID to use Brev's key (tested: an unsandboxed program unwrapped the DEK this way). It still needs the user's finger. The system dialog does not protect in practice: in a test the owner could not tell Brev's dialog from the other program's. The rule is therefore behavioural: Brev asks for Touch ID only right after the user clicks "Lås opp", and onboarding says to cancel any other Touch ID request.
-* File substitution: a process that can write Brev's container (Full Disk Access, or the user allowing access to other apps' data) can replace the key files and stores with its own, so that letters written after the user's next unlock are readable by it. The only visible sign is that the history is gone; onboarding says not to write new letters if that happens. If a login-keychain anchor of the KEK proves to work without prompts, Brev refuses to unlock when it does not match.
+* File substitution of the stores: a process that can write Brev's container can delete or replace `brev.db` and the echo stores. It cannot make stores that open under Brev's DEK, because the DEK and the keys live in the keychain, bound to Brev (§3.2). Replaced stores fail to unlock; deleted stores lose the history. Onboarding says not to write new letters if the history is suddenly gone.
 * Keystrokes exist briefly in macOS event objects (one character per event) and in the window server; secure event input stops event taps, not those.
 * Pixels of an open letter live in the window's backing stores, and in the protected layer's pixel buffers, until blank-on-lock (the buffers are zeroed in place on lock).
 * Phase 2 only: the two built-in echo contacts keep copies of every letter in two more stores under the same key.
 * Freed memory inside Apple frameworks is overwritten by the documented malloc debugging variable `MallocScribble=1`, set in Info.plist (`LSEnvironment`); Brev refuses to unlock if it is not in effect.
-* Key files and stores are held only until keychain storage exists: before Brev holds real letters (Phase 5 at the latest), the keys move to the keychain under a Developer ID, which binds them to Brev and closes the two file risks above.
 
 ## 3. Architecture
 
@@ -98,7 +96,7 @@ brev/
 * `SecureComposeView: NSView` — same rendering, custom key handling, calls `EnableSecureEventInput()` on focus and `DisableSecureEventInput()` on blur. Rejects events where `CGEventGetIntegerValueField(event, .eventSourceUnixProcessID) != 0` (synthetic input from another process).
 * Main window: `sharingType = .none`, `isExcludedFromWindowsMenu = true`, `titlebarAppearsTransparent`, no content in title. `sharingType = .none` alone is not enough on macOS 26: `CGDisplayStream` and `AVCaptureScreenInput` still capture such a window. So every view that can show content draws into pixel buffers shown through an `AVSampleBufferDisplayLayer` with `preventsCapture = true`; `sharingType = .none` stays as the first defence. Sheets and child windows get the same settings as their parent.
 * Auto-lock: on `NSApplication.didResignActiveNotification`, on screen lock, and after N minutes idle → call `core.lock()`, blank all views.
-* Touch ID gate: `LAContext` with `.deviceOwnerAuthenticationWithBiometrics` and `localizedFallbackTitle = ""` (no password button). Secure Enclave keys are CryptoKit `SecureEnclave.P256` keys created with `SecAccessControlCreateWithFlags(kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, [.privateKeyUsage, .biometryCurrentSet])`. Each key's `dataRepresentation` (usable only by this Mac's Secure Enclave) is stored as a file in the app container, mode 0600. Not in the keychain: an ad-hoc signed app gets `errSecMissingEntitlement` (-34018) there. Keychain storage returns in Phase 5 with a Developer ID.
+* Touch ID gate: `LAContext` with `.deviceOwnerAuthenticationWithBiometrics` and `localizedFallbackTitle = ""` (no password button). Both Enclave keys are permanent Secure Enclave `SecKey`s created with `SecKeyCreateRandomKey` (`kSecAttrTokenIDSecureEnclave`, `kSecUseDataProtectionKeychain`, access group `AV26DNQ5SC.no.brev.app`) and `SecAccessControlCreateWithFlags(kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, [.privateKeyUsage, .biometryCurrentSet])`. The wrapped DEK is a generic-password item in the same access group. The keychain binds all three to Brev's signing identity, so no other program can use, read or replace them. The app is signed by team `AV26DNQ5SC` with a provisioning profile; ad-hoc builds cannot reach these items.
 * Notifications via `UserNotifications`, text exactly "Ny melding" (no sender name, no content).
 * Bundle: Hardened Runtime ON, App Sandbox ON, `get-task-allow` OFF, library validation ON, no `NSAppleScriptEnabled`, no `NSServices`, no document types, no URL types.
 * UI language: Norwegian (bokmål). Keep strings in `Localizable.strings`.
@@ -108,17 +106,17 @@ brev/
 The Secure Enclave can only hold P-256 keys, so:
 
 * Identity signing key: P-256 in Secure Enclave, Touch ID-gated. Signs every outgoing envelope. Public key = the user's identity.
-* Key-encryption key (KEK): a second P-256 Enclave key (CryptoKit `SecureEnclave.P256.KeyAgreement`). The 32-byte data-encryption key (DEK) is wrapped to it with HPKE (RFC 9180, `P256_SHA256_AES_GCM_256`, CryptoKit) and unwrapped with one Touch ID prompt. The DEK lives only in Rust memory while unlocked.
+* Key-encryption key (KEK): a second P-256 Enclave key used with `SecKeyCreateDecryptedData` (ECIES, `.eciesEncryptionCofactorVariableIVX963SHA256AESGCM`) to unwrap a 32-byte data-encryption key (DEK) that lives only in Rust memory while unlocked. One Touch ID prompt per unlock.
 * DEK encrypts the SQLite content columns (XChaCha20-Poly1305).
 * X25519 message keys (for encrypting to contacts) are generated in Rust and stored in the DB, encrypted under the DEK.
-* Unlock flow: Swift → Touch ID → Enclave unwraps DEK (HPKE) → `core.unlock(dek: &[u8])` (no copy across the FFI) → Rust copies it into its own buffer → Swift wipes its buffer in place immediately after the call.
+* Unlock flow: Swift → Touch ID → Enclave unwraps DEK (ECIES) → `core.unlock(dek: &[u8])` (no copy across the FFI) → Rust copies it into its own buffer → Swift wipes its buffer and the `CFData` in place immediately after the call.
 * Lock flow: `core.lock()` → zeroize DEK + all cached plaintext.
 
 ## 4. Approved dependencies
 
 Rust: `uniffi`, `rusqlite` (features `bundled`), `chacha20poly1305` (XChaCha), `x25519-dalek`, `ed25519-dalek` (relay-side only), `p256` (feature `ecdsa`; verifies Secure Enclave P-256 signatures in `brev-core` and `brev-relay`; Swift only signs), `poly1305` (feature `zeroize` only, to wipe the one-time MAC key), `zeroizing-alloc` (1Password; `brev-core`'s global allocator, zeroes every freed block), `hkdf`, `sha2`, `rand` (with `getrandom`), `zeroize`, `serde` + `serde_json`, `thiserror`, `anyhow` (bin crates only), `tokio` + `axum` + `reqwest` (relay/transport only), `tracing` (never log content).
 
-Swift: Foundation, AppKit, Security, LocalAuthentication, CryptoKit (only for Enclave interop), AVFoundation + CoreMedia + CoreVideo (only for the capture-protected content layer), UserNotifications, DeviceCheck (Phase 4). No third-party Swift packages without asking.
+Swift: Foundation, AppKit, Security, LocalAuthentication, CryptoKit (only if an Enclave operation needs it), AVFoundation + CoreMedia + CoreVideo (only for the capture-protected content layer), UserNotifications, DeviceCheck (Phase 4). No third-party Swift packages without asking.
 
 Tooling: `cargo`, `uniffi-bindgen`, `xcodegen`, `xcodebuild`, `swiftlint` (optional), `cargo-audit`, `cargo-deny`.
 
@@ -189,7 +187,7 @@ Each phase ends with a short summary in `docs/DECISIONS.md` and passing `scripts
 * `cargo-deny` config, `cargo-audit` in CI, Swift build warnings as errors.
 * Memory review: search for every place plaintext exists in Swift; ensure it is a `[UInt8]` buffer that is zeroed, never a `String` that lingers.
 * Notarization steps documented (not required to run).
-* Developer ID and keychain storage: the Secure Enclave keys move from container files to the keychain (bound to Brev by its signing identity). Required before Brev holds real letters.
+* Developer ID distribution: sign Release builds with the Developer ID certificate and a Developer ID provisioning profile carrying the same keychain access group, and document notarization. (Keychain storage itself arrived in Phase 2, D-0035.)
 * Write `docs/SECURITY.md` for external reviewers.
 
 ## 6. Working conventions

@@ -1332,3 +1332,38 @@ the new numbers.
   Recording permission is not documented and not yet tested.
 - **Numbering:** the entries planned in `docs/PHASE2_DESIGN.md` §13 now
   shift by two (D-0035 to D-0060).
+
+### D-0035 — Keys in the keychain now: team signing, Secure Enclave SecKeys, ECIES (reverses D-0032 items 1–2)
+
+- **Date:** 2026-09-28
+- **Decision:** The product owner has a paid Apple Developer team
+  (`AV26DNQ5SC`) and approved using it now. Brev is signed by that team with
+  a Mac App Development provisioning profile (automatic signing registered
+  the App ID `no.brev.app` and this Mac). Both Secure Enclave keys are
+  permanent `SecKey`s in the data protection keychain, access group
+  `AV26DNQ5SC.no.brev.app`; the wrapped DEK is a generic-password item in the
+  same group. The DEK is unwrapped with `SecKeyCreateDecryptedData` (ECIES)
+  as the original §3.3 said. This reverses D-0032 item 1 (container files +
+  HPKE) and closes D-0032 item 2 and D-0033 items 1 and 5: no key material
+  is left in files, and other programs can neither use nor replace it.
+  File substitution now only affects the stores (§2). D-0005's ad-hoc
+  signing is replaced for app builds; Developer ID distribution stays in
+  Phase 5.
+- **Reasoning:** Keychain items are bound to the app's signing identity
+  and entitlements, which is what the key-file approach lacked (the owner's
+  Touch ID test showed another program could use a copied key blob, and
+  the dialog did not tell them apart). Doing it before WP5 means no
+  migration from key files later.
+- **Verified:** macOS 26.2, 2026-09-28, with a windowless probe app
+  (bundle id `no.brev.app`, sandboxed, hardened, signed "Apple
+  Development", team `AV26DNQ5SC`, entitlements `application-identifier`,
+  `team-identifier`, `keychain-access-groups`). `xcodebuild
+  -allowProvisioningUpdates -allowProvisioningDeviceRegistration` built it
+  (the first attempt without device registration failed with "Device …
+  isn't registered"). Launched with `open -g`: a permanent Secure Enclave
+  key with `[.privateKeyUsage, .biometryCurrentSet]` was created with no
+  prompt; `SecItemCopyMatching` found it (status 0); ECIES wrap of 32 bytes
+  gave 113 bytes with no prompt; the item was deleted (status 0). Unwrap
+  with Touch ID is not yet tested with this key type in the app.
+- **Numbering:** the entries planned in `docs/PHASE2_DESIGN.md` §13 now
+  shift by three (D-0036 to D-0061).

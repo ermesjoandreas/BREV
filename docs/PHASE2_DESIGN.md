@@ -611,7 +611,8 @@ Starting points (copy them now; `/private/tmp` is volatile): WP1 `R/core/brev-co
 
 ## 13. Decision-log entries to add (D-0033 onward)
 
-> Numbering note (2026-09-28): D-0033 and D-0034 were used for owner decisions (D-0033: answers to this design's open questions; D-0034: the capture defence). Every number below shifts by two (D-0033 → D-0035 … D-0058 → D-0060). The topics of D-0055 and D-0056 are already recorded in D-0033. WP11 is no longer conditional: it is part of Phase 2's definition of done (D-0034).
+> Keys note (2026-09-28, D-0035): §5's key files + HPKE are replaced by permanent Secure Enclave `SecKey`s in the data protection keychain (access group `AV26DNQ5SC.no.brev.app`), the wrapped DEK as a generic-password item in the same group, `SecKeyCreateDecryptedData` (ECIES) for unwrap, and team signing with automatic provisioning. Anything below about `kek.se`, `identity.se`, `dek.hpke`, HPKE, the rogue-Brev test (R) or the login-keychain anchor (A, WP9) is superseded.
+> Numbering note (2026-09-28): D-0033, D-0034 and D-0035 were used for owner decisions (answers to this design's questions; the capture defence; keychain keys). Every number below shifts by three (D-0033 → D-0036 … D-0058 → D-0061). The topics of D-0055 and D-0056 are already recorded in D-0033. WP11 is no longer conditional: it is part of Phase 2's definition of done (D-0034).
 
 - D-0033: Phase 2 UniFFI surface: `Brev` + `OpenText`, unit-variant `BrevError`, content in only as `&[u8]` + length, out only as 960-byte chunks, no content `String`; no replies or read state in Phase 2.
 - D-0034: `OpenText` registry; `lock()` closes every open text; Swift reads a text completely and closes it.
