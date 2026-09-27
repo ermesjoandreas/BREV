@@ -7,12 +7,15 @@
 // content case at four sizes) under MallocScribble=1, as the app runs, plus
 // case 6's control without scribbling, with TMPDIR under core/target/harness.
 //
-// usage: harness units | dek | content <units> [--no-scribble] | kept | control
+// usage: harness units | shell | dek | content <units> [--no-scribble] | kept | control
 //        harness needles <file>     (the helper run that `dek` starts)
+//        harness argdomain -NSTraceEvents YES -NSZombieEnabled YES
+//                                   (the helper run that `shell` starts)
 //
-// Case numbers are those of §11; case 2 (EditModel, KeyTranslator,
-// InputFilter, LockState, LaunchGuard) arrives with those files. Output is
-// content-free: check names and hit counts only.
+// Case numbers are those of §11. Case 2's app-shell part (InputFilter,
+// LockState, LaunchGuard) is `shell`; its EditModel and KeyTranslator parts
+// arrive with those files. Output is content-free: check names and hit
+// counts only.
 
 import CoreGraphics
 import CoreText
@@ -288,6 +291,136 @@ func caseUnits() {
           (try? Enclave.open(Data(count: 112), with: kek)) == nil)
 }
 
+// MARK: - Case 2, the app shell's part: InputFilter, LockState, LaunchGuard
+
+func caseShell() {
+    // InputFilter on CGEvents made in memory; nothing is posted.
+    let me = Int64(getpid())
+    let events: [(String, CGEvent?)] = [
+        ("key", CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)),
+        ("click", CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: .zero,
+                          mouseButton: .left)),
+        ("scroll", CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 1, wheel2: 0, wheel3: 0)),
+    ]
+    for (name, event) in events {
+        guard let e = event else {
+            check("InputFilter: a \(name) event can be made", false)
+            continue
+        }
+        check("InputFilter: a \(name) event made here has this process's PID and is dropped",
+              e.getIntegerValueField(.eventSourceUnixProcessID) == me && InputFilter.isSynthetic(e))
+        e.setIntegerValueField(.eventSourceUnixProcessID, value: 0)
+        check("InputFilter: \(name) with PID 0 is kept", !InputFilter.isSynthetic(e))
+        e.setIntegerValueField(.eventSourceUnixProcessID, value: 1)
+        check("InputFilter: \(name) with another PID is dropped", InputFilter.isSynthetic(e))
+        e.setIntegerValueField(.eventSourceUnixProcessID, value: me)
+        check("InputFilter: \(name) with Brev's own PID is dropped (no exception)", InputFilter.isSynthetic(e))
+    }
+    check("InputFilter: an event without a CGEvent is dropped",
+          InputFilter.isSynthetic(nil) && InputFilter.sourcePID(nil) == -1)
+
+    // LockState
+    let all: [LockReason] = [.resignActive, .screenLocked, .sleep, .sessionResign, .idle, .manual, .terminate]
+    let s = LockState()
+    check("LockState: starts locked, generation 0, no auth",
+          !s.unlocked && !s.authInFlight && s.generation == 0 && all.allSatisfy { s.shouldLock(for: $0) })
+    var token = s.beginUnlock()
+    check("LockState: resign-active during auth does not lock; every other reason does",
+          s.authInFlight && !s.shouldLock(for: .resignActive) && all.dropFirst().allSatisfy { s.shouldLock(for: $0) })
+    check("LockState: an unlock that ends while Brev is active unlocks",
+          s.endUnlock(token, succeeded: true, appActive: true) && s.unlocked && !s.authInFlight)
+    check("LockState: lock reports that Brev was unlocked; a second lock is harmless",
+          s.lock() && !s.lock() && !s.unlocked && s.generation == 2)
+    token = s.beginUnlock()
+    s.lock()
+    check("LockState: a stale generation discards an unlock",
+          !s.endUnlock(token, succeeded: true, appActive: true) && !s.unlocked && !s.authInFlight)
+    token = s.beginUnlock()
+    check("LockState: an unlock that ends while Brev is inactive is discarded",
+          !s.endUnlock(token, succeeded: true, appActive: false) && !s.unlocked)
+    token = s.beginUnlock()
+    check("LockState: a failed unlock ends the auth; resign-active locks again",
+          !s.endUnlock(token, succeeded: false, appActive: true) && !s.unlocked && !s.authInFlight
+            && s.shouldLock(for: .resignActive))
+    let t0: UInt64 = 1_000_000_000_000, limit = LockState.idleLimitNanos
+    check("LockState: idle at 300 s, not before, not with a clock behind the last input",
+          limit == 300_000_000_000 && !LockState.isIdle(now: t0 + limit - 1, lastInput: t0)
+            && LockState.isIdle(now: t0 + limit, lastInput: t0) && !LockState.isIdle(now: t0 - 1, lastInput: t0))
+
+    // LaunchGuard on injected environments and defaults
+    check("LaunchGuard: only argv[0] is allowed",
+          LaunchGuard.argumentsAllowed(["/Applications/Brev.app/Contents/MacOS/Brev"])
+            && !LaunchGuard.argumentsAllowed(["Brev", "-NSTraceEvents", "YES"]) && !LaunchGuard.argumentsAllowed(["Brev", "x"]))
+    let defaults = UserDefaults.standard
+    check("LaunchGuard: no unsafe default in this process to begin with", LaunchGuard.unsafeDefaults(defaults).isEmpty)
+    let safe = ["PATH": "/usr/bin:/bin", "HOME": "/Users/x", "MallocScribble": "1",
+                "__CFBundleIdentifier": "no.brev.app", "XPC_SERVICE_NAME": "application.no.brev.app"]
+    check("LaunchGuard: a clean environment with MallocScribble=1 is safe",
+          LaunchGuard.verdict(environment: safe, defaults: defaults) == .safe)
+    var scribble = safe
+    scribble["MallocScribble"] = nil
+    let missing = LaunchGuard.verdict(environment: scribble, defaults: defaults)
+    scribble["MallocScribble"] = "0"
+    check("LaunchGuard: MallocScribble missing or not 1 re-executes",
+          missing == .reexec && LaunchGuard.verdict(environment: scribble, defaults: defaults) == .reexec)
+    for prefix in LaunchGuard.unsafePrefixes {
+        var env = safe
+        env[prefix + "Enabled"] = "YES"
+        let first = LaunchGuard.verdict(environment: env, defaults: defaults)
+        env[LaunchGuard.reexecMarker] = "1"
+        let again = LaunchGuard.verdict(environment: env, defaults: defaults)
+        let cleaned = LaunchGuard.cleanedEnvironment(env)
+        check("LaunchGuard: \(prefix)… re-executes once, then is unsafe; the cleaned environment is safe",
+              LaunchGuard.unsafeVariables(env) == [prefix + "Enabled"] && first == .reexec && again == .unsafe
+                && LaunchGuard.verdict(environment: cleaned, defaults: defaults) == .safe)
+    }
+    var dirty = safe
+    dirty["NSZombieEnabled"] = "YES"
+    dirty["OBJC_PRINT_LOAD_METHODS"] = "YES"
+    dirty["MallocScribble"] = "0"
+    let cleaned = LaunchGuard.cleanedEnvironment(dirty)
+    check("LaunchGuard: cleaning drops the unsafe variables and keeps the rest",
+          LaunchGuard.unsafeVariables(dirty) == ["NSZombieEnabled", "OBJC_PRINT_LOAD_METHODS"]
+            && cleaned["MallocScribble"] == "1" && cleaned[LaunchGuard.reexecMarker] == "1"
+            && cleaned.count == safe.count + 1 && safe.allSatisfy { k, v in k == "MallocScribble" || cleaned[k] == v })
+    // Defaults, through the registration domain (in memory only).
+    for key in LaunchGuard.unsafeDefaultKeys {
+        defaults.register(defaults: [key: true])
+        let on = LaunchGuard.verdict(environment: safe, defaults: defaults)
+        let onDirty = LaunchGuard.verdict(environment: dirty, defaults: defaults)
+        defaults.register(defaults: [key: false])
+        check("LaunchGuard: the default \(key) makes a launch unsafe, and re-executing cannot help",
+              on == .unsafe && onDirty == .unsafe && LaunchGuard.verdict(environment: safe, defaults: defaults) == .safe)
+    }
+    // Arguments reach the argument domain: a helper run started with two.
+    let helper = Process()
+    helper.executableURL = Bundle.main.executableURL
+    helper.arguments = ["argdomain", "-NSTraceEvents", "YES", "-NSZombieEnabled", "YES"]
+    let pipe = Pipe()
+    helper.standardOutput = pipe
+    do { try helper.run() } catch {
+        check("the argument-domain helper run starts", false, "\(error)")
+        return
+    }
+    let out = pipe.fileHandleForReading.readDataToEndOfFile()
+    helper.waitUntilExit()
+    for line in String(decoding: out, as: UTF8.self).split(separator: "\n") { print("  helper: " + line) }
+    check("the argument-domain helper run passes", helper.terminationStatus == 0, "status \(helper.terminationStatus)")
+}
+
+/// The helper run of `shell`, started with -NSTraceEvents YES -NSZombieEnabled YES.
+func caseArgumentDomain() {
+    let defaults = UserDefaults.standard
+    check("launched with two debugging arguments: both defaults are true",
+          LaunchGuard.unsafeDefaults(defaults) == ["NSTraceEvents", "NSZombieEnabled"])
+    defaults.removeVolatileDomain(forName: UserDefaults.argumentDomain)
+    print("note removeVolatileDomain alone leaves \(LaunchGuard.unsafeDefaults(defaults).count) of 2")
+    LaunchGuard.clearArgumentDomain()
+    let cf = CFPreferencesCopyAppValue("NSTraceEvents" as CFString, kCFPreferencesCurrentApplication)
+    check("after clearArgumentDomain: neither default is set (UserDefaults and CFPreferences)",
+          LaunchGuard.unsafeDefaults(defaults).isEmpty && cf == nil)
+}
+
 // MARK: - Case 3: the DEK hand-off and HPKE needles
 
 func caseDEK() {
@@ -502,6 +635,8 @@ func caseControl() {
 let args = Array(CommandLine.arguments.dropFirst())
 switch (args.first, args.count) {
 case ("units", 1): caseUnits()
+case ("shell", 1): caseShell()
+case ("argdomain", 5): caseArgumentDomain()
 case ("needles", 2):
     do { try NeedleFile.make(at: URL(fileURLWithPath: args[1])) } catch {
         print("FAIL needles: \(error)")
@@ -518,7 +653,7 @@ case ("content", 2), ("content", 3):
 case ("kept", 1): caseKept()
 case ("control", 1): caseControl()
 default:
-    print("usage: harness units | dek | content <units> [--no-scribble] | kept | control | needles <file>")
+    print("usage: harness units | shell | dek | content <units> [--no-scribble] | kept | control | needles <file>")
     exit(2)
 }
 print(failures == 0 ? "PASS" : "FAIL: \(failures) check(s)")

@@ -16,4 +16,3 @@
 # The reason must not contain "|". test.sh also fails when a listed line no
 # longer exists, so review this file whenever a listed line changes.
 
-app/Sources/main.swift | a comment saying the Services menu is never set | // menu (NSApp.servicesMenu is never set), no Share menu, no Window menu, and no

@@ -1,15 +1,84 @@
 /*
   Localizable.strings — Brev, Norwegian bokmål (nb), UTF-8.
 
-  Every user-visible string in the app lives here (CLAUDE.md §3.2).
+  Every user-visible string in the app lives here (CLAUDE.md §3.2), read
+  through App/L10n.swift. The texts are those of docs/PHASE2_DESIGN.md §5.6.
   None of these strings may ever be derived from message content (§1.5).
 */
+
+/* Onboarding, page 1. */
+"onboarding.welcome.title" = "Velkommen til Brev";
+"onboarding.welcome.body" = "Brev er for private brev mellom mennesker. Brevene kan bare leses i dette vinduet, og bare etter at du har låst opp med fingeren.";
+"onboarding.welcome.next" = "Fortsett";
+
+/* Onboarding, page 2: the rules (CLAUDE.md §1.8, §1.9, §2). The button is enabled only when the checkbox is ticked. */
+"onboarding.rules.title" = "Dette må du vite";
+"onboarding.rules.touchid" = "Brev låses bare opp med Touch ID. Det finnes ikke noe passord.";
+"onboarding.rules.nobackup" = "Det finnes ingen sikkerhetskopi. Nøklene finnes bare på denne Macen. Mister du Macen, eller blir den nullstilt, er brevene borte for alltid.";
+"onboarding.rules.fingers" = "Legger du til eller fjerner et fingeravtrykk i Touch ID, kan brevene aldri åpnes igjen. Da er både brevene og identiteten din borte.";
+"onboarding.rules.prompt" = "Lås bare opp når du selv har trykket «Lås opp» i Brev. Ber et annet program om Touch ID for Brev, trykk Avbryt.";
+/* File substitution (CLAUDE.md §2, docs/DECISIONS.md D-0033 item 2). */
+"onboarding.rules.gone" = "Er brevene dine plutselig borte etter at du har låst opp, så ikke skriv nye brev. Da kan et annet program ha byttet ut filene til Brev.";
+"onboarding.rules.confirm" = "Jeg forstår at brevene ikke kan gjenopprettes";
+"onboarding.rules.create" = "Opprett nøkler";
+"onboarding.working" = "Oppretter nøkler …";
+
+/* Onboarding, page 3: the first unlock. */
+"onboarding.first.title" = "Lås opp for første gang";
+"onboarding.first.body" = "Bekreft med Touch ID at nøklene virker. Først da er Brev klar til bruk.";
+
+/* Onboarding errors. */
+"onboarding.error.notouchid" = "Brev krever Touch ID. Sett opp Touch ID i Systeminnstillinger, og åpne Brev på nytt.";
+"onboarding.error.failed" = "Nøklene kunne ikke lages.";
+"onboarding.error.retry" = "Prøv igjen";
+
+/* Shown alone when Brev was started with debugging switches (docs/PHASE2_DESIGN.md §8.6). */
+"launch.error.unsafe" = "Brev ble startet på en måte som ikke er trygg, og kan ikke låses opp nå. Avslutt Brev og åpne det på nytt fra Programmer-mappen.";
+
+/* The lock screen. unlock.reason completes macOS's sentence «Brev» prøver å … in the Touch ID dialog. */
+"unlock.title" = "Brev er låst";
+"unlock.button" = "Lås opp med Touch ID";
+"unlock.cancel" = "Avbryt";
+"unlock.reason" = "låse opp brevene dine";
+
+/* Unlock errors (docs/PHASE2_DESIGN.md §5.5). */
+"unlock.error.retry" = "Brev ble ikke låst opp. Prøv igjen.";
+"unlock.error.lockout" = "Touch ID er sperret etter for mange forsøk. Lås Macen, logg inn med passordet, og prøv igjen.";
+"unlock.error.unavailable" = "Touch ID er ikke tilgjengelig. Brev kan bare låses opp med Touch ID.";
+"unlock.error.fingers" = "Fingeravtrykkene på denne Macen ser ut til å være endret. Da kan brevene ikke åpnes igjen.";
+"unlock.error.damaged" = "Filene til Brev er skadet. Brevene kan ikke åpnes.";
+
+/* Reset, and its confirmation sheet. */
+"reset.button" = "Slett alt og start på nytt";
+"reset.confirm.title" = "Slette alle brev?";
+"reset.confirm.body" = "Alle brev og nøkler på denne Macen blir slettet. Dette kan ikke angres.";
+"reset.confirm.ok" = "Slett alt";
+"reset.confirm.cancel" = "Avbryt";
+
+/* The mail window. %@ is a date from DateFormatter (nb): metadata, never content. */
+"mail.new" = "Nytt brev";
+"mail.lock" = "Lås";
+"mail.nothreads" = "Ingen brev ennå";
+"mail.sent" = "Sendt %@";
+"mail.received" = "Mottatt %@";
+
+/* The compose sheet. */
+"compose.to" = "Til:";
+"compose.subject" = "Emne:";
+"compose.send" = "Send";
+"compose.cancel" = "Avbryt";
+"compose.error" = "Brevet ble ikke sendt. Prøv igjen.";
 
 /* Title of the application menu. AppKit replaces it with the bundle name at runtime; this is the fallback. */
 "menu.app.title" = "Brev";
 
-/* Application menu item that quits the app. Key equivalent: ⌘Q. */
+/* Application menu items. Key equivalents: ⌘L and ⌘Q. */
+"menu.app.lock" = "Lås Brev";
 "menu.app.quit" = "Avslutt Brev";
+
+/* The Arkiv (File) menu. Key equivalent: ⌘N. */
+"menu.file.title" = "Arkiv";
+"menu.file.new" = "Nytt brev";
 
 /* Title of the main window. Always the app name; never message content or a sender name. */
 "window.main.title" = "Brev";

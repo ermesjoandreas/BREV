@@ -1,0 +1,48 @@
+// SelfScan.swift — Verify configuration only: Brev counts copies of the test
+// marker in its own memory at each lock.
+//
+// Serves docs/VERIFY.md V39 (docs/PHASE2_DESIGN.md §4.1, §8.4 step 9).
+// project.yml compiles this file and app/Tests/scan.c only in the Verify
+// configuration (EXCLUDED_SOURCE_FILE_NAMES in Debug and Release), and only
+// Verify defines BREV_SELFSCAN, under which LockController calls it: once
+// when a lock starts, while a letter may still be open (the control), and
+// once when the lock sequence has finished. It logs counts only. The marker
+// is "BREV-SECRET-BODY", as in scan.c; its glyph ids in the content font are
+// the scanner's glyph needle, stored XORed, as in harness case 4.
+
+import CoreText
+import os
+
+enum SelfScan {
+    private static let log = Logger(subsystem: "no.brev.app", category: "selfscan")
+    /// "BREV-SECRET-BODY" XOR 0x5A, as in scan.c.
+    private static let markerX: [UInt8] = [0x18, 0x08, 0x1f, 0x0c, 0x77, 0x09, 0x1f, 0x19,
+                                           0x08, 0x1f, 0x0e, 0x77, 0x18, 0x15, 0x1e, 0x03]
+
+    /// Logs `selfscan control u8=… u16=… glyph=…` at the start of a lock,
+    /// and `selfscan u8=… u16=… glyph=…` at its end.
+    static func run(control: Bool) {
+        setGlyphNeedle()
+        var r = brev_scan_result()
+        brev_scan(&r)
+        let tag = control ? "control " : ""
+        log.notice("selfscan \(tag, privacy: .public)u8=\(r.utf8_hits, privacy: .public) u16=\(r.utf16_hits, privacy: .public) glyph=\(r.glyph_hits, privacy: .public)")
+    }
+
+    /// The marker's 16 glyph ids in GlyphFlush's content font, XORed. Until
+    /// a text has been laid out there is no font, and glyph stays 0.
+    private static func setGlyphNeedle() {
+        guard let attrs = GlyphFlush.attrs,
+              let value = CFDictionaryGetValue(attrs, Unmanaged.passUnretained(kCTFontAttributeName).toOpaque())
+        else { return }
+        let font = Unmanaged<CTFont>.fromOpaque(value).takeUnretainedValue()
+        var chars = [UInt16](repeating: 0, count: 16), glyphs = [CGGlyph](repeating: 0, count: 16)
+        for i in 0..<16 { chars[i] = UInt16(markerX[i] ^ 0x5A) }
+        _ = CTFontGetGlyphsForCharacters(font, chars, &glyphs, 16)
+        var x = glyphs.map { $0 ^ 0x5A5A }
+        brev_scan_set_glyphs(x, 16)
+        _ = chars.withUnsafeMutableBytes { memset_s($0.baseAddress!, 32, 0, 32) }
+        _ = glyphs.withUnsafeMutableBytes { memset_s($0.baseAddress!, 32, 0, 32) }
+        _ = x.withUnsafeMutableBytes { memset_s($0.baseAddress!, 32, 0, 32) }
+    }
+}
