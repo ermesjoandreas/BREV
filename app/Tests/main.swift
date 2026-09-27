@@ -7,16 +7,17 @@
 // content case at four sizes) under MallocScribble=1, as the app runs, plus
 // case 6's control without scribbling, with TMPDIR under core/target/harness.
 //
-// usage: harness units | shell | dek | content <units> [--no-scribble] | kept | control
+// usage: harness units | shell | compose | dek | content <units> [--no-scribble] | kept | control
 //        harness needles <file>     (the helper run that `dek` starts)
 //        harness argdomain -NSTraceEvents YES -NSZombieEnabled YES
 //                                   (the helper run that `shell` starts)
 //
-// Case numbers are those of §11. Case 2's app-shell part (InputFilter,
-// LockState, LaunchGuard) is `shell`; its EditModel and KeyTranslator parts
-// arrive with those files. Output is content-free: check names and hit
-// counts only.
+// Case numbers are those of §11. Case 2 has two parts: the app shell's
+// (InputFilter, LockState, LaunchGuard) is `shell`, the compose core's
+// (EditModel, KeyTranslator) is `compose`. Output is content-free: check
+// names and hit counts only.
 
+import Carbon.HIToolbox
 import CoreGraphics
 import CoreText
 import CryptoKit
@@ -421,6 +422,279 @@ func caseArgumentDomain() {
           LaunchGuard.unsafeDefaults(defaults).isEmpty && cf == nil)
 }
 
+// MARK: - Case 2, the compose core's part: EditModel, KeyTranslator
+
+/// Non-content test units into `m`, as one keystroke.
+func typeUnits(_ m: EditModel, _ s: String) -> Bool {
+    Array(s.utf16).withUnsafeBufferPointer { m.insert($0) }
+}
+
+/// Whether the caret is at the start of a composed character (or the end).
+func atBoundary(_ m: EditModel) -> Bool {
+    m.caret == m.text.length || m.text.composedRange(at: m.caret).lowerBound == m.caret
+}
+
+func caseCompose() {
+    requireScribble(true)
+    caseEditModel()
+    caseKeyTranslator()
+}
+
+func caseEditModel() {
+    // Inserts, the byte limit and refused units, in a single-line field.
+    let s = EditModel(maxBytes: 8, multiline: false)
+    check("EditModel: a new field is empty, with room for maxBytes units",
+          s.text.length == 0 && s.caret == 0 && s.utf8Count == 0 && s.text.maxUnits == 8)
+    check("EditModel: an insert goes in at the caret, which moves past it",
+          typeUnits(s, "abc") && unitsOf(s.text) == Array("abc".utf16) && s.caret == 3)
+    check("EditModel: no newline in a single-line field", !s.insertNewline() && unitsOf(s.text) == Array("abc".utf16))
+    s.moveLeft()
+    check("EditModel: an insert in the middle",
+          typeUnits(s, "æ") && unitsOf(s.text) == Array("abæc".utf16) && s.caret == 3 && s.utf8Count == 5)
+    check("EditModel: an insert up to the byte limit", typeUnits(s, "€") && s.utf8Count == 8 && s.caret == 4)
+    let full = unitsOf(s.text)
+    check("EditModel: an insert past the byte limit is refused, changes nothing and leaves the tail zero",
+          !typeUnits(s, "x") && unitsOf(s.text) == full && s.caret == 4 && s.utf8Count == 8
+            && (full.count..<s.text.maxUnits).allSatisfy { s.text.units[$0] == 0 })
+    let b = EditModel(maxBytes: 64, multiline: true)
+    let controls: [UInt16] = [0x00, 0x01, 0x04, 0x09, 0x0A, 0x0D, 0x10, 0x1B, 0x1F, 0x7F]
+    let refused = controls.allSatisfy { c in [c].withUnsafeBufferPointer { !b.insert($0) } }
+    check("EditModel: control characters are refused (Home, End, function keys), also a newline as text",
+          refused && b.text.length == 0)
+    check("EditModel: an empty insert (a dead key) is no refusal", [UInt16]().withUnsafeBufferPointer { b.insert($0) })
+    check("EditModel: a newline in a multi-line field",
+          typeUnits(b, "a") && b.insertNewline() && unitsOf(b.text) == [0x61, 0x0A] && b.caret == 2)
+
+    // The UTF-8 count is Transcode's, also as surrogates pair up and split.
+    let u = EditModel(maxBytes: 64, multiline: true)
+    func countIsTranscode() -> Bool {
+        let out = SecretBytes(capacity: 3 * u.text.length)
+        Transcode.utf16ToUTF8(u.text, into: out)
+        return out.count == u.utf8Count
+    }
+    var counts = typeUnits(u, "a\u{1F600}é™") && countIsTranscode() && u.utf8Count == 1 + 4 + 2 + 3
+    counts = counts && [UInt16(0xD83D)].withUnsafeBufferPointer { u.insert($0) } && countIsTranscode() && u.utf8Count == 13
+    counts = counts && [UInt16(0xDE00)].withUnsafeBufferPointer { u.insert($0) } && countIsTranscode() && u.utf8Count == 14
+    u.moveLeft()   // over the pair the two surrogates now make
+    counts = counts && u.caret == 5 && u.deleteForward() && countIsTranscode() && u.utf8Count == 10
+    check("EditModel: the UTF-8 count equals Transcode's output (pairs 4, lone surrogates 3)", counts, "\(u.utf8Count)")
+
+    // Composed characters: ←/→ and both deletes step over them whole.
+    let c = EditModel(maxBytes: 64, multiline: true)
+    _ = typeUnits(c, "a\u{1F600}e\u{301}\u{1F469}\u{200D}\u{1F4BB}b")   // boundaries 0 1 3 5 10 11
+    c.moveToStart()
+    var stops = [c.caret]
+    for _ in 0..<6 { c.moveRight(); stops.append(c.caret) }
+    check("EditModel: → moves by composed character and stops at the end", stops == [0, 1, 3, 5, 10, 11, 11], "\(stops)")
+    stops = [c.caret]
+    for _ in 0..<6 { c.moveLeft(); stops.append(c.caret) }
+    check("EditModel: ← moves by composed character and stops at the start", stops == [11, 10, 5, 3, 1, 0, 0], "\(stops)")
+    c.moveToEnd()
+    var lengths = [c.text.length]
+    while c.deleteBackward() { lengths.append(c.text.length) }
+    check("EditModel: Delete removes one composed character at a time",
+          lengths == [11, 10, 5, 3, 1, 0] && c.caret == 0 && (0..<c.text.maxUnits).allSatisfy { c.text.units[$0] == 0 },
+          "\(lengths)")
+    _ = typeUnits(c, "e\u{301}\u{1F600}x")
+    c.moveToStart()
+    lengths = [c.text.length]
+    while c.deleteForward() { lengths.append(c.text.length) }
+    check("EditModel: Forward Delete removes one composed character at a time",
+          lengths == [5, 3, 1, 0] && c.caret == 0, "\(lengths)")
+
+    // Lines: ↑/↓, line start and end, clicks, over a laid-out text with
+    // soft wraps, a short line and an empty one.
+    let layout = TextLayout(font: CTFontCreateWithName("Helvetica" as CFString, 13, nil))
+    let m = EditModel(maxBytes: 4096, multiline: true)
+    _ = typeUnits(m, "Kjære deg, dette er et brev med noen ord som må brytes over flere linjer, e\u{301} \u{1F600} og så videre.")
+    _ = m.insertNewline()
+    _ = typeUnits(m, "kort")
+    _ = m.insertNewline()
+    _ = m.insertNewline()
+    _ = typeUnits(m, "siste linje er lengre")
+    layout.layout(m.text, width: 120)
+    let lines = layout.lines, len = m.text.length
+    func end(_ i: Int) -> Int { lines[i].start + lines[i].length }
+    let wrapped = lines.indices.filter { $0 + 1 < lines.count && lines[$0 + 1].start == end($0) }
+    let short = lines.firstIndex { $0.length == 4 } ?? -1
+    guard wrapped.count >= 2, short > 0, lines[short + 1].length == 0, short + 2 == lines.count - 1 else {
+        check("the test text lays out as expected", false, "\(lines.map { ($0.start, $0.length) })")
+        return
+    }
+    var boundary = true
+    m.moveToEnd()
+    m.moveToStart()
+    check("EditModel: ⌘↑ and ⌘↓ go to the start and the end", m.caret == 0)
+    var visited: [Int] = []
+    for _ in lines.indices.dropFirst() {
+        m.moveDown(in: layout)
+        visited.append(m.caretLine(in: layout))
+        boundary = boundary && atBoundary(m)
+    }
+    m.moveDown(in: layout)
+    check("EditModel: ↓ from the start visits every line in turn, then the end",
+          visited == Array(lines.indices.dropFirst()) && m.caret == len, "\(visited)")
+    visited = []
+    for _ in lines.indices.dropFirst() {
+        m.moveUp(in: layout)
+        visited.append(m.caretLine(in: layout))
+        boundary = boundary && atBoundary(m)
+    }
+    m.moveUp(in: layout)
+    check("EditModel: ↑ from the end visits every line in turn, then the start",
+          visited == Array(lines.indices.dropFirst().reversed().dropFirst()) + [0] && m.caret == 0, "\(visited)")
+
+    m.place(line: 0, x: 60, in: layout)
+    let x0 = layout.caretOffset(m.text, line: 0, index: m.caret)
+    m.moveDown(in: layout)
+    let x1 = layout.caretOffset(m.text, line: 1, index: m.caret)
+    check("EditModel: ↓ keeps the caret's x (within a character)",
+          m.caretLine(in: layout) == 1 && abs(x1 - x0) < 10 && x0 > 40, "\(x0) \(x1)")
+    m.place(line: short - 1, x: 70, in: layout)
+    let xs = layout.caretOffset(m.text, line: short - 1, index: m.caret)
+    m.moveDown(in: layout)
+    let onShort = m.caret == end(short)
+    m.moveDown(in: layout)
+    let onEmpty = m.caret == lines[short + 1].start
+    m.moveDown(in: layout)
+    let xl = layout.caretOffset(m.text, line: short + 2, index: m.caret)
+    check("EditModel: ↓ through a short and an empty line comes back to the same x",
+          onShort && onEmpty && m.caretLine(in: layout) == short + 2 && abs(xl - xs) < 10, "\(xs) \(xl)")
+
+    let w = wrapped[0] == 0 ? wrapped[1] : wrapped[0]
+    m.place(line: w, x: 30, in: layout)
+    let inside = m.caret > lines[w].start && m.caret < end(w)
+    m.moveToLineStart(in: layout)
+    let atStart = m.caret == lines[w].start
+    m.moveToLineEnd(in: layout)
+    check("EditModel: ⌘← and ⌘→ on a soft-wrapped line stop before the space it broke after, on that line",
+          inside && atStart && m.caret == end(w) - 1 && m.text.units[m.caret] == 0x20 && m.caretLine(in: layout) == w)
+    m.place(line: short, x: 2, in: layout)
+    m.moveToLineEnd(in: layout)
+    check("EditModel: ⌘→ on a line that ends a paragraph goes to its end", m.caret == end(short))
+    m.moveToLineStart(in: layout)
+    check("EditModel: ⌘← goes to the line's start", m.caret == lines[short].start)
+
+    var clicks = true
+    for i in lines.indices {
+        m.place(line: i, x: -5, in: layout)
+        clicks = clicks && m.caret == lines[i].start
+        m.place(line: i, x: 1e6, in: layout)
+        clicks = clicks && m.caret == (wrapped.contains(i) ? end(i) - 1 : end(i)) && m.caretLine(in: layout) == i
+        boundary = boundary && atBoundary(m)
+    }
+    m.place(line: -1, x: 50, in: layout)
+    let above = m.caret == 0
+    m.place(line: lines.count, x: 50, in: layout)
+    check("EditModel: a click goes to the nearest position on its line; above and below go to start and end",
+          clicks && above && m.caret == len)
+    for i in lines.indices {
+        for x in stride(from: CGFloat(0), through: 130, by: 3) {
+            m.place(line: i, x: x, in: layout)
+            boundary = boundary && atBoundary(m) && m.caretLine(in: layout) == i
+        }
+    }
+    check("EditModel: every caret after a vertical move or a click is at a composed-character start, on its line",
+          boundary)
+
+    let one = EditModel(maxBytes: 64, multiline: false)
+    _ = typeUnits(one, "emne")
+    layout.layout(one.text, width: 1e6)
+    one.place(line: 0, x: 10, in: layout)
+    one.moveUp(in: layout)
+    let up = one.caret == 0
+    one.moveDown(in: layout)
+    check("EditModel: in a single line, ↑ goes to the start and ↓ to the end", up && one.caret == 4)
+
+    m.wipe()
+    check("EditModel: wipe zeroes the text and resets the caret and count",
+          m.text.length == 0 && m.caret == 0 && m.utf8Count == 0 && (0..<m.text.maxUnits).allSatisfy { m.text.units[$0] == 0 })
+}
+
+func caseKeyTranslator() {
+    let none: CGEventFlags = [], shift = CGEventFlags.maskShift, opt = CGEventFlags.maskAlternate
+    check("KeyTranslator: only shift, option and caps lock reach UCKeyTranslate",
+          KeyTranslator.carbonModifiers([.maskShift, .maskAlternate, .maskAlphaShift]) == UInt32(shiftKey | optionKey | alphaLock)
+            && KeyTranslator.carbonModifiers([.maskCommand, .maskControl, .maskSecondaryFn, .maskNumericPad]) == 0)
+    if TISCopyCurrentKeyboardLayoutInputSource() != nil, let current = KeyTranslator(.current) {
+        let n = current.translate(keyCode: UInt16(kVK_Space), flags: none) { Array($0) }
+        check("KeyTranslator: the current layout types a space with the space bar", n == [0x20])
+    } else {
+        print("skip KeyTranslator on the current layout: Text Input Sources has none")
+    }
+    guard let nb = KeyTranslator(.named("com.apple.keylayout.Norwegian")) else {
+        print("skip KeyTranslator on the Norwegian layout: Text Input Sources cannot find it")
+        return
+    }
+    func typed(_ keys: [(UInt16, CGEventFlags)]) -> [UInt16] {
+        nb.reset()
+        var out: [UInt16] = []
+        for (k, f) in keys { nb.translate(keyCode: k, flags: f) { out += $0 } }
+        return out
+    }
+    // docs/VERIFY.md V35, and the dead keys of design §0.
+    let table: [(String, [(UInt16, CGEventFlags)], String)] = [
+        ("æ ø å are keys 39 41 33", [(39, none), (41, none), (33, none)], "æøå"),
+        ("⇧ gives Æ Ø Å", [(39, shift), (41, shift), (33, shift)], "ÆØÅ"),
+        ("´ then e gives é", [(24, none), (14, none)], "é"),
+        ("¨ then u gives ü", [(30, none), (32, none)], "ü"),
+        ("⇧´ then e gives è", [(24, shift), (14, none)], "è"),
+        ("⇧¨ then e gives ê", [(30, shift), (14, none)], "ê"),
+        ("⌥¨ then n gives ñ", [(30, opt), (45, none)], "ñ"),
+        ("´ then space gives ´", [(24, none), (49, none)], "´"),
+        ("´ then k gives ´k", [(24, none), (40, none)], "´k"),
+        ("@ is key 42 without a modifier", [(42, none)], "@"),
+        ("⇧4 gives $", [(21, shift)], "$"),
+        ("⌥7 gives |", [(26, opt)], "|"),
+        ("⇧⌥7 gives \\", [(26, [shift, opt])], "\\"),
+        ("⌥8 ⌥9 give [ ]", [(28, opt), (25, opt)], "[]"),
+        ("⇧⌥8 ⇧⌥9 give { }", [(28, [shift, opt]), (25, [shift, opt])], "{}"),
+        ("⌥2 gives ™, not @", [(19, opt)], "™"),
+        ("Caps Lock gives A and Æ", [(0, .maskAlphaShift), (39, .maskAlphaShift)], "AÆ"),
+    ]
+    for (name, keys, expected) in table {
+        let got = typed(keys)
+        check("KeyTranslator (Norwegian): " + name, got == Array(expected.utf16), got.map { String($0, radix: 16) }.joined(separator: " "))
+    }
+    nb.reset()
+    let dead = nb.translate(keyCode: 24, flags: none) { $0.count }
+    check("KeyTranslator: a dead key gives no units and waits", dead == 0 && nb.hasDeadKey)
+    nb.reset()
+    let plain = nb.translate(keyCode: 14, flags: none) { Array($0) }
+    check("KeyTranslator: reset drops the dead key, so e stays e", plain == Array("e".utf16) && !nb.hasDeadKey)
+
+    // Typing the marker key by key through KeyTranslator into an EditModel:
+    // the text is in the model's SecretText only, and wipe leaves no copy.
+    var keyFor: [UInt16: (UInt16, CGEventFlags)] = [:]
+    for f in [none, shift] {
+        for k in UInt16(0)..<51 {
+            nb.reset()
+            nb.translate(keyCode: k, flags: f) { u in
+                if u.count == 1, keyFor[u[0]] == nil { keyFor[u[0]] = (k, f) }
+            }
+        }
+    }
+    nb.reset()
+    guard (0..<16).allSatisfy({ keyFor[markerUnit($0)] != nil }) else {
+        check("every marker character has a key on the Norwegian layout", false)
+        return
+    }
+    var h = scan()
+    check("typing: baseline, no marker", h.u8 == 0 && h.u16 == 0, "\(h)")
+    let body = EditModel(maxBytes: 1024, multiline: true)
+    var all = true
+    for i in 0..<256 {
+        let key = keyFor[markerUnit(i)]!
+        all = nb.translate(keyCode: key.0, flags: key.1) { body.insert($0) } && all
+    }
+    h = scan()
+    check("typing: the typed marker is in the model's text (positive control)",
+          all && body.text.length == 256 && h.u16 > 0, "\(h)")
+    body.wipe()
+    h = scan()
+    check("typing: after wipe, no copy of the typed marker (UTF-8, UTF-16)", h.u8 == 0 && h.u16 == 0, "\(h)")
+}
+
 // MARK: - Case 3: the DEK hand-off and HPKE needles
 
 func caseDEK() {
@@ -636,6 +910,7 @@ let args = Array(CommandLine.arguments.dropFirst())
 switch (args.first, args.count) {
 case ("units", 1): caseUnits()
 case ("shell", 1): caseShell()
+case ("compose", 1): caseCompose()
 case ("argdomain", 5): caseArgumentDomain()
 case ("needles", 2):
     do { try NeedleFile.make(at: URL(fileURLWithPath: args[1])) } catch {
@@ -653,7 +928,7 @@ case ("content", 2), ("content", 3):
 case ("kept", 1): caseKept()
 case ("control", 1): caseControl()
 default:
-    print("usage: harness units | shell | dek | content <units> [--no-scribble] | kept | control | needles <file>")
+    print("usage: harness units | shell | compose | dek | content <units> [--no-scribble] | kept | control | needles <file>")
     exit(2)
 }
 print(failures == 0 ? "PASS" : "FAIL: \(failures) check(s)")

@@ -101,6 +101,36 @@ final class TextLayout {
         }
     }
 
+    /// The caret's x before unit `index` on line `i`, from the line's start
+    /// (docs/PHASE2_DESIGN.md §7.3). 0 on an empty line or for a line index
+    /// out of range.
+    func caretOffset(_ text: SecretText, line i: Int, index: Int) -> CGFloat {
+        guard lines.indices.contains(i), lines[i].length > 0 else { return 0 }
+        let l = lines[i]
+        return withCTLine(text, l) { CTLineGetOffsetForStringIndex($0, min(max(index - l.start, 0), l.length), nil) }
+    }
+
+    /// The caret position on line `i` nearest to `x` (a click, or ↑/↓): a
+    /// unit index from the line's start to its end. 0 for a line index out
+    /// of range.
+    func index(_ text: SecretText, line i: Int, x: CGFloat) -> Int {
+        guard lines.indices.contains(i) else { return 0 }
+        let l = lines[i]
+        guard l.length > 0 else { return l.start }
+        let k = withCTLine(text, l) { CTLineGetStringIndexForPosition($0, CGPoint(x: x, y: 0)) }
+        return l.start + (k == kCFNotFound ? 0 : min(max(k, 0), l.length))
+    }
+
+    /// `body` with a CTLine over line `l`, made as for drawing: a no-copy
+    /// window of at most 448 units, inside an autoreleasepool (§6.3 rule 5).
+    private func withCTLine<R>(_ text: SecretText, _ l: LineRef, _ body: (CTLine) -> R) -> R {
+        autoreleasepool {
+            let s = CFStringCreateWithCharactersNoCopy(nil, text.units + l.start, l.length, kCFAllocatorNull)!
+            let a = CFAttributedStringCreate(nil, s, attrs)!
+            return body(CTLineCreateWithAttributedString(a))
+        }
+    }
+
     func reset() {
         lines.removeAll()
     }
