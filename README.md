@@ -4,7 +4,7 @@ Brev (Norwegian for "letter") is a native macOS app for private correspondence b
 
 **No backup, by design.** The Touch ID-gated keys that protect everything else live only in this Mac's Secure Enclave, all other keys are stored encrypted under them on this Mac only, and nothing is ever synced to iCloud. Losing the Mac means losing the message history. This is intentional and is explained during setup.
 
-**Status:** Phase 0 (scaffold). The paragraphs above describe the finished design from [CLAUDE.md](CLAUDE.md); today the app is an empty window that proves the Rust ↔ Swift toolchain. The phase plan is in CLAUDE.md §5.
+**Status:** Phase 1 (encrypted core) done. The paragraphs above describe the finished design from [CLAUDE.md](CLAUDE.md); today the Rust core has the encrypted store, the crypto and the lock state, tested in Rust, and the app is still an empty window that only calls `ping()`. The phase plan is in CLAUDE.md §5.
 
 ## Prerequisites
 
