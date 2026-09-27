@@ -42,7 +42,7 @@ In scope — must be defended against:
 * Synthetic input (AppleScript, CGEvent injection, agents "clicking") → rejected in the app.
 * macOS system AI features (notification summaries, Writing Tools, Spotlight, Siri suggestions) → nothing exposed to them.
 * The relay server (our own backend) → zero-access; sees only ciphertext and minimal routing metadata.
-* Spam / mass messaging / AI-generated noise → identity, contact approval, rate limits, delayed delivery (Phase 4).
+* Spam / mass messaging / AI-generated noise → identity, contact approval, invite codes, rate limits (Phase 4).
 
 Out of scope — explicitly NOT defended against:
 
@@ -164,10 +164,10 @@ Each phase ends with a short summary in `docs/DECISIONS.md` and passing `scripts
 * Contact approval: messages only from approved contacts; one short contact request otherwise.
 * Invite codes: new identities need an invite from an existing one; relay tracks the invite graph.
 * Rate limits: max N messages/day per identity (relay-enforced).
-* Delayed delivery: relay releases envelopes at fixed "postombæring" times (configurable; default 08:00 and 18:00 local).
+* Delivery: like ordinary email, the relay hands an envelope to the recipient on their next poll after it passes the checks above. No delayed or batched delivery (docs/DECISIONS.md D-0013).
 * App Attest (`DCAppAttestService`): relay accepts registrations only from attested app builds. Stub behind a feature flag if unavailable on the dev machine.
 * BankID/ID-porten: stub only — a `IdentityVerifier` trait with a `DevVerifier` that always passes. Document the real integration as a future task.
-* Definition of done: an unapproved sender cannot reach an inbox; rate limit and delivery windows are covered by relay tests.
+* Definition of done: an unapproved sender cannot reach an inbox; rate limits and immediate delivery of approved envelopes are covered by relay tests.
 
 ### Phase 5 — Hardening and trust
 

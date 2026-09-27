@@ -345,3 +345,35 @@ with a hardened, sandboxed, ad-hoc-signed single target),
 produces a runnable `.app` from a clean checkout" and "the window opens" are
 pending the Mac checklist in D-0010. Phase 1 must not start until that
 checklist has been run and any fix it needs is logged here.
+
+---
+
+## Spec changes
+
+### D-0013 — Immediate delivery, like ordinary email; no fixed delivery times
+
+- **Date:** 2026-09-27
+- **Decision:** The Phase 4 bullet "Delayed delivery: relay releases
+  envelopes at fixed 'postombæring' times (default 08:00 and 18:00 local)" is
+  removed from CLAUDE.md. The relay delivers an envelope on the recipient's
+  next poll as soon as it has passed the signature, contact-approval and
+  rate-limit checks. The Phase 4 definition of done now asks for relay tests
+  of rate limits and of immediate delivery instead of delivery windows.
+  CLAUDE.md §2 and `docs/THREAT_MODEL.md` list the anti-noise defences as
+  identity, contact approval, invite codes and rate limits.
+- **Reasoning:** Product decision by the project owner: Brev should deliver
+  like an ordinary email service, and holding a letter for up to half a day
+  made the product feel broken rather than calm. Delivery timing is not part
+  of any §1 invariant, so content protection is unchanged. Spam and mass
+  messaging are still stopped by the defences that actually gate who can
+  write to whom: an invite to get an identity, approval before a sender can
+  reach an inbox, and a daily per-identity quota. One property is lost and
+  is recorded here so it is not rediscovered later: fixed release times
+  batched deliveries, which hid the exact moment a letter was sent from
+  anyone watching when recipients fetched. With immediate delivery the relay
+  (and anyone observing its traffic) can link a send to the matching fetch
+  more precisely. The relay already sees routing metadata (§2), so this is a
+  small change in metadata exposure, not in content exposure. Phase 3
+  polling every N seconds means "immediate" is bounded by that interval.
+- **Verified:** Specification change only; no relay code exists yet. The
+  §2 copy in `docs/THREAT_MODEL.md` was re-diffed against CLAUDE.md.

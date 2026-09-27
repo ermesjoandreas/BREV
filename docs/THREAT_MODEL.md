@@ -40,7 +40,7 @@ In scope — must be defended against:
 * Synthetic input (AppleScript, CGEvent injection, agents "clicking") → rejected in the app.
 * macOS system AI features (notification summaries, Writing Tools, Spotlight, Siri suggestions) → nothing exposed to them.
 * The relay server (our own backend) → zero-access; sees only ciphertext and minimal routing metadata.
-* Spam / mass messaging / AI-generated noise → identity, contact approval, rate limits, delayed delivery (Phase 4).
+* Spam / mass messaging / AI-generated noise → identity, contact approval, invite codes, rate limits (Phase 4).
 
 Out of scope — explicitly NOT defended against:
 
