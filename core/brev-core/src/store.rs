@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::config::DbConfig;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension};
 use x25519_dalek::StaticSecret;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -186,7 +186,7 @@ impl Core {
     pub fn open(path: &Path) -> Result<Core, Error> {
         check_path(path)?;
         let core = Core::connect(path, Box::new(Zeroizing::new([0u8; 32])))?;
-        verify_store(&core.db)?;
+        verify_store(&core.db).map_err(not_a_store)?;
         set_journal_mode(&core.db)?;
         Ok(core)
     }
@@ -202,7 +202,9 @@ impl Core {
             return Err(Error::WrongKey);
         }
         self.unlocked = true;
-        match self.me() {
+        // Opening the identity row is the key check. The X25519 secret is
+        // not needed, so it is never built and never copied onto the stack.
+        match self.identity_keys() {
             Ok(_) => Ok(()),
             Err(e) => {
                 self.lock();
@@ -562,8 +564,8 @@ impl Core {
             .query_row("SELECT id FROM identity", [], |r| r.get(0))?)
     }
 
-    /// Decrypts the own identity for one operation; the secret is wiped on drop.
-    fn me(&self) -> Result<Me, Error> {
+    /// Own id and the decrypted identity row (X25519 secret || signing key).
+    fn identity_keys(&self) -> Result<([u8; 32], Plaintext), Error> {
         let dek = self.dek()?;
         let (id, sealed): ([u8; 32], Vec<u8>) =
             self.db
@@ -571,13 +573,23 @@ impl Core {
                     Ok((r.get(0)?, r.get(1)?))
                 })?;
         let keys = crypto::open_column(dek, &column_ad("identity.keys", &[&id]), &sealed)?;
+        Ok((id, keys))
+    }
+
+    /// Decrypts the own identity for one operation; the secret is wiped on drop.
+    fn me(&self) -> Result<Me, Error> {
+        let (id, keys) = self.identity_keys()?;
         let (secret, signing_key) = keys.split_at_checked(32).ok_or(Error::Crypto)?;
         let me = Me {
             id,
             secret: crypto::static_secret(secret)?,
             signing_key: signing_key.to_vec(),
         };
-        crypto::scrub_stack(); // the by-value [u8; 32] inside static_secret
+        // Reaches only the frames below this one. In release builds
+        // `static_secret` is inlined, so its by-value [u8; 32] and the `Me`
+        // being built sit in this frame, which only a scrub the caller runs
+        // after `me()` returns can reach.
+        crypto::scrub_stack();
         Ok(me)
     }
 
@@ -661,6 +673,22 @@ fn verify_store(db: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
+/// A file SQLite cannot parse (random bytes, an encrypted or damaged
+/// database) is not a Brev store either: `Corrupt`, not `Storage`.
+fn not_a_store(e: Error) -> Error {
+    match &e {
+        Error::Storage(s)
+            if matches!(
+                s.sqlite_error_code(),
+                Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt)
+            ) =>
+        {
+            Error::Corrupt
+        }
+        _ => e,
+    }
+}
+
 type SchemaRow = (String, String, String, Option<String>);
 
 fn schema_of(db: &Connection) -> Result<Vec<SchemaRow>, Error> {
@@ -728,8 +756,17 @@ mod tests {
         std::env::temp_dir().join(format!("brev-unit-{:016x}.db", u64::from_le_bytes(r)))
     }
 
+    /// Each core gets its own signing key, so two cores never share an id
+    /// even if their X25519 keys were equal.
     fn new_core(path: &Path) -> Core {
-        Core::create(path, &mut crypto::random().unwrap(), &[7; 32]).unwrap()
+        let signing_key: [u8; 32] = crypto::random().unwrap();
+        Core::create(path, &mut crypto::random().unwrap(), &signing_key).unwrap()
+    }
+
+    /// An envelope from `from` to `to` with a hand-built payload.
+    fn seal_from(from: &Core, to: &PublicBundle, payload: &[u8]) -> Envelope {
+        let me = from.me().unwrap();
+        crypto::seal_message(&me.secret, &to.x25519, me.id, to.id().0, payload).unwrap()
     }
 
     struct NoSig;
@@ -761,10 +798,23 @@ mod tests {
         assert_eq!(core.dek_for_test(), [0u8; 32]);
 
         let mut right = original;
+        let built = crypto::secrets_built();
         core.unlock(&mut right).unwrap();
         assert_eq!(right, [0u8; 32]);
         assert_eq!(core.dek_for_test(), original);
         assert_eq!(core.dek_addr_for_test(), addr);
+        assert_eq!(
+            crypto::secrets_built(),
+            built,
+            "unlock never builds the X25519 secret"
+        );
+
+        // All zeros (a wiped buffer, a failed unwrap) also locks a core that
+        // was unlocked.
+        assert!(matches!(core.unlock(&mut [0u8; 32]), Err(Error::WrongKey)));
+        assert!(core.is_locked());
+        assert_eq!(core.dek_for_test(), [0u8; 32]);
+        assert!(matches!(core.bundle().map(drop), Err(Error::Locked)));
         drop(core);
         let _ = fs::remove_file(&path);
     }
@@ -888,18 +938,73 @@ mod tests {
 
         // C, a real contact of B, names A's thread id in its payload.
         let payload = encode_payload(&[9; 16], &t.0, b"s", b"hijack").unwrap();
-        let me = c.me().unwrap();
-        let env = crypto::seal_message(
-            &me.secret,
-            &b_bundle.x25519,
-            me.id,
-            b_bundle.id().0,
-            &payload,
-        )
-        .unwrap();
+        let env = seal_from(&c, &b_bundle, &payload);
         assert!(matches!(b.receive(&env), Err(Error::Malformed)));
         assert_eq!(b.messages(t).unwrap().len(), 1);
+
+        // An agent re-points the thread at C in B's file: the owner is
+        // authenticated through the subject before C's letter is accepted.
+        let c_id = c.bundle().unwrap().id();
+        b.db.execute(
+            "UPDATE threads SET contact_id = ?1 WHERE id = ?2",
+            params![&c_id.0[..], &t.0[..]],
+        )
+        .unwrap();
+        assert!(matches!(b.receive(&env), Err(Error::Crypto)));
+        assert_eq!(b.messages(t).unwrap().len(), 1);
         drop((a, b, c));
+        for p in &paths {
+            let _ = fs::remove_file(p);
+        }
+    }
+
+    /// The one receive path that writes before it fails: a stored message id
+    /// under a new thread id. The thread insert is rolled back.
+    #[test]
+    fn failed_receive_leaves_no_new_thread() {
+        let paths = [temp_path(), temp_path()];
+        let (mut a, mut b) = (new_core(&paths[0]), new_core(&paths[1]));
+        let b_bundle = b.bundle().unwrap();
+        let b_at_a = a.add_contact(&b_bundle, b"B").unwrap();
+        b.add_contact(&a.bundle().unwrap(), b"A").unwrap();
+        let t = a.new_thread(b_at_a, b"s").unwrap();
+        let m = b.receive(&a.send(t, b"x", &NoSig).unwrap()).unwrap();
+
+        let payload = encode_payload(&m.0, &[0x55; 16], b"new", b"x").unwrap();
+        let env = seal_from(&a, &b_bundle, &payload);
+        assert!(matches!(b.receive(&env), Err(Error::Duplicate)));
+        assert_eq!(b.threads().unwrap().len(), 1);
+        assert_eq!(b.messages(t).unwrap().len(), 1);
+        drop((a, b));
+        for p in &paths {
+            let _ = fs::remove_file(p);
+        }
+    }
+
+    /// Nothing decrypted is alive while the signer (Touch ID from Phase 3)
+    /// runs: `send` drops the subject before it signs.
+    #[test]
+    fn no_plaintext_is_alive_while_signing() {
+        struct Counts(std::cell::Cell<Option<usize>>);
+        impl Signer for Counts {
+            fn sign(&self, _: &[u8]) -> Result<Vec<u8>, Error> {
+                self.0.set(Some(crypto::live_plaintexts()));
+                Ok(Vec::new())
+            }
+        }
+        let paths = [temp_path(), temp_path()];
+        let (mut a, b) = (new_core(&paths[0]), new_core(&paths[1]));
+        let b_at_a = a.add_contact(&b.bundle().unwrap(), b"B").unwrap();
+        let t = a.new_thread(b_at_a, b"s").unwrap();
+        // Positive control: the counter sees a decrypted subject.
+        let threads = a.threads().unwrap();
+        assert_eq!(crypto::live_plaintexts(), 1);
+        drop(threads);
+
+        let signer = Counts(std::cell::Cell::new(None));
+        a.send(t, b"x", &signer).unwrap();
+        assert_eq!(signer.0.get(), Some(0));
+        drop((a, b));
         for p in &paths {
             let _ = fs::remove_file(p);
         }

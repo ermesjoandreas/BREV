@@ -79,11 +79,44 @@ pub(crate) fn column_ad(label: &str, fields: &[&[u8]]) -> Vec<u8> {
 /// ```
 pub struct Plaintext(Zeroizing<Vec<u8>>);
 
+impl Plaintext {
+    fn new(buf: Zeroizing<Vec<u8>>) -> Plaintext {
+        #[cfg(test)]
+        LIVE_PLAINTEXTS.with(|n| n.set(n.get() + 1));
+        Plaintext(buf)
+    }
+}
+
 impl std::ops::Deref for Plaintext {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.0
     }
+}
+
+#[cfg(test)]
+impl Drop for Plaintext {
+    fn drop(&mut self) {
+        LIVE_PLAINTEXTS.with(|n| n.set(n.get() - 1));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIVE_PLAINTEXTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SECRETS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test only: `Plaintext` values alive on this thread.
+#[cfg(test)]
+pub(crate) fn live_plaintexts() -> usize {
+    LIVE_PLAINTEXTS.with(|n| n.get())
+}
+
+/// Test only: how many times [`static_secret`] has run on this thread.
+#[cfg(test)]
+pub(crate) fn secrets_built() -> usize {
+    SECRETS_BUILT.with(|n| n.get())
 }
 
 /// True if every byte is zero. Used to refuse an all-zero DEK, which is also
@@ -103,6 +136,8 @@ pub(crate) fn public_key(secret: &StaticSecret) -> [u8; 32] {
 /// Builds a static secret from decrypted bytes.
 pub(crate) fn static_secret(bytes: &[u8]) -> Result<StaticSecret, Error> {
     let arr: [u8; 32] = bytes.try_into().map_err(|_| Error::Crypto)?;
+    #[cfg(test)]
+    SECRETS_BUILT.with(|n| n.set(n.get() + 1));
     Ok(StaticSecret::from(arr))
 }
 
@@ -249,7 +284,7 @@ fn decrypt(
     cipher
         .decrypt_inout_detached(&XNonce::from(*nonce), ad, buf.as_mut_slice().into(), &tag)
         .map_err(|_| Error::Crypto)?;
-    Ok(Plaintext(buf))
+    Ok(Plaintext::new(buf))
 }
 
 #[cfg(test)]
@@ -294,5 +329,53 @@ mod tests {
         let secret = StaticSecret::from(s);
         let r = seal_message(&secret, &[0u8; 32], [1; 32], [2; 32], b"x");
         assert!(matches!(r, Err(Error::Crypto)));
+    }
+
+    fn secret() -> StaticSecret {
+        StaticSecret::from(random::<32>().unwrap())
+    }
+
+    /// The key needs one party's X25519 secret: a third party (or the relay)
+    /// cannot open a letter, and neither can its sender once the header is
+    /// reflected back to it.
+    #[test]
+    fn only_the_two_parties_can_open_a_message() {
+        let (a, b, c) = (secret(), secret(), secret());
+        let (pa, pb) = (public_key(&a), public_key(&b));
+        let env = seal_message(&a, &pb, [1; 32], [2; 32], b"letter").unwrap();
+        assert_eq!(&open_message(&b, &pa, &env).unwrap()[..], b"letter");
+        assert!(matches!(open_message(&c, &pa, &env), Err(Error::Crypto)));
+        let mut reflected = env.clone();
+        (reflected.sender, reflected.recipient) = (env.recipient, env.sender);
+        assert!(matches!(
+            open_message(&a, &pb, &reflected),
+            Err(Error::Crypto)
+        ));
+    }
+
+    /// Every seal draws a fresh nonce, so the same input never repeats a
+    /// (key, nonce) pair or a ciphertext.
+    #[test]
+    fn every_seal_uses_a_fresh_nonce() {
+        let dek: [u8; 32] = random().unwrap();
+        let c1 = seal_column(&dek, b"ad", b"same").unwrap();
+        let c2 = seal_column(&dek, b"ad", b"same").unwrap();
+        assert_ne!(c1[..NONCE_LEN], c2[..NONCE_LEN]);
+        assert_ne!(c1[NONCE_LEN..], c2[NONCE_LEN..]);
+        let (a, b) = (secret(), secret());
+        let pb = public_key(&b);
+        let e1 = seal_message(&a, &pb, [1; 32], [2; 32], b"same").unwrap();
+        let e2 = seal_message(&a, &pb, [1; 32], [2; 32], b"same").unwrap();
+        assert_ne!(e1.nonce, e2.nonce);
+        assert_ne!(e1.ciphertext, e2.ciphertext);
+    }
+
+    /// The id commits to both keys, so a relay cannot swap the X25519 key
+    /// behind a known id.
+    #[test]
+    fn identity_id_commits_to_both_keys() {
+        let id = identity_id(&[7; 32], &[1; 32]);
+        assert_ne!(id, identity_id(&[7; 32], &[2; 32]));
+        assert_ne!(id, identity_id(&[8; 32], &[1; 32]));
     }
 }

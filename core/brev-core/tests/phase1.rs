@@ -101,6 +101,11 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 fn round_trip_a_encrypts_b_decrypts() {
     let dir = TempDir::new();
     let (mut a, mut b, b_at_a, a_at_b) = pair(&dir.0);
+    // Each store generates its own X25519 identity.
+    assert_ne!(
+        a.core.bundle().unwrap().x25519,
+        b.core.bundle().unwrap().x25519
+    );
     let body = "Hei Bob, dette er et brev. Blåbær.".as_bytes();
     let t = a.core.new_thread(b_at_a, b"Hei").unwrap();
     send(&mut a, t, body);
@@ -391,7 +396,8 @@ fn stored_metadata_is_bound_to_ciphertext() {
         .add_contact(&m.core.bundle().unwrap(), b"Mallory")
         .unwrap();
     let t = a.core.new_thread(b_at_a, b"s").unwrap();
-    let other = a.core.new_thread(m_at_a, b"s2").unwrap();
+    let t2 = a.core.new_thread(b_at_a, b"s2").unwrap();
+    let other = a.core.new_thread(m_at_a, b"s3").unwrap();
     send(&mut a, t, b"first");
     send(&mut a, t, b"second");
     let ids: Vec<_> = a.core.messages(t).unwrap().iter().map(|m| m.id).collect();
@@ -399,6 +405,17 @@ fn stored_metadata_is_bound_to_ciphertext() {
     let sql = |q: &str, p: &[&[u8]]| {
         raw.execute(q, rusqlite::params_from_iter(p.iter()))
             .unwrap();
+    };
+    // Swaps one column between two rows; a second call undoes it.
+    let swap = |table: &str, column: &str, x: &[u8], y: &[u8]| {
+        let get = |id: &[u8]| -> rusqlite::types::Value {
+            let q = format!("SELECT {column} FROM {table} WHERE id = ?1");
+            raw.query_row(&q, [id], |r| r.get(0)).unwrap()
+        };
+        let (vx, vy) = (get(x), get(y));
+        let set = format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2");
+        raw.execute(&set, rusqlite::params![vy, x]).unwrap();
+        raw.execute(&set, rusqlite::params![vx, y]).unwrap();
     };
 
     // Re-point B's thread at Mallory: nothing is encrypted to Mallory.
@@ -420,12 +437,21 @@ fn stored_metadata_is_bound_to_ciphertext() {
         &[&b_at_a.0, &t.0],
     );
 
-    // Move a message to another thread, flip its direction, change its time.
+    // Move a message to another thread: one with another contact, and one
+    // with the same contact, which only the thread id in the AD catches.
+    let move_to = "UPDATE messages SET thread_id = ?2 WHERE id = ?1";
+    for dest in [other, t2] {
+        sql(move_to, &[&ids[0].0, &dest.0]);
+        assert!(matches!(
+            a.core.read_body(ids[0]).map(drop),
+            Err(Error::Crypto)
+        ));
+        sql(move_to, &[&ids[0].0, &t.0]);
+        assert_eq!(&a.core.read_body(ids[0]).unwrap()[..], b"first");
+    }
+
+    // Flip its direction, change its time.
     for (edit, undo) in [
-        (
-            "UPDATE messages SET thread_id = ?2 WHERE id = ?1",
-            "UPDATE messages SET thread_id = ?2 WHERE id = ?1",
-        ),
         (
             "UPDATE messages SET outgoing = 0 WHERE id = ?1",
             "UPDATE messages SET outgoing = 1 WHERE id = ?1",
@@ -435,24 +461,52 @@ fn stored_metadata_is_bound_to_ciphertext() {
             "UPDATE messages SET created_at = created_at - 1 WHERE id = ?1",
         ),
     ] {
-        let p: &[&[u8]] = if edit.contains("?2") {
-            &[&ids[0].0, &other.0]
-        } else {
-            &[&ids[0].0]
-        };
-        sql(edit, p);
+        sql(edit, &[&ids[0].0]);
         assert!(
             matches!(a.core.read_body(ids[0]).map(drop), Err(Error::Crypto)),
             "{edit}"
         );
-        let p: &[&[u8]] = if undo.contains("?2") {
-            &[&ids[0].0, &t.0]
-        } else {
-            &[&ids[0].0]
-        };
-        sql(undo, p);
+        sql(undo, &[&ids[0].0]);
         assert_eq!(&a.core.read_body(ids[0]).unwrap()[..], b"first");
     }
+
+    // A subject is bound to its thread's time and id: change the time, or
+    // give another thread with the same contact this subject and time.
+    sql(
+        "UPDATE threads SET created_at = created_at + 1 WHERE id = ?1",
+        &[&t.0],
+    );
+    assert!(matches!(a.core.threads().map(drop), Err(Error::Crypto)));
+    sql(
+        "UPDATE threads SET created_at = created_at - 1 WHERE id = ?1",
+        &[&t.0],
+    );
+    for column in ["subject", "created_at"] {
+        swap("threads", column, &t.0, &t2.0);
+    }
+    assert!(matches!(a.core.threads().map(drop), Err(Error::Crypto)));
+    for column in ["subject", "created_at"] {
+        swap("threads", column, &t.0, &t2.0);
+    }
+    assert_eq!(a.core.threads().unwrap().len(), 3);
+
+    // Contact rows are bound to their id. Bob's and Mallory's bundles
+    // swapped: nothing is encrypted to Mallory in Bob's thread, and no new
+    // thread is started. Their names swapped: Mallory is not shown as Bob.
+    swap("contacts", "bundle", &b_at_a.0, &m_at_a.0);
+    assert!(matches!(
+        a.core.send(t, b"secret", &a.signer),
+        Err(Error::Crypto)
+    ));
+    assert!(matches!(
+        a.core.new_thread(b_at_a, b"s").map(drop),
+        Err(Error::Crypto)
+    ));
+    swap("contacts", "bundle", &b_at_a.0, &m_at_a.0);
+    swap("contacts", "name", &b_at_a.0, &m_at_a.0);
+    assert!(matches!(a.core.contacts().map(drop), Err(Error::Crypto)));
+    swap("contacts", "name", &b_at_a.0, &m_at_a.0);
+    assert_eq!(a.core.contacts().unwrap().len(), 2);
 
     // Swap ciphertext between rows and between columns.
     sql(
@@ -468,6 +522,20 @@ fn stored_metadata_is_bound_to_ciphertext() {
         &[&b_at_a.0, &t.0],
     );
     assert!(matches!(a.core.contacts().map(drop), Err(Error::Crypto)));
+
+    // The identity row is bound to the own id: with the id edited, the
+    // right DEK no longer unlocks, so no envelope carries a forged sender.
+    let own: Vec<u8> = raw
+        .query_row("SELECT id FROM identity", [], |r| r.get(0))
+        .unwrap();
+    sql("UPDATE identity SET id = ?1", &[&m_at_a.0]);
+    a.core.lock();
+    assert!(matches!(
+        a.core.unlock(&mut a.dek.clone()),
+        Err(Error::WrongKey)
+    ));
+    sql("UPDATE identity SET id = ?1", &[&own[..]]);
+    a.core.unlock(&mut a.dek.clone()).unwrap();
 }
 
 #[test]
@@ -487,17 +555,22 @@ fn create_and_open_refuse_bad_files() {
 
     // Only absolute paths: SQLite would read `file:` names as URIs.
     let uri = format!("file:{}?mode=ro", dir.0.join("u.db").display());
+    // Each early refusal wipes the DEK too.
     for p in ["file:u.db", uri.as_str(), "u.db", ":memory:", ""] {
-        let r = Core::create(Path::new(p), &mut random(), &[1; 32]);
+        dek = random();
+        let r = Core::create(Path::new(p), &mut dek, &[1; 32]);
         assert!(matches!(r, Err(Error::Malformed)), "create {p:?}");
+        assert_eq!(dek, [0u8; 32], "create {p:?}");
         assert!(
             matches!(Core::open(Path::new(p)).map(drop), Err(Error::Malformed)),
             "open {p:?}"
         );
     }
     assert!(!Path::new("file:u.db").exists() && !Path::new("u.db").exists());
-    let r = Core::create(&dir.0.join("x.db"), &mut random(), &[]);
+    dek = random();
+    let r = Core::create(&dir.0.join("x.db"), &mut dek, &[]);
     assert!(matches!(r, Err(Error::Malformed)));
+    assert_eq!(dek, [0u8; 32]);
     assert!(!dir.0.join("x.db").exists());
 
     // create refuses an existing store and leaves it untouched.
@@ -529,6 +602,45 @@ fn create_and_open_refuse_bad_files() {
         Err(Error::Corrupt)
     ));
     assert_eq!(fs::read(&foreign).unwrap(), before);
+
+    // The same for a WAL-mode file (switching it to DELETE mode would
+    // rewrite it), a file that is not SQLite at all, and a truncated store.
+    let wal = dir.0.join("wal.db");
+    let c = rusqlite::Connection::open(&wal).unwrap();
+    let mode: String = c
+        .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    c.execute_batch("CREATE TABLE t (x BLOB)").unwrap();
+    drop(c);
+    let junk = dir.0.join("junk.db");
+    fs::write(&junk, random::<64>().repeat(100)).unwrap();
+    let short = dir.0.join("short.db");
+    let store = fs::read(&path).unwrap();
+    fs::write(&short, &store[..store.len() / 2]).unwrap();
+    for file in [wal, junk, short] {
+        let before = fs::read(&file).unwrap();
+        assert!(
+            matches!(Core::open(&file).map(drop), Err(Error::Corrupt)),
+            "{}",
+            file.display()
+        );
+        assert_eq!(fs::read(&file).unwrap(), before, "{}", file.display());
+    }
+
+    // open refuses a store whose header names another application or
+    // schema version.
+    for (pragma, bad) in [("application_id", 1), ("user_version", 2)] {
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        let good: i32 = raw.pragma_query_value(None, pragma, |r| r.get(0)).unwrap();
+        raw.pragma_update(None, pragma, bad).unwrap();
+        assert!(
+            matches!(Core::open(&path).map(drop), Err(Error::Corrupt)),
+            "{pragma}"
+        );
+        raw.pragma_update(None, pragma, good).unwrap();
+        drop(Core::open(&path).unwrap());
+    }
 
     // open refuses a store with a planted trigger.
     rusqlite::Connection::open(&path)
