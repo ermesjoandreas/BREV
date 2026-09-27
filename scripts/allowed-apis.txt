@@ -4,7 +4,12 @@
 # The grep looks in app/Sources for: NSPasteboard NSTextView NSTextField
 # NSTextInputClient .characters String(decoding NSString(
 # NSAttributedString( CTTypesetter CTFramesetter NSAlert print(
-# servicesMenu. A hit is allowed only if it is listed here, one per line:
+# servicesMenu String(utf16CodeUnits String(data String(bytes
+# String(cString String(validating String(utf8String
+# String(unsafeUninitializedCapacity NSMutableString
+# NSMutableAttributedString CFStringCreateWithCharacters( NSLog(
+# debugPrint( dump( os_log(. A hit is allowed only if it is listed here, one
+# per line:
 #
 #   path | reason | the source line, without leading and trailing spaces
 #

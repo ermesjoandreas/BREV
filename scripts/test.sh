@@ -144,6 +144,30 @@ if [[ "$DARWIN" == yes ]]; then
     echo "error: the record-field pattern finds no field in $BINDINGS; fix the check" >&2
     exit 1
   fi
+  # The greps above see only declarations: a String constructor, an Option,
+  # Vec or map of String, an enum or error payload and a callback argument
+  # all get past them. Each of those goes through a FfiConverter…String…
+  # type, so every line that names one must be one of these, exactly as often
+  # as listed: the converter itself, a Rust panic's message (content-free,
+  # design §14.1), uniffi's two callback error helpers (always emitted; there
+  # is no callback), the `dir` of create and open, and ping's reply.
+  CONV_LIST=(
+    'fileprivate struct FfiConverterString: FfiConverter {'
+    'throw UniffiInternalError.rustPanic(try FfiConverterString.lift(callStatus.errorBuf))'
+    'callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))'
+    'callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))'
+    'FfiConverterString.lower(dir),'
+    'FfiConverterString.lower(dir),uniffiCallStatus'
+    'return try!  FfiConverterString.lift(try! rustCall() {'
+  )
+  CONV_EXPECTED="$(printf '%s\n' "${CONV_LIST[@]}" | LC_ALL=C sort)"
+  CONV_FOUND="$(grep -E 'FfiConverter[A-Za-z0-9_]*String' "$BINDINGS" \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | LC_ALL=C sort || true)"
+  if [[ "$CONV_FOUND" != "$CONV_EXPECTED" ]]; then
+    echo "error: String converters in $BINDINGS differ from the known uses (< known, > found):" >&2
+    diff <(printf '%s\n' "$CONV_EXPECTED") <(printf '%s\n' "$CONV_FOUND") >&2 || true
+    exit 1
+  fi
 
   # gen-bindings.sh just patched the bindings; the first line proves it.
   # Must equal MARKER in scripts/patch-bindings.py.
@@ -159,10 +183,17 @@ fi
 # APIs that could put content where §1 forbids it (docs/PHASE2_DESIGN.md
 # §6.3, §11). A fixed-string grep over app/Sources; each hit must be listed,
 # with its reason, in scripts/allowed-apis.txt, and each listed line must
-# still exist, so the list cannot go stale.
+# still exist, so the list cannot go stale. The names after servicesMenu add
+# checkable cases of §6.3 rules 1 and 5 that §11's list misses: the other
+# ways to make a String from bytes or units, the mutable string classes, the
+# copying CFString constructor (the NoCopy one does not match) and the other
+# logging calls.
 echo "==> forbidden APIs in app/Sources"
 FORBIDDEN=(NSPasteboard NSTextView NSTextField NSTextInputClient .characters 'String(decoding' 'NSString('
-           'NSAttributedString(' CTTypesetter CTFramesetter NSAlert 'print(' servicesMenu)
+           'NSAttributedString(' CTTypesetter CTFramesetter NSAlert 'print(' servicesMenu
+           'String(utf16CodeUnits' 'String(data' 'String(bytes' 'String(cString' 'String(validating'
+           'String(utf8String' 'String(unsafeUninitializedCapacity' NSMutableString NSMutableAttributedString
+           'CFStringCreateWithCharacters(' 'NSLog(' 'debugPrint(' 'dump(' 'os_log(')
 GREP_ARGS=()
 for p in "${FORBIDDEN[@]}"; do GREP_ARGS+=(-e "$p"); done
 # "path<TAB>trimmed line" for every hit and for every allow-list entry

@@ -32,18 +32,6 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-# The generated Swift comes from uniffi_bindgen, the runtime it calls from
-# uniffi; both must be the pinned release. Each name must occur once in
-# Cargo.lock: two versions of either print two lines and fail too.
-for pkg in uniffi uniffi_bindgen; do
-  VERSION="$(awk -v name="name = \"$pkg\"" '$0 == name { getline; gsub(/^version = "|"$/, ""); print }' "$REPO_ROOT/core/Cargo.lock")"
-  if [[ "$VERSION" != "$PATCHED_FOR_UNIFFI" ]]; then
-    echo "error: uniffi changed: re-check scripts/patch-bindings.py and the heap-scan harness, then update PATCHED_FOR_UNIFFI" >&2
-    echo "       ($pkg in core/Cargo.lock: '${VERSION//$'\n'/, }'; PATCHED_FOR_UNIFFI=$PATCHED_FOR_UNIFFI)" >&2
-    exit 1
-  fi
-done
-
 # The app's deployment target (app/project.yml, D-0006). Without it the C
 # code in the archive (bundled SQLite, built by the cc crate) targets the SDK
 # version of this Mac, not the oldest macOS the app claims to run on.
@@ -55,6 +43,21 @@ echo "==> Building brev-core (release)"
 # One build produces both artefacts: libbrev_core.a, which the app links, and
 # the shared library (.dylib/.so) that bindgen reads UniFFI metadata from.
 cargo build --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-core
+
+# The generated Swift comes from uniffi_bindgen, the runtime it calls from
+# uniffi; both must be the pinned release. Each name must occur once in
+# Cargo.lock: two versions of either print two lines and fail too. Read after
+# the build, not before: cargo rewrites Cargo.lock when core/Cargo.toml no
+# longer matches it, for the whole workspace (the uniffi-bindgen crate too),
+# so this is the version bindgen below runs with.
+for pkg in uniffi uniffi_bindgen; do
+  VERSION="$(awk -v name="name = \"$pkg\"" '$0 == name { getline; gsub(/^version = "|"$/, ""); print }' "$REPO_ROOT/core/Cargo.lock")"
+  if [[ "$VERSION" != "$PATCHED_FOR_UNIFFI" ]]; then
+    echo "error: uniffi changed: re-check scripts/patch-bindings.py and the heap-scan harness, then update PATCHED_FOR_UNIFFI" >&2
+    echo "       ($pkg in core/Cargo.lock: '${VERSION//$'\n'/, }'; PATCHED_FOR_UNIFFI=$PATCHED_FOR_UNIFFI)" >&2
+    exit 1
+  fi
+done
 
 case "$(uname -s)" in
   Darwin) LIB="$TARGET_DIR/release/libbrev_core.dylib" ;;
@@ -77,11 +80,15 @@ if ! command -v swift-format >/dev/null 2>&1; then
 fi
 
 # Wipe stale output first so a renamed or removed binding can never linger and
-# get compiled into the app by accident.
-rm -rf "${OUT_DIR:?}"
-mkdir -p "$OUT_DIR"
+# get compiled into the app by accident. Bindgen writes into a staging
+# directory, and app/Generated gets the files only once they are patched: a
+# failed or interrupted run leaves no bindings there, so no build (Xcode's
+# included) can compile unpatched ones.
+STAGE_DIR="$TARGET_DIR/bindings-staging"
+rm -rf "${OUT_DIR:?}" "$STAGE_DIR"
+mkdir -p "$STAGE_DIR"
 
-echo "==> Generating Swift bindings into $OUT_DIR"
+echo "==> Generating Swift bindings into $STAGE_DIR"
 # --config is mandatory: the tool crate's uniffi is built without the
 # cargo-metadata feature, so without the [crate-roots] map the per-crate
 # uniffi.toml is not found and the module comes out misnamed (brev_core.swift).
@@ -92,23 +99,24 @@ cargo run --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" -p uniffi-bindg
   --library "$LIB" \
   --language swift \
   --config "$REPO_ROOT/core/uniffi-global.toml" \
-  --out-dir "$OUT_DIR" \
+  --out-dir "$STAGE_DIR" \
   $NO_FORMAT
 
 # The Xcode project references these exact names (project.yml adds
 # Generated/BrevCore.swift; the bridging header imports BrevCoreFFI.h).
 for f in BrevCore.swift BrevCoreFFI.h BrevCoreFFI.modulemap; do
-  if [[ ! -f "$OUT_DIR/$f" ]]; then
-    echo "error: bindgen did not produce $OUT_DIR/$f (check core/brev-core/uniffi.toml)" >&2
+  if [[ ! -f "$STAGE_DIR/$f" ]]; then
+    echo "error: bindgen did not produce $STAGE_DIR/$f (check core/brev-core/uniffi.toml)" >&2
     exit 1
   fi
 done
 
 # Wipe byte buffers before they are freed (CLAUDE.md §3.1). The script exits
 # non-zero when a patch does not apply exactly once, and `set -e` then stops
-# here, before build.sh or test.sh can compile unpatched bindings.
-echo "==> Patching $OUT_DIR/BrevCore.swift"
-python3 "$REPO_ROOT/scripts/patch-bindings.py" "$OUT_DIR/BrevCore.swift"
+# here, before anything reaches app/Generated.
+echo "==> Patching $STAGE_DIR/BrevCore.swift"
+python3 "$REPO_ROOT/scripts/patch-bindings.py" "$STAGE_DIR/BrevCore.swift"
+mv "$STAGE_DIR" "$OUT_DIR"
 
 echo "==> Bindings written:"
 ls -1 "$OUT_DIR"
