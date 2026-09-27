@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# Builds brev-core in release and regenerates the UniFFI Swift bindings into
-# app/Generated/ (gitignored). Runs on macOS and Linux, so a CI box without
-# Xcode can still prove that the bindings generate. build.sh calls this.
+# Builds brev-core in release, regenerates the UniFFI Swift bindings into
+# app/Generated/ (gitignored) and patches them (scripts/patch-bindings.py).
+# Runs on macOS and Linux, so a CI box without Xcode can still prove that the
+# bindings generate. build.sh and test.sh call this.
 #
 # Usage: scripts/gen-bindings.sh
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$REPO_ROOT/core/Cargo.toml"
+# The uniffi release scripts/patch-bindings.py and the heap-scan harness
+# (app/Tests) were checked against. Another version can change the generated
+# Swift in ways the patches do not match or, worse, add a copy path they do
+# not cover, so it stops the build until someone has re-checked both.
+PATCHED_FOR_UNIFFI=0.32.2
 # Every cargo command below pins this directory with --target-dir. The flag
 # overrides both CARGO_TARGET_DIR and a `[build] target-dir` in
 # ~/.cargo/config.toml, so the files checked below and the archive path that
@@ -20,6 +26,23 @@ if ! command -v cargo >/dev/null 2>&1; then
   echo "error: cargo not found. Install Rust with rustup: https://rustup.rs" >&2
   exit 1
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "error: python3 not found; scripts/patch-bindings.py needs it." >&2
+  echo "       Install it with: xcode-select --install (macOS) or your package manager (python3)" >&2
+  exit 1
+fi
+
+# The generated Swift comes from uniffi_bindgen, the runtime it calls from
+# uniffi; both must be the pinned release. Each name must occur once in
+# Cargo.lock: two versions of either print two lines and fail too.
+for pkg in uniffi uniffi_bindgen; do
+  VERSION="$(awk -v name="name = \"$pkg\"" '$0 == name { getline; gsub(/^version = "|"$/, ""); print }' "$REPO_ROOT/core/Cargo.lock")"
+  if [[ "$VERSION" != "$PATCHED_FOR_UNIFFI" ]]; then
+    echo "error: uniffi changed: re-check scripts/patch-bindings.py and the heap-scan harness, then update PATCHED_FOR_UNIFFI" >&2
+    echo "       ($pkg in core/Cargo.lock: '${VERSION//$'\n'/, }'; PATCHED_FOR_UNIFFI=$PATCHED_FOR_UNIFFI)" >&2
+    exit 1
+  fi
+done
 
 # The app's deployment target (app/project.yml, D-0006). Without it the C
 # code in the archive (bundled SQLite, built by the cc crate) targets the SDK
@@ -80,6 +103,12 @@ for f in BrevCore.swift BrevCoreFFI.h BrevCoreFFI.modulemap; do
     exit 1
   fi
 done
+
+# Wipe byte buffers before they are freed (CLAUDE.md §3.1). The script exits
+# non-zero when a patch does not apply exactly once, and `set -e` then stops
+# here, before build.sh or test.sh can compile unpatched bindings.
+echo "==> Patching $OUT_DIR/BrevCore.swift"
+python3 "$REPO_ROOT/scripts/patch-bindings.py" "$OUT_DIR/BrevCore.swift"
 
 echo "==> Bindings written:"
 ls -1 "$OUT_DIR"

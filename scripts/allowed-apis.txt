@@ -1,0 +1,14 @@
+# Allowed hits of the forbidden-API grep in scripts/test.sh
+# (docs/PHASE2_DESIGN.md §6.3, §11).
+#
+# The grep looks in app/Sources for: NSPasteboard NSTextView NSTextField
+# NSTextInputClient .characters String(decoding NSString(
+# NSAttributedString( CTTypesetter CTFramesetter NSAlert print(
+# servicesMenu. A hit is allowed only if it is listed here, one per line:
+#
+#   path | reason | the source line, without leading and trailing spaces
+#
+# The reason must not contain "|". test.sh also fails when a listed line no
+# longer exists, so review this file whenever a listed line changes.
+
+app/Sources/main.swift | a comment saying the Services menu is never set | // menu (NSApp.servicesMenu is never set), no Share menu, no Window menu, and no

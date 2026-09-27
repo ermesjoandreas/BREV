@@ -1,28 +1,67 @@
 #!/usr/bin/env bash
-# Runs every check that can run on this machine, in order: Rust formatting,
-# clippy, tests, dependency audit, and (macOS with a generated project only)
-# an Xcode compile check. Exits non-zero on the first failure.
+# Runs every check that can run on this machine, in order. On macOS first the
+# patched bindings (gen-bindings.sh) and the Xcode project (xcodegen), so
+# every later step sees the current core. Then Rust formatting, clippy,
+# tests, the zeroize and allocator checks, the FFI surface and patch-marker
+# checks (macOS), the forbidden-API grep, the dependency audit, the Swift
+# heap-scan harness (macOS) and an Xcode compile check (macOS with xcodegen).
+# Exits non-zero on the first failure.
 #
 # Usage: scripts/test.sh
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$REPO_ROOT/core/Cargo.toml"
+BINDINGS="$REPO_ROOT/app/Generated/BrevCore.swift"
 # Pinned with --target-dir on every cargo command that builds, as
 # gen-bindings.sh does: the flag overrides CARGO_TARGET_DIR and a
 # `[build] target-dir` in ~/.cargo/config.toml, so the artefacts always land
 # where this script and app/project.yml look for them. `cargo fmt` and
 # `cargo audit` build nothing and have no such flag.
 TARGET_DIR="$REPO_ROOT/core/target"
+STATICLIB="$TARGET_DIR/release/libbrev_core.a"
+DARWIN=no
 # Same deployment target as gen-bindings.sh, so the release test below and
 # the archive the app links share one SQLite build instead of rebuilding it.
 if [[ "$(uname -s)" == Darwin ]]; then
+  DARWIN=yes
   export MACOSX_DEPLOYMENT_TARGET=14.0
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then
   echo "error: cargo not found. Install Rust with rustup: https://rustup.rs" >&2
   exit 1
+fi
+
+# First, so nothing below links a stale archive or compiles stale bindings
+# (docs/DECISIONS.md D-0028 item 2): the release archive, the bindings
+# patched by scripts/patch-bindings.py (gen-bindings.sh fails if a patch no
+# longer applies or uniffi moved), and the Xcode project for the compile
+# check at the end.
+XCODEGEN=no
+if [[ "$DARWIN" == yes ]]; then
+  "$REPO_ROOT/scripts/gen-bindings.sh"
+  if command -v xcodegen >/dev/null 2>&1; then
+    echo "==> xcodegen generate"
+    xcodegen generate --spec "$REPO_ROOT/app/project.yml" --project "$REPO_ROOT/app"
+    XCODEGEN=yes
+  else
+    echo "==> xcodegen skipped: not installed (brew install xcodegen); the xcodebuild step is skipped too"
+  fi
+  # The harness and xcodebuild build for the arch the Rust archive was built
+  # for, read from the archive itself rather than `uname -m` (the two differ
+  # when the rustup toolchain is not native to the shell); see the comment
+  # in scripts/build.sh.
+  ARCH="$(lipo -archs "$STATICLIB")"
+  case "$ARCH" in
+    arm64|x86_64) ;;
+    *)
+      echo "error: $STATICLIB is built for '$ARCH'; expected exactly one of arm64 or x86_64." >&2
+      echo "       Check which toolchain cargo used (rustup show) and rebuild with scripts/gen-bindings.sh." >&2
+      exit 1 ;;
+  esac
+else
+  echo "==> gen-bindings, xcodegen skipped: not macOS ($(uname -s))"
 fi
 
 echo "==> cargo fmt --check"
@@ -77,6 +116,75 @@ if ! grep -q "zeroizing_alloc5WIPER" <<<"$SYMBOLS"; then
   exit 1
 fi
 
+if [[ "$DARWIN" == yes ]]; then
+  # No String carries content across the FFI (docs/PHASE2_DESIGN.md §2.2).
+  # The only public functions with a String are these three, and each must
+  # be found, so the grep cannot pass by matching nothing.
+  echo "==> FFI surface: no content String"
+  ALLOWED_FUNCS=('func ping\(\) -> String' 'func create\(dir: String, ' 'func `?open`?\(dir: String\)')
+  FUNCS="$(grep -nE '^(public |open )(static )?func .*String' "$BINDINGS" || true)"
+  for f in "${ALLOWED_FUNCS[@]}"; do
+    if ! grep -Eq "$f" <<<"$FUNCS"; then
+      echo "error: expected a public function matching '$f' in $BINDINGS; the surface check no longer matches the bindings" >&2
+      exit 1
+    fi
+  done
+  if grep -Ev "$(IFS='|'; echo "${ALLOWED_FUNCS[*]}")" <<<"$FUNCS"; then
+    echo "error: the functions above pass a String across the FFI" >&2
+    exit 1
+  fi
+  # No record field is a String (the errors' `errorDescription: String?` is
+  # not a field). Control: the same pattern finds the Data fields.
+  FIELD='^[[:space:]]+public (var|let) [a-zA-Z]+: '
+  if grep -nE "${FIELD}String([^?]|\$)" "$BINDINGS"; then
+    echo "error: the record fields above are Strings" >&2
+    exit 1
+  fi
+  if ! grep -Eq "${FIELD}Data\$" "$BINDINGS"; then
+    echo "error: the record-field pattern finds no field in $BINDINGS; fix the check" >&2
+    exit 1
+  fi
+
+  # gen-bindings.sh just patched the bindings; the first line proves it.
+  # Must equal MARKER in scripts/patch-bindings.py.
+  echo "==> bindings patched"
+  if [[ "$(head -n 1 "$BINDINGS")" != "// brev: patched by scripts/patch-bindings.py" ]]; then
+    echo "error: $BINDINGS is not patched (scripts/patch-bindings.py did not run)" >&2
+    exit 1
+  fi
+else
+  echo "==> FFI surface and patch-marker checks skipped: not macOS ($(uname -s))"
+fi
+
+# APIs that could put content where §1 forbids it (docs/PHASE2_DESIGN.md
+# §6.3, §11). A fixed-string grep over app/Sources; each hit must be listed,
+# with its reason, in scripts/allowed-apis.txt, and each listed line must
+# still exist, so the list cannot go stale.
+echo "==> forbidden APIs in app/Sources"
+FORBIDDEN=(NSPasteboard NSTextView NSTextField NSTextInputClient .characters 'String(decoding' 'NSString('
+           'NSAttributedString(' CTTypesetter CTFramesetter NSAlert 'print(' servicesMenu)
+GREP_ARGS=()
+for p in "${FORBIDDEN[@]}"; do GREP_ARGS+=(-e "$p"); done
+# "path<TAB>trimmed line" for every hit and for every allow-list entry
+# ("path | reason | trimmed line"; comments and blank lines skipped).
+TAB=$'\t'
+HITS="$(cd "$REPO_ROOT" && grep -rnF "${GREP_ARGS[@]}" app/Sources \
+  | sed -E "s/^([^:]*):[0-9]+:[[:space:]]*/\\1${TAB}/; s/[[:space:]]+\$//" || true)"
+LISTED="$(grep -vE '^[[:space:]]*(#|$)' "$REPO_ROOT/scripts/allowed-apis.txt" \
+  | sed -E "s/^([^|]*[^| ]) \\| [^|]+ \\| /\\1${TAB}/" || true)"
+UNLISTED="$(grep -vxF -f <(printf '%s\n' "$LISTED" | grep -v '^$' || true) <<<"$HITS" | grep -v '^$' || true)"
+STALE="$(grep -vxF -f <(printf '%s\n' "$HITS" | grep -v '^$' || true) <<<"$LISTED" | grep -v '^$' || true)"
+if [[ -n "$UNLISTED" ]]; then
+  echo "error: forbidden API in app/Sources (list it in scripts/allowed-apis.txt with a reason, or remove it):" >&2
+  echo "$UNLISTED" >&2
+  exit 1
+fi
+if [[ -n "$STALE" ]]; then
+  echo "error: scripts/allowed-apis.txt lists lines that no longer exist (or an entry is malformed):" >&2
+  echo "$STALE" >&2
+  exit 1
+fi
+
 # cargo-audit is optional on a dev machine but required clean from Phase 1 on
 # (CLAUDE.md §5, Phase 1 definition of done; in CI from Phase 5), so skipping
 # it is loud, never silent.
@@ -89,20 +197,58 @@ else
   echo "         Install it with: cargo install cargo-audit" >&2
 fi
 
-# Compile check of the Swift app. Needs macOS, Xcode, and all three things
-# scripts/build.sh produces before it links: app/Brev.xcodeproj (XcodeGen),
-# app/Generated/BrevCore.swift (a source file of the target) and
-# core/target/release/libbrev_core.a (named by path in OTHER_LDFLAGS). The
-# project alone is not enough: XcodeGen validated the source at generate time
-# but Xcode does not, and the checks above only build the debug profile, so
-# after `cargo clean` or `rm -rf app/Generated` a stale project would fail on
-# a missing link input for reasons unrelated to the Rust checks that just
-# passed. Skip with a message instead.
-XCODEPROJ="$REPO_ROOT/app/Brev.xcodeproj"
-BINDINGS="$REPO_ROOT/app/Generated/BrevCore.swift"
-STATICLIB="$TARGET_DIR/release/libbrev_core.a"
-if [[ "$(uname -s)" != "Darwin" ]]; then
+# The Swift heap-scan harness (docs/PHASE2_DESIGN.md §11): a CLI process, so
+# no window and no prompt, built from app/Sources/Shared, the patched
+# bindings and the release archive. Every case runs five times and every run
+# must pass: under MallocScribble=1, as the app runs (Info.plist
+# LSEnvironment), except case 6's control without scribbling, which proves
+# that the glyph needle works and that scribbling is what clears the glyphs
+# (it finds nothing at 200 units or less, so it runs at 4096 and 65000).
+if [[ "$DARWIN" == yes ]]; then
+  echo "==> Swift harness (app/Tests)"
+  HARNESS_DIR="$TARGET_DIR/harness"
+  rm -rf "$HARNESS_DIR"
+  mkdir -p "$HARNESS_DIR/tmp"
+  xcrun clang -O2 -Wall -target "$ARCH-apple-macos14.0" -c "$REPO_ROOT/app/Tests/scan.c" -o "$HARNESS_DIR/scan.o"
+  xcrun swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" \
+    -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
+    "$REPO_ROOT"/app/Sources/Shared/*.swift "$BINDINGS" "$REPO_ROOT"/app/Tests/*.swift \
+    "$HARNESS_DIR/scan.o" "$STATICLIB" -o "$HARNESS_DIR/harness"
+  # run_harness <label> <scribble|none> <harness arguments...>
+  run_harness() {
+    local label="$1" mode="$2" i out
+    shift 2
+    local env_args=(TMPDIR="$HARNESS_DIR/tmp/")
+    if [[ "$mode" == scribble ]]; then env_args+=(MallocScribble=1); else env_args=(-u MallocScribble "${env_args[@]}"); fi
+    for i in 1 2 3 4 5; do
+      if ! out="$(env "${env_args[@]}" "$HARNESS_DIR/harness" "$@" 2>&1)"; then
+        echo "$out"
+        echo "error: harness $label failed in run $i of 5" >&2
+        exit 1
+      fi
+    done
+    echo "    $label: 5 of 5 passed"
+  }
+  run_harness "case 1 (units)" scribble units
+  run_harness "case 3 (DEK hand-off, HPKE needles)" scribble dek
+  for n in 64 200 4096 65000; do
+    run_harness "case 4 (content path, $n units)" scribble content "$n"
+  done
+  run_harness "case 5 (kept OpenText after lock)" scribble kept
+  run_harness "case 6 (a live String is seen)" scribble control
+  for n in 4096 65000; do
+    run_harness "case 6 (no scribbling: glyphs left, $n units)" none content "$n" --no-scribble
+  done
+else
+  echo "==> Swift harness skipped: not macOS ($(uname -s))"
+fi
+
+# Compile check of the Swift app: the project xcodegen generated above, the
+# bindings and the archive gen-bindings.sh built above.
+if [[ "$DARWIN" != yes ]]; then
   echo "==> xcodebuild skipped: not macOS ($(uname -s))"
+elif [[ "$XCODEGEN" != yes ]]; then
+  echo "==> xcodebuild skipped: xcodegen is not installed (brew install xcodegen)"
 elif ! xcodebuild -version >/dev/null; then
   # /usr/bin/xcodebuild exists on every Mac (a shim, also with Command Line
   # Tools only), so `command -v` would pass; only running it proves Xcode is
@@ -110,27 +256,12 @@ elif ! xcodebuild -version >/dev/null; then
   # Xcode, wrong xcode-select path, or a license not yet accepted, which also
   # makes `xcodebuild -version` fail).
   echo "==> xcodebuild skipped: Xcode is not installed, not selected (sudo xcode-select -s /Applications/Xcode.app) or its license is not accepted (sudo xcodebuild -license accept)"
-elif [[ ! -d "$XCODEPROJ" || ! -f "$BINDINGS" || ! -f "$STATICLIB" ]]; then
-  echo "==> xcodebuild skipped: run scripts/build.sh first; missing:"
-  [[ -d "$XCODEPROJ" ]] || echo "    $XCODEPROJ (xcodegen generate)"
-  [[ -f "$BINDINGS" ]]  || echo "    $BINDINGS (scripts/gen-bindings.sh)"
-  [[ -f "$STATICLIB" ]] || echo "    $STATICLIB (scripts/gen-bindings.sh)"
 else
-  # -destination pins the active arch to the one the Rust archive was built
-  # for, read from the archive itself rather than `uname -m` (the two differ
-  # when the rustup toolchain is not native to the shell), and avoids the
-  # "multiple matching destinations" warning; see the comment in
+  # -destination pins the active arch to the archive's (ARCH, above) and
+  # avoids the "multiple matching destinations" warning; see the comment in
   # scripts/build.sh.
-  ARCH="$(lipo -archs "$STATICLIB")"
-  case "$ARCH" in
-    arm64|x86_64) ;;
-    *)
-      echo "error: $STATICLIB is built for '$ARCH'; expected exactly one of arm64 or x86_64." >&2
-      echo "       Check which toolchain cargo used (rustup show) and rebuild with scripts/gen-bindings.sh." >&2
-      exit 1 ;;
-  esac
   echo "==> xcodebuild (Debug compile check, $ARCH)"
-  xcodebuild -project "$XCODEPROJ" -scheme Brev -configuration Debug \
+  xcodebuild -project "$REPO_ROOT/app/Brev.xcodeproj" -scheme Brev -configuration Debug \
     -destination "platform=macOS,arch=$ARCH" ONLY_ACTIVE_ARCH=YES build
 fi
 
