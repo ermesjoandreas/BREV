@@ -16,6 +16,22 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [dependencies]
 uniffi = { workspace = true }
 thiserror = { workspace = true }
+brev-proto = { path = "../brev-proto" }
+rusqlite = { workspace = true }
+chacha20poly1305 = { workspace = true }
+x25519-dalek = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# Test-only signer/verifier for the envelope signature slot (CLAUDE.md §4:
+# ed25519-dalek is relay-side only; never a normal dependency of brev-core).
+ed25519-dalek = { workspace = true }
+# `trace` (a no-dependency feature of an approved crate) lets one test record
+# every SQL statement with its bound values. Test builds only.
+rusqlite = { workspace = true, features = ["trace"] }
 
 [lints]
 workspace = true
