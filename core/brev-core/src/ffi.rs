@@ -241,9 +241,14 @@ impl Brev {
     }
 
     /// Closes every open text and locks all three stores (their DEKs are
-    /// zeroed). Idempotent; never fails, also after a panic.
+    /// zeroed). Idempotent; never fails, also after a panic. It clears the
+    /// poison a panic left, so the unlock after it works.
     pub fn lock(&self) {
-        guard(&self.s).lock_all();
+        let mut s = guard(&self.s);
+        s.lock_all();
+        // Cleared while `s` is held, so no other call can poison the mutex
+        // between `lock_all` and here.
+        self.s.clear_poison();
     }
 
     /// True while locked.
@@ -511,6 +516,9 @@ mod tests {
     fn locked_session_refuses_every_export() {
         let t = tmp();
         let (b, dek) = session(&t.0);
+        // `create` locks everything, the peers too (`is_locked` reads only
+        // the user's core).
+        assert!(all_locked(&b));
         b.unlock(&dek).unwrap();
         let contact = b.contacts().unwrap()[0].id.clone();
         let thread = b.send_new(contact.clone(), b"s", 1, b"b", 1).unwrap();
@@ -561,16 +569,59 @@ mod tests {
         assert!(!b.s.is_poisoned());
         assert!(all_locked(&b));
 
-        // `lock` and `is_locked` on the poisoned session never fail.
+        // `is_locked` on the poisoned session: true, poison cleared.
         panic_in_unlock();
-        b.lock();
-        assert!(all_locked(&b));
         assert!(b.is_locked());
         assert!(!b.s.is_poisoned());
+        assert!(all_locked(&b));
 
+        // `lock` on the poisoned session never fails and clears the poison,
+        // so the unlock right after it (the app's retry) succeeds.
+        panic_in_unlock();
+        b.lock();
+        assert!(!b.s.is_poisoned());
+        assert!(all_locked(&b));
         b.unlock(&dek).unwrap();
         assert!(!b.is_locked());
         assert_eq!(b.contacts().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn poison_while_unlocked_locks_all_on_next_call() {
+        let t = tmp();
+        let (b, dek) = session(&t.0);
+        b.unlock(&dek).unwrap();
+        let name = Arc::clone(&b.contacts().unwrap()[0].name);
+        // A panic in a content method while unlocked: every DEK is loaded
+        // and no drop guard has locked anything.
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            let _s = b.s.lock().unwrap();
+            panic!("test panic while unlocked");
+        }));
+        assert!(r.is_err());
+        assert!(b.s.is_poisoned());
+        // Positive control.
+        assert!(!all_locked(&b));
+        assert!(name.byte_len() > 0);
+
+        assert!(matches!(b.contacts(), Err(BrevError::Locked)));
+        assert!(!b.s.is_poisoned());
+        assert!(all_locked(&b));
+        assert_eq!(name.byte_len(), 0);
+        assert_eq!(crypto::live_plaintexts(), 0);
+    }
+
+    #[test]
+    fn drop_closes_every_open_text() {
+        let t = tmp();
+        let (b, dek) = session(&t.0);
+        b.unlock(&dek).unwrap();
+        let name = Arc::clone(&b.contacts().unwrap()[0].name);
+        assert!(name.byte_len() > 0, "positive control");
+        drop(b);
+        assert_eq!(name.byte_len(), 0);
+        assert!(matches!(name.chunk(0), Err(BrevError::Locked)));
+        assert_eq!(crypto::live_plaintexts(), 0);
     }
 
     #[test]

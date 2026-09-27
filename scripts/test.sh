@@ -60,6 +60,22 @@ if ! grep -Eq "(^|[^a-z0-9_-])zeroizing-alloc v" <<<"$FEATURES"; then
   echo "error: brev-core does not depend on zeroizing-alloc" >&2
   exit 1
 fi
+# The dependency alone proves nothing: without `#[global_allocator]` every
+# check above still passes, and no safe test can read freed memory. The
+# crate's `WIPER` is linked only when `ZeroAlloc` frees, so require it in the
+# release test binary built above (no rebuild here). nm's output is captured
+# first: `grep -q` in a pipe could stop nm with SIGPIPE under pipefail.
+TESTBIN="$(cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-core --lib --no-run --message-format=json \
+  | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p')"
+if [[ ! -f "$TESTBIN" ]]; then
+  echo "error: no release test binary of brev-core found" >&2
+  exit 1
+fi
+SYMBOLS="$(nm "$TESTBIN")"
+if ! grep -q "zeroizing_alloc5WIPER" <<<"$SYMBOLS"; then
+  echo "error: brev-core's global allocator is not zeroizing_alloc::ZeroAlloc" >&2
+  exit 1
+fi
 
 # cargo-audit is optional on a dev machine but required clean from Phase 1 on
 # (CLAUDE.md §5, Phase 1 definition of done; in CI from Phase 5), so skipping
