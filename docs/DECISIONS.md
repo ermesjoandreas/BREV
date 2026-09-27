@@ -1209,3 +1209,60 @@ the new numbers.
 - **Verified:** Specification change only; no relay or contact code exists
   yet. The §2 copy in `docs/THREAT_MODEL.md` was re-diffed against
   CLAUDE.md.
+
+---
+
+## Phase 2 — locked UI (2026-09-27)
+
+### D-0032 — Product-owner decisions before Phase 2: key files, HPKE, zeroing allocator, patched bindings, stored padding
+
+- **Date:** 2026-09-27
+- **Decision:** The product owner accepted all seven recommendations from the
+  Phase 2 spikes. CLAUDE.md §1.9, §2, §3.1, §3.2, §3.3, §4 and §5 Phase 2
+  were changed to match, and `docs/THREAT_MODEL.md` was re-synced.
+  1. The two Secure Enclave keys are CryptoKit `SecureEnclave.P256` keys.
+     Their `dataRepresentation` is stored as files in the app container,
+     not in the keychain. The DEK is wrapped with HPKE (RFC 9180,
+     `P256_SHA256_AES_GCM_256`) instead of `SecKeyCreateDecryptedData`.
+     Keychain storage returns in Phase 5 with a Developer ID.
+  2. Accepted residual risk: the key files are not bound to Brev (§2).
+  3. `.biometryCurrentSet` stays. Adding or removing a fingerprint loses the
+     history and identity, and onboarding says so (§1.9).
+  4. `zeroizing-alloc` (1Password) is approved as `brev-core`'s global
+     allocator (§4).
+  5. `scripts/gen-bindings.sh` patches the generated Swift bindings to wipe
+     byte buffers before they are freed, and fails the build if a patch
+     does not apply. This is an exception to D-0002's "generated, not
+     written".
+  6. Accepted residual risk: internal copies in Core Text / CoreGraphics
+     and CryptoKit / Security (§2), mitigated by drawing one line at a time
+     and a 64 KiB stack scrub in `unlock`.
+  7. Stored content (contact names, subjects, bodies) is padded to the
+     envelope buckets in Phase 2, with schema v2, before any real store
+     exists.
+- **Reasoning:** Facts from the Phase 2 spikes on this Mac (macOS 26.2):
+  - Keychain: `SecKeyCreateRandomKey` with `kSecAttrIsPermanent` fails with
+    -34018 (`errSecMissingEntitlement`) for an ad-hoc signed sandboxed
+    app, with or without the data protection keychain (TN3137: it needs a
+    provisioning profile). CryptoKit Secure Enclave keys can be created and
+    their blobs restored in a later launch without any prompt; HPKE wrap to
+    the KEK needs no prompt.
+  - Key blobs: a no-biometry blob worked from another, unsandboxed binary,
+    so a blob is not bound to the app that made it. Whether the system
+    dialog names the other program is still to be confirmed by the user's
+    Touch ID test.
+  - FFI: with stock uniffi 0.32, a `Vec<u8>` returned to Swift left copies
+    in freed memory at 5 places; `&[u8]` arguments are zero-copy and left
+    none. With a zeroing allocator plus the patched bindings, residue was 0
+    on all six byte paths at 4 KiB, 64 KiB and 1 MiB (one run each). The
+    allocator cost about 8–10 ms extra per GiB of cache-hot 4 KiB churn.
+  - Core Text: laying out a whole body with `CTFramesetter` left a full copy
+    in freed memory; drawing one `CTLine` per line left at most one line of
+    glyph ids, overwritten by the next line of the same length.
+  - Stored padding: adding it after real stores exist would need every row
+    re-encrypted; Phase 2 is the last point where it is free.
+- **Verified:** Spike results are in the session scratchpad (not in the
+  repo); each spike was re-checked by a second agent, whose corrections are
+  reflected above (for example "one run each"). Still open: the user's
+  Touch ID test of the full HPKE unwrap, and the GUI spikes on screen
+  capture, input, accessibility and lock triggers.

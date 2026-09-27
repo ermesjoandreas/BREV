@@ -22,7 +22,7 @@ NEVER:
 6. Enable autocorrect, spell-check, predictive text, dictation, or Apple Writing Tools in any view that holds content.
 7. Implement your own cryptographic primitives. Use audited crates only (see §4). Ask before adding any dependency not listed here.
 8. Allow a password fallback for unlocking. Touch ID only (`.deviceOwnerAuthenticationWithBiometrics`, `.biometryCurrentSet`).
-9. Sync keys to iCloud Keychain. Keys are `ThisDeviceOnly` and non-synchronizable. Losing the Mac means losing the history — this is intentional and must be explained to the user at setup.
+9. Sync keys to iCloud Keychain. Keys are `ThisDeviceOnly` and non-synchronizable. Losing the Mac means losing the history — this is intentional and must be explained to the user at setup. The same happens when fingerprints are added or removed (`.biometryCurrentSet`), and setup says that too.
 10. Keep plaintext in memory longer than needed. Zeroize buffers when a message is closed or the app locks.
 
 ALWAYS:
@@ -53,6 +53,8 @@ Out of scope — explicitly NOT defended against:
 Accepted residual risk — known, reviewed, and not fixed:
 
 * Transient stack copies of key material inside audited crates that no `zeroize` feature reaches: (1) ChaCha20 intermediates when XChaCha derives its subkey (HChaCha20 state), (2) the HKDF intermediate key (PRK) inside `hkdf`, (3) by-value copies of the X25519 secret inside `x25519-dalek`. They cannot be wiped without `unsafe`, and even `unsafe` could not guarantee it. Mitigation: `scrub_stack()` overwrites 16 KiB of stack after each crypto operation, and a release-mode test proves the wipe is not optimised away. Out of the threat model: reading another process's memory already needs root or a kernel compromise (Hardened Runtime blocks debuggers, and macOS encrypts swap).
+* Internal copies inside Apple frameworks that Brev cannot wipe: Core Text / CoreGraphics while a line is drawn, and CryptoKit / Security while the Secure Enclave unwraps the DEK. Mitigation: content is drawn one line at a time from a wipeable buffer, never laid out as a whole body, and `unlock` overwrites 64 KiB of stack. Out of the threat model for the same reason as above.
+* The Secure Enclave key files are not bound to Brev. Another process of the same user that can read Brev's container can copy a key file and ask for Touch ID to use Brev's key. It still needs the user's finger, and the system dialog names the requesting program; onboarding tells the user to unlock only from Brev's own prompt. Revisit in Phase 5, when a Developer ID allows keychain storage.
 
 ## 3. Architecture
 
@@ -77,11 +79,11 @@ brev/
 ### 3.1 Rust core (`brev-core`) — owns everything that touches content
 
 * Data model: `Contact`, `Message`, `Thread`, `Envelope`.
-* Encrypted store: SQLite via `rusqlite` (bundled). Every content column is a ciphertext BLOB. Metadata that must be queryable (contact id, timestamp, read flag) may be plaintext, but never subject lines or bodies.
+* Encrypted store: SQLite via `rusqlite` (bundled). Every content column is a ciphertext BLOB, padded before encryption to the same buckets as envelopes (§5 Phase 3), so stored lengths show only the bucket. Metadata that must be queryable (contact id, timestamp, read flag) may be plaintext, but never subject lines or bodies.
 * Crypto (see §4): identity keys, message encryption/decryption, envelope signing/verification.
 * Session state: an `Unlocked` / `Locked` state machine. When locked, the data-encryption key and all plaintext are zeroized and every content call returns `Err(Locked)`.
 * Transport trait: `trait Transport { send(Envelope); poll() -> Vec<Envelope> }` with a `MockTransport` (in-process, Phase 2) and `RelayTransport` (HTTP, Phase 3).
-* Exposed to Swift with UniFFI (`uniffi` crate, proc-macro style). The Swift side never sees raw keys; it passes opaque handles.
+* Exposed to Swift with UniFFI (`uniffi` crate, proc-macro style). The Swift side never sees raw keys; it passes opaque handles. `brev-core` uses a zeroing global allocator (`zeroizing-alloc`), so every freed Rust buffer, including UniFFI's, is wiped. `scripts/gen-bindings.sh` patches the generated Swift so byte buffers are wiped before they are freed; the build fails if a patch no longer applies.
 
 ### 3.2 Swift app (`app/`) — owns only what must be Mac-native
 
@@ -90,7 +92,7 @@ brev/
 * `SecureComposeView: NSView` — same rendering, custom key handling, calls `EnableSecureEventInput()` on focus and `DisableSecureEventInput()` on blur. Rejects events where `CGEventGetIntegerValueField(event, .eventSourceUnixProcessID) != 0` (synthetic input from another process).
 * Main window: `sharingType = .none`, `isExcludedFromWindowsMenu = true`, `titlebarAppearsTransparent`, no content in title.
 * Auto-lock: on `NSApplication.didResignActiveNotification`, on screen lock, and after N minutes idle → call `core.lock()`, blank all views.
-* Touch ID gate: `LAContext` with `.deviceOwnerAuthenticationWithBiometrics`. Secure Enclave key created with `SecAccessControlCreateWithFlags(... [.privateKeyUsage, .biometryCurrentSet])` and `kSecAttrTokenIDSecureEnclave`, `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`.
+* Touch ID gate: `LAContext` with `.deviceOwnerAuthenticationWithBiometrics` and `localizedFallbackTitle = ""` (no password button). Secure Enclave keys are CryptoKit `SecureEnclave.P256` keys created with `SecAccessControlCreateWithFlags(kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, [.privateKeyUsage, .biometryCurrentSet])`. Each key's `dataRepresentation` (usable only by this Mac's Secure Enclave) is stored as a file in the app container, mode 0600. Not in the keychain: an ad-hoc signed app gets `errSecMissingEntitlement` (-34018) there. Keychain storage returns in Phase 5 with a Developer ID.
 * Notifications via `UserNotifications`, text exactly "Ny melding" (no sender name, no content).
 * Bundle: Hardened Runtime ON, App Sandbox ON, `get-task-allow` OFF, library validation ON, no `NSAppleScriptEnabled`, no `NSServices`, no document types, no URL types.
 * UI language: Norwegian (bokmål). Keep strings in `Localizable.strings`.
@@ -100,15 +102,15 @@ brev/
 The Secure Enclave can only hold P-256 keys, so:
 
 * Identity signing key: P-256 in Secure Enclave, Touch ID-gated. Signs every outgoing envelope. Public key = the user's identity.
-* Key-encryption key (KEK): a second P-256 Enclave key used with `SecKeyCreateDecryptedData` (ECIES) to unwrap a 32-byte data-encryption key (DEK) that lives only in Rust memory while unlocked.
+* Key-encryption key (KEK): a second P-256 Enclave key (CryptoKit `SecureEnclave.P256.KeyAgreement`). The 32-byte data-encryption key (DEK) is wrapped to it with HPKE (RFC 9180, `P256_SHA256_AES_GCM_256`, CryptoKit) and unwrapped with one Touch ID prompt. The DEK lives only in Rust memory while unlocked.
 * DEK encrypts the SQLite content columns (XChaCha20-Poly1305).
 * X25519 message keys (for encrypting to contacts) are generated in Rust and stored in the DB, encrypted under the DEK.
-* Unlock flow: Swift → Touch ID → Enclave unwraps DEK → `core.unlock(dek)` → Rust zeroizes the Swift-side buffer reference immediately after copy.
+* Unlock flow: Swift → Touch ID → Enclave unwraps DEK (HPKE) → `core.unlock(dek: &[u8])` (no copy across the FFI) → Rust copies it into its own buffer → Swift wipes its buffer in place immediately after the call.
 * Lock flow: `core.lock()` → zeroize DEK + all cached plaintext.
 
 ## 4. Approved dependencies
 
-Rust: `uniffi`, `rusqlite` (features `bundled`), `chacha20poly1305` (XChaCha), `x25519-dalek`, `ed25519-dalek` (relay-side only), `p256` (feature `ecdsa`; verifies Secure Enclave P-256 signatures in `brev-core` and `brev-relay`; Swift only signs), `poly1305` (feature `zeroize` only, to wipe the one-time MAC key), `hkdf`, `sha2`, `rand` (with `getrandom`), `zeroize`, `serde` + `serde_json`, `thiserror`, `anyhow` (bin crates only), `tokio` + `axum` + `reqwest` (relay/transport only), `tracing` (never log content).
+Rust: `uniffi`, `rusqlite` (features `bundled`), `chacha20poly1305` (XChaCha), `x25519-dalek`, `ed25519-dalek` (relay-side only), `p256` (feature `ecdsa`; verifies Secure Enclave P-256 signatures in `brev-core` and `brev-relay`; Swift only signs), `poly1305` (feature `zeroize` only, to wipe the one-time MAC key), `zeroizing-alloc` (1Password; `brev-core`'s global allocator, zeroes every freed block), `hkdf`, `sha2`, `rand` (with `getrandom`), `zeroize`, `serde` + `serde_json`, `thiserror`, `anyhow` (bin crates only), `tokio` + `axum` + `reqwest` (relay/transport only), `tracing` (never log content).
 
 Swift: Foundation, AppKit, Security, LocalAuthentication, CryptoKit (only for Enclave interop), UserNotifications, DeviceCheck (Phase 4). No third-party Swift packages without asking.
 
@@ -146,6 +148,7 @@ Each phase ends with a short summary in `docs/DECISIONS.md` and passing `scripts
 * Compose sheet with `SecureComposeView` (secure event input, synthetic event rejection, no pasteboard, no autocorrect, `writingToolsBehavior = .none`).
 * Window capture exclusion, auto-lock, blank-on-lock.
 * Two contacts hard-coded through `MockTransport` so you can send a message to yourself and see it arrive.
+* Stored content (contact names, subjects, bodies) padded to the envelope buckets with the padding function from `brev-proto` (schema v2), before any real store exists.
 * Manual verification checklist (write it to `docs/VERIFY.md` and run it):
    * Screenshot (⇧⌘4) of the window shows black/empty content.
    * Accessibility Inspector shows no text for content views.

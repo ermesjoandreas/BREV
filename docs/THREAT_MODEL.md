@@ -20,7 +20,7 @@ NEVER:
 6. Enable autocorrect, spell-check, predictive text, dictation, or Apple Writing Tools in any view that holds content.
 7. Implement your own cryptographic primitives. Use audited crates only (see §4). Ask before adding any dependency not listed here.
 8. Allow a password fallback for unlocking. Touch ID only (`.deviceOwnerAuthenticationWithBiometrics`, `.biometryCurrentSet`).
-9. Sync keys to iCloud Keychain. Keys are `ThisDeviceOnly` and non-synchronizable. Losing the Mac means losing the history — this is intentional and must be explained to the user at setup.
+9. Sync keys to iCloud Keychain. Keys are `ThisDeviceOnly` and non-synchronizable. Losing the Mac means losing the history — this is intentional and must be explained to the user at setup. The same happens when fingerprints are added or removed (`.biometryCurrentSet`), and setup says that too.
 10. Keep plaintext in memory longer than needed. Zeroize buffers when a message is closed or the app locks.
 
 ALWAYS:
@@ -51,3 +51,5 @@ Out of scope — explicitly NOT defended against:
 Accepted residual risk — known, reviewed, and not fixed:
 
 * Transient stack copies of key material inside audited crates that no `zeroize` feature reaches: (1) ChaCha20 intermediates when XChaCha derives its subkey (HChaCha20 state), (2) the HKDF intermediate key (PRK) inside `hkdf`, (3) by-value copies of the X25519 secret inside `x25519-dalek`. They cannot be wiped without `unsafe`, and even `unsafe` could not guarantee it. Mitigation: `scrub_stack()` overwrites 16 KiB of stack after each crypto operation, and a release-mode test proves the wipe is not optimised away. Out of the threat model: reading another process's memory already needs root or a kernel compromise (Hardened Runtime blocks debuggers, and macOS encrypts swap).
+* Internal copies inside Apple frameworks that Brev cannot wipe: Core Text / CoreGraphics while a line is drawn, and CryptoKit / Security while the Secure Enclave unwraps the DEK. Mitigation: content is drawn one line at a time from a wipeable buffer, never laid out as a whole body, and `unlock` overwrites 64 KiB of stack. Out of the threat model for the same reason as above.
+* The Secure Enclave key files are not bound to Brev. Another process of the same user that can read Brev's container can copy a key file and ask for Touch ID to use Brev's key. It still needs the user's finger, and the system dialog names the requesting program; onboarding tells the user to unlock only from Brev's own prompt. Revisit in Phase 5, when a Developer ID allows keychain storage.
