@@ -396,3 +396,702 @@ with a hardened, sandboxed, ad-hoc-signed single target),
 `scripts/build.sh` produces a runnable `.app` from a clean checkout, and the
 window opens (Mac checklist in D-0010, results in D-0013). Before Phase 1:
 install `cargo-audit`.
+
+---
+
+## Phase 1 — encrypted core (2026-09-27)
+
+### D-0014 — Crates and features for the encrypted core
+
+- **Date:** 2026-09-27
+- **Decision:** `core/Cargo.toml` adds these workspace dependencies:
+  `rusqlite 0.40.2` (default features off, `bundled`), `chacha20poly1305
+  0.11.0` (default features off, `zeroize`), `poly1305 0.9.1` (default
+  features off, `zeroize`), `x25519-dalek 3.0.0` (default features off,
+  `static_secrets`, `zeroize`, `precomputed-tables`), `hkdf 0.13.0`,
+  `sha2 0.11.0` (default features off, `zeroize`), `rand 0.10.3` (default
+  features off, `sys_rng`), `zeroize 1.9.0`, `ed25519-dalek 3.0.0`.
+  `brev-core` uses all of them except `ed25519-dalek`, which is a
+  dev-dependency only (the test signer). The dev-dependency on `rusqlite`
+  adds its `trace` feature (no extra crate) for the SQL trace tests.
+  `poly1305` is never imported: it is a direct dependency only to turn on
+  its `zeroize` feature. No serde. No `=` pins: `Cargo.lock` pins, and
+  `cargo update` stays free for security fixes. `scripts/test.sh` fails if
+  any `cargo tree -p brev-core` line for chacha20poly1305, chacha20,
+  poly1305, x25519-dalek, curve25519-dalek, sha2 or block-buffer lacks
+  `zeroize`.
+- **Reasoning:** Every crate is in §4 (§1.7). The `zeroize` features are
+  what make these crates wipe keys on drop (§1.10). On chacha20poly1305 the
+  feature wipes the cipher key and the Poly1305 key buffer, and turns on
+  chacha20's (the HChaCha subkey state). On x25519-dalek it wipes
+  `StaticSecret` and `SharedSecret`. On sha2 it turns on `digest/zeroize`
+  and, through feature unification, `block-buffer/zeroize`, which wipes the
+  XChaCha keystream buffer. chacha20poly1305's feature does not reach
+  poly1305, so the Poly1305 state was dropped unwiped until poly1305 was
+  added directly (ed2cf07, once §4 approved it, D-0027). Without
+  `static_secrets`, `StaticSecret` does not exist. rusqlite without default
+  features drops the statement-cache crate. Memory cannot be read back
+  without `unsafe`, so test.sh checks the features instead; it checks every
+  line, so a second copy of a crate without the feature cannot hide behind
+  the copy that has it (review round 2). The two binary layouts (envelope,
+  payload) are written by hand, so serde would only add copies (P6).
+- **Verified:** macOS 26.2, 2026-09-27, at `af02935`:
+  `cargo tree -p brev-core -e normal -f '{p} [{f}]'` shows
+  chacha20 `[cipher,xchacha,zeroize]`, chacha20poly1305 `[zeroize]`,
+  poly1305 `[zeroize]`, x25519-dalek
+  `[precomputed-tables,static_secrets,zeroize]`, curve25519-dalek
+  `[precomputed-tables,zeroize]`, sha2 `[zeroize]`, block-buffer
+  `[zeroize]`, rand `[sys_rng]`, rusqlite `[bundled,modern_sqlite]` (no
+  `trace`), and no ed25519-dalek. `cargo tree -d` lists only indexmap,
+  memchr, syn (2 and 3) and winnow twice; no crypto crate has two versions.
+  `Cargo.lock` went from 81 packages (at `b6b0a23`) to 122.
+  `cargo audit --deny warnings`: 1271 advisories, 122 crates, exit 0. The
+  test.sh zeroize step passes; commit ed2cf07 records that it fails when
+  poly1305's feature is removed.
+
+### D-0015 — `uniffi-bindgen` declares rust-version 1.88; shipped crates stay at 1.85
+
+- **Date:** 2026-09-27
+- **Decision:** `core/uniffi-bindgen/Cargo.toml` sets `rust-version =
+  "1.88"` instead of inheriting the workspace value (b7493d1). The
+  workspace keeps `rust-version = "1.85"`, so `brev-core`, `brev-proto` and
+  `brev-relay` still declare 1.85. Phase 1 adds nothing that needs a newer
+  compiler.
+- **Reasoning:** The tool crate's `uniffi` `cli` feature pulls in askama
+  0.16.1, which needs rustc 1.88. That was already true in Phase 0, so the
+  workspace's 1.85 was a false claim for this one crate. The tool crate is
+  never shipped; it only generates bindings on the developer's machine. A
+  build tool should not raise the minimum of the crates that ship.
+- **Verified:** macOS 26.2, 2026-09-27, rustc 1.91.1:
+  `cargo metadata --no-deps` reports rust-version 1.85 for
+  brev-core, brev-proto and brev-relay and 1.88 for uniffi-bindgen.
+  askama 0.16.1's `Cargo.toml` in `~/.cargo/registry` says
+  `rust-version = "1.88"`. The highest rust-version declared by any of the
+  84 packages in the brev-core and brev-proto graph (normal, build and dev
+  edges) is 1.85. clippy's `incompatible_msrv` lint is on under
+  `-D clippy::all` (checked with a scratch crate that uses a std API stable
+  since 1.88: clippy fails it), and test.sh's clippy step passes, so no std
+  API newer than 1.85 is used. Not compiled with a 1.85 toolchain after the
+  review fixes, because only 1.91.1 is installed; the pre-review prototype
+  passed its tests on 1.85.0.
+
+### D-0016 — Identity id: SHA-256 over both public keys
+
+- **Date:** 2026-09-27
+- **Decision:** `IdentityId` = SHA-256(`"brev/v0/identity"` ‖ u8 length ‖
+  signing key ‖ X25519 public key). The signing key is opaque and 1..=255
+  bytes (`Malformed` otherwise): a 32-byte Ed25519 test key in Phase 1, the
+  Secure Enclave P-256 public key later. `PublicBundle` {signing key,
+  X25519 key} is everything public about an identity. The id is the
+  envelope's sender or recipient and the primary key of `contacts`. Any
+  Phase 3 identity code must carry at least 128 bits of the id (26 base32
+  characters).
+- **Reasoning:** An id that commits to both keys means nobody can swap the
+  X25519 key behind a known id, and letters are bound to ids (D-0017). The
+  length byte makes the encoding unambiguous. The hash is unkeyed and fast,
+  so a k-bit prefix can be matched in about 2^k tries; a short identity
+  code would let an attacker make a look-alike identity.
+- **Verified:** macOS 26.2, 2026-09-27, passing in `scripts/test.sh`:
+  `identity_id_commits_to_both_keys` (changing either key
+  changes the id); `receive_rejects_strangers_misrouted_self_and_replays`
+  (a 0-byte or 256-byte signing key gives `Malformed` and adds no contact;
+  the own bundle as a contact gives `Malformed`);
+  `signature_slot_holds_a_verifiable_signature_and_signing_can_fail`
+  (`bundle().signing_key` is the test verifying key). The 128-bit rule has
+  nothing to test until Phase 3.
+
+### D-0017 — Message crypto: static-static X25519, HKDF-SHA256, XChaCha20-Poly1305
+
+- **Date:** 2026-09-27
+- **Decision:** For each message: a random 24-byte nonce; key =
+  HKDF-SHA256(salt = nonce, ikm = X25519(own static secret, peer's static
+  public key), info = `"brev/v0/message-key"` ‖ sender id ‖ recipient id,
+  32 bytes); cipher = XChaCha20-Poly1305 with that nonce and AD = the
+  envelope header (D-0018). A non-contributory (low-order) DH result gives
+  `Crypto`. The tag is checked before anything is decrypted. No ephemeral
+  keys, no ratchet.
+- **Reasoning:** The §5 envelope has no field for an ephemeral key, and
+  static-static authenticates the sender (only the two parties can compute
+  the key), which matters while clients do not verify signatures (D-0019).
+  The nonce is also the salt, so each key is used once. The ids in `info`
+  and in the AD bind the key to both identities, which stops redirection,
+  reflection and unknown-key-share. Known costs, accepted for now:
+  - The key is symmetric, so a sender can decrypt its own envelopes.
+  - Whoever holds one party's X25519 secret can read all recorded traffic
+    between that party and every contact, in both directions, and can forge
+    letters *to* that party (key-compromise impersonation).
+  - No forward secrecy.
+
+  Ephemeral-static would protect nothing extra today: the sender's secret
+  sits under the same DEK as the sender's stored copy of every letter. That
+  holds only while every sent letter is kept. Message deletion or
+  disappearing letters would require ephemeral-static or a ratchet.
+- **Verified:** macOS 26.2, 2026-09-27, passing in `scripts/test.sh`:
+  `round_trip_a_encrypts_b_decrypts`;
+  `tamper_any_flipped_byte_fails` (a flipped bit in every ciphertext byte,
+  and in the nonce, gives `Crypto`);
+  `only_the_two_parties_can_open_a_message` (a third party, and the sender
+  given the header with sender and recipient swapped, get `Crypto`);
+  `a_letter_is_bound_to_both_ids` (another sender or recipient id with the
+  same keys gives `Crypto`); `low_order_public_key_is_rejected`;
+  `every_seal_uses_a_fresh_nonce`. That a sender can open its own envelope
+  was shown by a probe during design; no test pins it.
+
+### D-0018 — Envelope layout
+
+- **Date:** 2026-09-27
+- **Decision:** `brev_proto::Envelope` = {sender [32], recipient [32],
+  nonce [24], ciphertext (payload ‖ 16-byte tag), signature (opaque bytes)}.
+  `header_bytes` = `"BREV"` ‖ `PROTOCOL_VERSION` (u16 BE, still 0) ‖ sender
+  ‖ recipient ‖ nonce, 94 bytes (`HEADER_LEN`). The AEAD AD is the header;
+  the signed bytes are header ‖ ciphertext. No wire encoding in Phase 1:
+  `MockTransport` moves `Envelope` values.
+- **Reasoning:** These are exactly the fields §5 asks for. Every field but
+  the last has a fixed length, so the signed bytes are unambiguous without
+  length prefixes. `"BREV"` ‖ version is the signing-domain prefix; Phase
+  3's own signed relay requests must use a different one. Phase 3 picks
+  the wire encoding under one rule: the relay must be able to rebuild
+  `signed_bytes` byte for byte. The version stays 0 because nothing has
+  been released.
+- **Verified:** macOS 26.2, 2026-09-27, passing in `scripts/test.sh`:
+  `signed_bytes_layout_is_fixed` (offsets of magic, version,
+  both ids, nonce and ciphertext); `tamper_any_flipped_byte_fails`;
+  `no_plaintext_in_any_file` (no marker in `signed_bytes` ‖ `signature`).
+
+### D-0019 — Signature slot filled through a fallible `Signer`; not verified by the core in Phase 1
+
+- **Date:** 2026-09-27
+- **Decision:** `send` takes `&dyn Signer`
+  (`fn sign(&self, &[u8]) -> Result<Vec<u8>, Error>`). It seals the letter
+  first, drops every decrypted value and the X25519 secret, scrubs the
+  stack, then signs `signed_bytes()`, and only then stores its own copy. A
+  refused signature gives `Signing` and stores nothing. `receive` does not
+  check the signature in Phase 1; the key agreement authenticates the
+  sender (D-0017). Phase 3 signs through the two-step
+  `sign_request`/`attach_signature` flow of §5, built on
+  `Envelope::signed_bytes` and `Envelope::signature`, not through a Swift
+  `Signer`. The envelope does not change.
+- **Reasoning:** §5 asks for an Ed25519 test key in Phase 1; the trait
+  keeps that key in the tests (P2). A signer called inside
+  `send(&mut self)` blocks `lock()` while it runs, and a Touch ID prompt
+  can take seconds. The ordering makes sure nothing secret is alive then;
+  the two-step flow will let auto-lock run during the prompt. Client-side
+  verification needs a P-256 verifier, which comes in Phase 3 (`p256`,
+  D-0027).
+- **Verified:** macOS 26.2, 2026-09-27, passing in `scripts/test.sh`:
+  `signature_slot_holds_a_verifiable_signature_and_signing_can_fail`
+  (`verify_strict` passes on the envelope and fails after one ciphertext
+  bit flip; a refusing signer gives `Signing` and the thread still has one
+  message); `nothing_decrypted_is_alive_while_signing` (inside the signer,
+  the test-build counters of live `Plaintext` values and live X25519
+  secrets both read 0; positive controls show each counter sees a
+  decrypted subject, an encoded payload and a decrypted identity). Review
+  rounds 1 to 3 widened this test from `Plaintext` only to the payload and
+  the secret.
+
+### D-0020 — Payload, message ids and the receive checks
+
+- **Date:** 2026-09-27
+- **Decision:** Payload (inside the message AEAD) = message id [16] ‖
+  thread id [16] ‖ subject length (u16 BE) ‖ subject ‖ body. The sender
+  picks both ids at random; the message id is the primary key in both
+  stores. A thread belongs to one contact. `receive` checks, in this order:
+  addressed to this identity (`Malformed`), sender is a contact
+  (`NotFound`), AEAD (`Crypto`), payload shape (`Malformed`), and for a
+  known thread that its authenticated owner is the sender (`Malformed`).
+  Then one transaction inserts the thread (if new) and the message with
+  `ON CONFLICT(id) DO NOTHING`; zero rows gives `Duplicate` and rolls back.
+- **Reasoning:** Sender-chosen ids make dedupe work across both stores.
+  Dedupe runs only after authentication, so a stranger cannot block an id.
+  A failed envelope stores nothing. No payload is ever stored (each store
+  keeps per-column ciphertext), so Phase 3 can extend the payload, for
+  example with a sender timestamp or padding, without a migration.
+- **Verified:** macOS 26.2, 2026-09-27, passing in `scripts/test.sh`:
+  `payload_round_trip_and_truncation`;
+  `receive_rejects_thread_owned_by_another_contact` (a real contact naming
+  another contact's thread gets `Malformed`; with the thread re-pointed at
+  it in the file, `Crypto`; the thread keeps one message);
+  `failed_receive_leaves_no_new_thread` (a stored message id under a new
+  thread id gives `Duplicate` and no new thread);
+  `receive_rejects_strangers_misrouted_self_and_replays` (stranger
+  `NotFound`, misaddressed `Malformed`, replay `Duplicate` with one message
+  stored; `new_thread` with a subject over 65535 bytes gives `Malformed`
+  and makes no thread; `mark_read` of an unknown id gives `NotFound`).
+
+### D-0021 — Column encryption under the DEK, bound to each row's immutable fields
+
+- **Date:** 2026-09-27
+- **Decision:** Every content column is `nonce [24] ‖ ciphertext ‖ tag
+  [16]`: XChaCha20-Poly1305 under the DEK, with a fresh OS-random nonce on
+  every write. AD = `"brev/v0/column/"` ‖ label ‖ 0x00 ‖ fixed-length
+  fields:
+  - `identity.keys`: own id;
+  - `contacts.bundle`, `contacts.name`: contact id;
+  - `threads.subject`: thread id, contact id, `created_at`;
+  - `messages.body`: message id, thread id, the thread's contact id (by
+    join), `outgoing`, `created_at`.
+
+  `read` is mutable and not bound. `send` opens the thread's subject before
+  it encrypts to the thread's contact, `receive` opens a known thread's
+  subject before trusting its owner, and `new_thread` opens the contact's
+  bundle first.
+- **Reasoning:** A filesystem agent can edit plaintext metadata. With every
+  immutable field in the AD, moving a ciphertext to another row or column,
+  or editing a bound field, makes the next read fail with `Crypto` instead
+  of showing content under the wrong contact, thread or direction. Opening
+  the subject first means a redirected thread gives `Crypto` and no
+  envelope. Random nonces need no counter, so restoring an old file cannot
+  cause nonce reuse. Not added (offered in review round 1): a check in
+  `contact_bundle` that the decoded bundle hashes to the row id. The AD
+  already catches a swapped bundle, and the extra check would make the
+  tests unable to tell which defence caught it.
+- **Verified:** macOS 26.2, 2026-09-27, passing in `scripts/test.sh`:
+  `column_round_trip_and_ad_binding` (another row's AD, another column's
+  AD, another DEK: `Crypto`); `every_seal_uses_a_fresh_nonce`;
+  `round_trip_a_encrypts_b_decrypts` (`mark_read` sets only that message's
+  flag, and its body still opens); `stored_metadata_is_bound_to_ciphertext`,
+  which edits the file with raw rusqlite: a thread re-pointed at another
+  contact (`send`, `threads`, `read_body` give `Crypto`, no envelope); a
+  message moved to a thread of another contact and to one of the same
+  contact; `outgoing` flipped; a message's `created_at` raised by one; a
+  thread's `created_at` raised by one; subject and time swapped between two
+  threads of one contact; `contacts.bundle` swapped between two contacts
+  (`send` and `new_thread` give `Crypto`); `contacts.name` swapped
+  (`contacts` gives `Crypto`); a body copied between rows; a subject copied
+  into `contacts.name`; `identity.id` edited (`unlock` gives `WrongKey`).
+  Every edit that is undone reads back again. Review round 1 (91f1803)
+  added most of these.
+
+### D-0022 — Schema v1
+
+- **Date:** 2026-09-27
+- **Decision:** Four `STRICT` tables, `identity (id, keys)`,
+  `contacts (id, bundle, name)`,
+  `threads (id, contact_id, created_at, subject)` and
+  `messages (id, thread_id, created_at, outgoing, read, body)`, plus the
+  index `messages_by_thread (thread_id, created_at)`. `create` writes, in
+  one transaction: `application_id = 0x42524556` ("BREV"), the schema, the
+  identity row, `user_version = 1`. Plaintext is only ids, `created_at`,
+  `outgoing`, `read`, `application_id` and `user_version`; names, subjects,
+  bodies
+  and even public keys are ciphertext (P4). `identity.keys` holds X25519
+  secret (32) ‖ X25519 public key (32) ‖ signing public key. The identity
+  row is also the wrong-DEK check: `unlock` opens it, and a failed tag
+  gives `WrongKey`. `messages()` returns metadata and decrypts nothing;
+  `read_body` decrypts one body.
+- **Reasoning:** §3.1 allows only queryable metadata in plaintext, never
+  subjects or bodies. `STRICT` stops a content column from silently holding
+  TEXT. Encrypting the public keys too keeps the rule free of exceptions.
+  The X25519 public key sits next to the secret (review round 2, b35bab7)
+  so that `bundle()` and `unlock()` never rebuild the secret. The key check
+  needs no extra column; a false accept has a chance of about 2^-128.
+  `SCHEMA_VERSION` stayed 1 through that layout change because no store has
+  shipped. Dev stores created before b35bab7 now fail to open with
+  `Corrupt`, because the schema text changed (D-0023).
+- **Verified:** macOS 26.2, 2026-09-27, passing in `scripts/test.sh`:
+  `pragmas_are_applied` (application_id, user_version 1);
+  `stored_metadata_is_bound_to_ciphertext` (`messages()` of a thread lists
+  only that thread's messages);
+  `no_plaintext_in_any_file` (three markers go in as name, subject and body
+  and read back through the API; every file in the store directory is
+  scanned with connections open and again after close, and none is found;
+  positive controls: A's plaintext id is found, and a marker written with
+  raw rusqlite is found); `sqlite_never_receives_plaintext` (every
+  statement on both cores is traced with bound values expanded: more than
+  10 statements, no marker as text or hex; positive control: `SELECT ?1`
+  with the marker is seen); `lock_zeroes_the_dek_buffer` (`unlock` and
+  `bundle()` leave the counter of built X25519 secrets unchanged).
+
+### D-0023 — SQLite connection and file hardening
+
+- **Date:** 2026-09-27
+- **Decision:**
+  - `create` and `open` accept only absolute paths. Any other path gives
+    `Malformed` and touches no file.
+  - `create` refuses an existing path (`OpenOptions::create_new`, so
+    `Io(AlreadyExists)`) and removes the new file if a later step fails.
+  - Connections open with `READ_WRITE | NO_MUTEX`, never CREATE.
+  - On every connection: `DBCONFIG_DEFENSIVE` on,
+    `DBCONFIG_TRUSTED_SCHEMA` off, `secure_delete = ON`,
+    `temp_store = MEMORY`, `foreign_keys = ON`, `cell_size_check = ON`,
+    `fullfsync = ON`.
+  - `open` refuses with `Corrupt`, before writing anything, unless
+    `application_id` and `user_version` match and
+    `SELECT type, name, tbl_name, sql FROM sqlite_schema` equals the same
+    query on an in-memory database built from `SCHEMA`. A file SQLite
+    cannot parse (NotADatabase, DatabaseCorrupt, or plain SQLITE_ERROR for
+    an unsupported schema format) is `Corrupt` too, not `Storage`.
+  - Only after that check, `journal_mode = DELETE` is set and read back
+    (`Corrupt` if the answer is not `delete`).
+- **Reasoning:**
+  - The bundled SQLite is compiled with `-DSQLITE_USE_URI`, so a name that
+    starts with `file:` is parsed as a URI whatever the open flags say; a
+    design probe opened `file:<abs>?mode=ro` read-only. Turning URIs off
+    needs `sqlite3_config`, which is unsafe FFI (P5). An absolute path
+    starts with `/` and is always taken literally.
+  - DEFENSIVE, trusted_schema off, cell_size_check and the exact schema
+    check limit what a crafted file can do; a planted trigger, view, index
+    or altered table is refused.
+  - `secure_delete` zero-fills freed cells. They only ever held ciphertext
+    or metadata, but this limits recovery of old ciphertext if the DEK
+    leaks later. `temp_store = MEMORY` keeps sorters and statement journals
+    out of `$TMPDIR`.
+  - DELETE mode means no `-wal` or `-shm` file, ever; `-journal` exists
+    only during a write and holds only what SQLite was given. WAL mode is
+    saved in the file, so `open` switches back a store an agent set to WAL.
+  - `fullfsync` (review round 2): macOS `fsync(2)` flushes to the drive
+    but not the drive's own cache, which may write late and out of order
+    (its man page says so). A power cut mid-commit could corrupt the only
+    copy of the history. Commits get slower; letters are rare.
+  - Cost of the exact schema check: it compares SQL text, comments
+    included, so any edit to `SCHEMA`, even a comment, needs a
+    `user_version` bump and a migration.
+- **Verified:** macOS 26.2, 2026-09-27, passing in `scripts/test.sh`:
+  `pragmas_are_applied` reads back journal_mode `delete`,
+  secure_delete 1, temp_store 2, foreign_keys 1, cell_size_check 1,
+  fullfsync 1, trusted_schema 0 and DEFENSIVE on.
+  `create_and_open_refuse_bad_files`: `file:u.db`, `file:<abs>?mode=ro`,
+  `u.db`, `:memory:` and `""` give `Malformed` from both calls and make no
+  file; a `file:` URI naming a real store is refused, not opened
+  read-only; `create` on an existing store gives `AlreadyExists` and
+  leaves its bytes unchanged; a directory at `<path>-journal` makes
+  `create` fail after the file exists, and the file is removed; a foreign
+  SQLite file, a WAL-mode foreign file, random bytes, a truncated store and
+  a header naming schema format 5 each give `Corrupt` with their bytes
+  unchanged; a wrong application_id or user_version, an
+  `ALTER TABLE … ADD COLUMN` and a planted trigger give `Corrupt`; `open`
+  on a missing path creates nothing.
+  `open_turns_a_wal_store_back_to_delete_mode` (after a write only `a.db`
+  exists). `no_plaintext_in_any_file` (after close only `a.db` and `b.db`
+  exist). `libsqlite3-sys-0.38.2/build.rs` line 167 passes
+  `-DSQLITE_USE_URI`; the bundled SQLite is 3.53.2.
+
+### D-0024 — The DEK, the lock state and zeroization
+
+- **Date:** 2026-09-27
+- **Decision:**
+  - The DEK lives in one `Box<Zeroizing<[u8; 32]>>` per `Core`, allocated
+    once and never moved. `create` and `unlock` copy the caller's
+    `&mut [u8; 32]` into it and zero the caller's array before any step
+    that can fail.
+  - All zeros is never a key: `create` refuses it (`Malformed`), `unlock`
+    refuses it (`WrongKey`). A wiped buffer is all zeros, so a retry with
+    one cannot seal or open a store.
+  - The state is `unlocked: bool` plus that box; `open` starts locked.
+    Every call except `create`, `open`, `unlock`, `lock` and `is_locked`
+    goes through one gate (`dek()`) and returns `Locked` while locked. That
+    includes `messages`, `mark_read` and `bundle`, which return no content,
+    because one rule is easier to audit than a list.
+  - `lock()` zeroes the box in place, marks the core locked and scrubs the
+    stack. It cannot fail and can be repeated. Every failed `unlock` locks,
+    also a core that was unlocked.
+  - The core caches no key and no plaintext between calls, so the
+    "cached plaintext" that §3.1 wipes on lock is the empty set. The X25519
+    secret is built for one operation (`init`, `send`, `receive`) inside a
+    block that ends before signing (`send`) or before the commit (`init`,
+    `receive`). `unlock` and `bundle` never build it.
+  - `scrub_stack()` overwrites 16 KiB of stack after every AEAD, DH, HKDF
+    and X25519 base-point operation, in `me()`, before signing, and in
+    `lock()`. It is best effort.
+  - The DEK test accessors are `#[cfg(test)]` private methods, stricter
+    than the debug-only accessor §5 allows.
+- **Reasoning:** §3.1 and §1.10: when locked, the DEK and all plaintext
+  are gone and every content call fails. A box at a fixed address means
+  `lock()` wipes the only copy, and a test can check the address. Zeroing
+  the caller's copy first means the wipe happens on every exit path. Some
+  key-equivalent stack copies inside the crates cannot be wiped without
+  `unsafe` (the HChaCha20 state, the HKDF PRK, x25519-dalek's by-value
+  secret copies). The product owner accepted them as residual risk in
+  CLAUDE.md §2 (8c461b2), with `scrub_stack()` as the mitigation.
+- **Verified:** macOS 26.2, 2026-09-27, passing in `scripts/test.sh`:
+  `lock_zeroes_the_dek_buffer`: after `create` the caller's
+  array is zero and the box holds the DEK; after `lock()` the box is zero
+  at the same address; a wrong `unlock` zeroes its argument and leaves the
+  core locked with a zero box; the right DEK restores it at the same
+  address; an all-zero `unlock` on an unlocked core locks it; so does a
+  failure unrelated to the key (identity row deleted, `NotFound`).
+  `unlock_refuses_all_zero_dek` (a store sealed under zeros, built through
+  the private `init`). `locked_core_refuses_every_content_call`: all 11
+  gated methods give `Locked`; a locked `mark_read` writes nothing; a
+  reopened store starts locked; `unlock` zeroes the right DEK after use.
+  Compile-time checks that the DEK box and `Plaintext`'s buffer are
+  `ZeroizeOnDrop` (in `lock_zeroes_the_dek_buffer` and
+  `plaintext_wipes_on_drop`); `init` builds the identity row as a
+  `Plaintext` too. `nothing_decrypted_is_alive_while_receive_commits`
+  (live `Plaintext` and secret counters read 0 at both COMMITs).
+  `create_and_open_refuse_bad_files` (the DEK is zeroed on the `Io`,
+  relative-path and empty-key refusals; a retry with the wiped buffer gives
+  `Malformed` and makes no file). `scrub_stack_wipes_its_buffer` passes in
+  debug and in `--release`; commit 8c461b2 records that the release run
+  fails (16384 != 0) with the wipe removed. `init`'s block scoping has no
+  test: `init` opens its own connection, so no trace hook can watch its
+  commit without `unsafe` (review round 3); it holds by structure.
+
+### D-0025 — Content API: bytes in, `Plaintext` out
+
+- **Date:** 2026-09-27
+- **Decision:** Content goes in as `&[u8]` and comes out as `Plaintext`, a
+  wrapper around `Zeroizing<Vec<u8>>` with a private field and only
+  `Deref<Target = [u8]>`: no `Debug`, `Clone` or `DerefMut`. `Contact` and
+  `Thread` hold `Plaintext` and have no `Debug`. `Message` is metadata
+  only. UTF-8 is not checked. Content is never a `String` (P6); the only
+  `String`s in the core are schema rows, the journal-mode readback and the
+  `ping()` reply. No `Error` variant carries content: every message is
+  static except the wrapped io and SQLite errors, and SQLite only ever
+  sees ids, metadata and ciphertext. Internal plaintext buffers are
+  allocated at their final size, checked with `debug_assert_eq!` on the
+  capacity. The UniFFI surface is still only `ping()` (P1).
+- **Reasoning:** A bare `Zeroizing<Vec<u8>>` is `Debug` (content in
+  `{:?}`, `dbg!`, panic messages) and `DerefMut<Vec>` (growing it frees an
+  unwiped copy). A read-only type that cannot be printed closes both.
+  Listing a thread should not decrypt every body (§1.10). Phase 2 designs
+  the FFI shape.
+- **Verified:** macOS 26.2, 2026-09-27, passing in `scripts/test.sh`:
+  three doctests on `Plaintext`: a positive control that
+  reads one through the public path, and two `compile_fail` tests
+  (`format!("{p:?}")` and `p.push(0)`). `sqlite_never_receives_plaintext`.
+  After `scripts/gen-bindings.sh`,
+  `nm -gU core/target/release/libbrev_core.dylib` shows one UniFFI
+  function, `uniffi_brev_core_fn_func_ping`.
+
+### D-0026 — `Transport`, `MockTransport` and `receive_all`
+
+- **Date:** 2026-09-27
+- **Decision:** `trait Transport { fn send(&self, Envelope); fn poll(&self)
+  -> Vec<Envelope>; }`, the §3.1 shape. `MockTransport::pair()` returns two
+  ends cross-wired through two `Arc<Mutex<Vec<Envelope>>>` queues; `poll`
+  drains the queue. It ships in the library, not under `cfg(test)`, for
+  Phase 2's two hard-coded contacts, and has no adversary hooks. `Core`
+  does not own a transport: sending is `net.send(core.send(..)?)`.
+  `Core::receive_all(&dyn Transport)` is the receive loop. It returns
+  `Locked` before polling, handles each envelope on its own, and returns a
+  content-free `Delivery { received, rejected }`.
+- **Reasoning:** A caller-written `for e in poll() { receive(&e)? }` would
+  lose every envelope after the first bad one, because `poll` has already
+  drained them. Handled one by one, a replay, a stranger or a tampered
+  letter never costs the letters behind it. Gating before `poll` means a
+  locked core drains nothing. Delivery is at most once, like the Phase 3
+  relay's delete-after-delivery: an envelope that fails for a local reason
+  (disk full) is reported and lost, so Phase 3 needs
+  acknowledge-after-store. A poisoned mutex is recovered, because the queue
+  only holds ciphertext.
+- **Verified:** macOS 26.2, 2026-09-27, passing in `scripts/test.sh`:
+  `receive_all_isolates_bad_envelopes_and_waits_while_locked` (a queue of
+  replay, stranger, tampered and good gives one received letter that reads
+  back, and rejected `[Duplicate, NotFound, Crypto]`; while
+  locked, `Locked` and nothing drained; after unlock the waiting letter is
+  stored); `round_trip_a_encrypts_b_decrypts` (two cores over
+  `MockTransport::pair()`, both directions);
+  `core_and_transport_can_move_between_threads` (`Core: Send`,
+  `MockTransport: Send + Sync`).
+
+### D-0027 — Product-owner decisions made during Phase 1
+
+- **Date:** 2026-09-27
+- **Decision:** The product owner changed CLAUDE.md (664e23c, 8c461b2), and
+  `docs/THREAT_MODEL.md` was re-synced:
+  - §1.5 and §3.2: a notification says exactly "Ny melding": no sender
+    name, no content. Contact names stay encrypted.
+  - §4: `p256` (feature `ecdsa`) is approved. From Phase 3, `brev-core`
+    verifies the Enclave P-256 signature on receive and the relay verifies
+    it too; Swift only signs.
+  - §4: `poly1305` is approved, feature `zeroize` only (used in D-0014).
+  - Phase 3 padding: the payload is padded before encryption, in
+    `brev-proto`, to 256 B / 1 KiB / 4 KiB / 16 KiB and above that to the
+    next multiple of 16 KiB, with a length prefix. Hard maximum 1 MiB
+    padded, enforced by app and relay. Tests for equal length within a
+    bucket and for boundary sizes. A TODO in `brev-proto/src/lib.rs`
+    records it.
+  - §2: the transient stack copies of D-0024 are accepted residual risk.
+- **Reasoning:** These answer open questions from the Phase 1 design. The
+  old notification text, "Ny melding fra <navn>", needed a contact name,
+  but names are ciphertext under the DEK (P4), and the DEK is gone while
+  the app is locked. Verification in Rust needed a P-256 crate, which was
+  not in §4. Wiping the Poly1305 state needed poly1305 as a direct
+  dependency, which was not in §4 either.
+- **Verified:** macOS 26.2, 2026-09-27: CLAUDE.md §1–§2 (extracted with
+  `awk`) diffed against `docs/THREAT_MODEL.md`:
+  identical apart from one trailing blank line left by the extraction.
+  `cargo tree` shows `poly1305 [zeroize]`. `p256` is not in `Cargo.lock`
+  yet (Phase 3). The notification rule has no code until Phase 2.
+
+### D-0028 — macOS facts found while verifying Phase 1
+
+- **Date:** 2026-09-27
+- **Decision:** Record two facts. Neither is fixed in Phase 1.
+  1. The bundled SQLite object in `libbrev_core.a` is built for macOS 26.2
+     (the installed SDK), while the app's deployment target is 14.0.
+     Linking the app prints `ld: warning: object file
+     (…/libbrev_core.a[46](…-sqlite3.o)) was built for newer 'macOS'
+     version (26.2) than being linked (14.0)`. `MACOSX_DEPLOYMENT_TARGET`
+     was not set in the shell. Proposed fix, at the start of Phase 2: set
+     `MACOSX_DEPLOYMENT_TARGET=14.0` for the cargo build in
+     `scripts/gen-bindings.sh` (which `build.sh` calls), to match
+     `project.yml`, and check that the warning is gone.
+  2. The `xcodebuild` step of `scripts/test.sh` links whatever
+     `core/target/release/libbrev_core.a` exists. test.sh does not rebuild
+     that archive (its release step builds only a test binary);
+     `gen-bindings.sh` does. On the first test.sh run for this entry, the
+     archive was older than the three review rounds. Run
+     `scripts/gen-bindings.sh` first when the Xcode check should cover the
+     current core.
+- **Reasoning:** §6 asks for macOS surprises to be written down. With (1),
+  the app claims to run on macOS 14 but contains C code compiled for 26.2.
+  It has not been run on an older macOS, so whether it fails there is
+  unknown. In Phase 1 the app only calls `ping()`, so nothing in it calls
+  SQLite yet. (2) is why the warning did not appear on the first run.
+- **Verified:** macOS 26.2 (25C56), Xcode 26.2 (17C52), Apple Silicon,
+  rustc 1.91.1, 2026-09-27, at `af02935`. A first `scripts/test.sh` run
+  passed with no warning, and the archive kept its 14:49 timestamp (the
+  review rounds were committed between 15:13 and 16:48).
+  `scripts/gen-bindings.sh` then `scripts/test.sh`: exit 0, with the
+  warning above. `otool -l` on the `sqlite3.o` taken from the
+  archive: `minos 26.2`, `sdk 26.2`; on a `brev_core` object from the same
+  archive: `minos 11.0`. `otool -L` on the Debug `Brev.app` lists no
+  `libsqlite3`, and `nm` finds 294 `_sqlite3_` symbols in
+  `Brev.debug.dylib`: SQLite is linked statically. `nm -gU` on the archive
+  shows it exports 282 `_sqlite3_*` functions, so the app must never also
+  link the system `libsqlite3`.
+
+---
+
+## Phase 1 summary
+
+**Built (2026-09-27, commits `0fa9fae` to `af02935`):**
+
+- `brev-proto`: `Envelope`, `HEADER_LEN`, `header_bytes`, `signed_bytes`
+  (D-0018), and the Phase 3 padding TODO (D-0027).
+- `brev-core/src/crypto.rs`: OS randomness, the identity id, column and
+  message sealing, HKDF, `Plaintext`, `scrub_stack` (D-0016, D-0017,
+  D-0021, D-0025).
+- `brev-core/src/store.rs`: `Core` with `create`, `open`, `unlock`, `lock`,
+  the encrypted SQLite store, contacts, threads, messages, `send`,
+  `receive`, `receive_all` (D-0019 to D-0024).
+- `brev-core/src/transport.rs`: `Transport` and `MockTransport` (D-0026).
+- `brev-core/src/lib.rs`: `Error`, `Signer` and re-exports. `ping()` is
+  still the only UniFFI export.
+- `scripts/test.sh`: a release run of the scrub test, and the zeroize
+  feature check.
+- Tests: 35 in `cargo test --workspace` (brev-core: 19 unit, 11
+  integration, 3 doctests; brev-proto: 2), plus the release scrub test.
+  0fa9fae had 25; the review added the rest.
+
+**Review:** three rounds after `0fa9fae` (`91f1803`, `b35bab7`,
+`af02935`). Each applied finding is in the entry it belongs to. The code
+changes: files SQLite cannot parse give `Corrupt`; `unlock` and `bundle`
+never build the X25519 secret (the identity row now also holds the public
+key); `fullfsync`; the secret and the decrypted letter are dropped before
+`receive` and `init` commit. The rest are tests: every AD binding, nonce
+freshness, the send ordering (now counting the payload and the secret),
+the failure paths of `create`, `open`, `unlock` and `receive`, and the
+wipe-on-drop types. Two deferred findings, both saying the send-ordering
+test counted only `Plaintext`, were closed by rounds 2 and 3. One item was
+skipped: a test of `init`'s commit-time scoping (D-0024).
+
+**Definition of done status (CLAUDE.md §5, Phase 1): met on 2026-09-27.**
+Checked with `scripts/gen-bindings.sh` then `scripts/test.sh` at
+`af02935` on macOS 26.2, exit 0.
+
+- Data model, encrypted SQLite store, DEK column encryption,
+  `Locked`/`Unlocked` state machine and zeroization: D-0020 to D-0025.
+- X25519 + HKDF + XChaCha20-Poly1305 for bodies; an envelope with sender
+  id, recipient id, ciphertext, nonce and signature slot; an Ed25519 test
+  key: D-0017 to D-0019.
+- `MockTransport` between two `Core`s in one process:
+  `round_trip_a_encrypts_b_decrypts` and
+  `receive_all_isolates_bad_envelopes_and_waits_while_locked`.
+- Round-trip test: `round_trip_a_encrypts_b_decrypts`.
+- Tamper test: `tamper_any_flipped_byte_fails` (every ciphertext byte,
+  plus the nonce).
+- No-plaintext test: `no_plaintext_in_any_file`, backed by
+  `sqlite_never_receives_plaintext`.
+- Lock test: `locked_core_refuses_every_content_call` (`Err(Locked)`) and
+  `lock_zeroes_the_dek_buffer` (DEK memory zeroed, through a
+  `#[cfg(test)]` accessor).
+- All tests pass: fmt, clippy `-D warnings`, the 35 tests, the release
+  scrub test, the zeroize check and the Xcode Debug compile.
+- `cargo audit` clean: `cargo audit --deny warnings` exits 0 over 122
+  crates and 1271 advisories.
+- No `unsafe` outside the UniFFI boundary: `unsafe_code = "forbid"` for
+  the workspace and `#![forbid(unsafe_code)]` in each crate root; a grep
+  of the hand-written sources finds `unsafe` only in those attributes and
+  in comments.
+
+**Residual risks and limits**
+
+What the tests cannot prove:
+
+- Stack and register residue inside the crypto crates (D-0024), accepted
+  in CLAUDE.md §2. The release test proves `scrub_stack()`'s wipe
+  survives the optimiser, but no test checks that it is called: deleting
+  every call site passes every test.
+- The send and receive orderings are tested for live values (counters),
+  not for dead stack copies. `init`'s ordering holds by structure only.
+- Returned plaintext: `lock()` cannot wipe a `Plaintext` the caller still
+  holds, and a caller can copy one out with `to_vec()`. Phase 2 must drop
+  them on lock and when a message is closed.
+- The no-plaintext evidence covers the store directory and everything
+  given to SQLite on the core's connections. It says nothing about OS
+  copies (page cache, swap, APFS snapshots, Time Machine), which hold
+  ciphertext anyway. `temp_store = MEMORY` is checked by readback only.
+
+Accepted for Phase 1:
+
+- No forward secrecy; symmetric static keys; key-compromise impersonation
+  until clients verify signatures in Phase 3 (D-0017).
+- The relay can reorder, delay and drop envelopes, and nobody notices.
+  `created_at` is local time at each end, so the two sides can order a
+  thread differently. Phase 3 should add a sender timestamp, and a
+  per-sender sequence number if drops should be detected.
+- At-most-once delivery (D-0026).
+- A filesystem agent can restore an older file, delete rows, add fake
+  message rows (they are listed, but `read_body` fails) or flip `read`.
+  Edits to content and bound metadata are caught on read; there is no
+  freshness guarantee.
+- Visible metadata. On disk: the contact graph, counts, timestamps,
+  direction, read state and exact content lengths. To the relay: sender and
+  recipient ids, timing, and exact envelope length until Phase 3 padding.
+- Replay dedupe keys on the message id. Only the original sender can
+  re-encrypt a letter under a new id.
+- A contact's bundle is trusted as given to `add_contact`; out-of-band
+  checking of identity codes is Phase 3.
+- A corrupted identity row looks the same as a wrong DEK (`WrongKey`).
+
+Store lifecycle (deferred review findings):
+
+- `create` is not crash-atomic. A crash between making the file and the
+  commit leaves a file that `create` (`AlreadyExists`) and `open`
+  (`Corrupt`) both refuse. Phase 2 onboarding must handle it.
+- The schema check compares SQL text, comments included (D-0023). Any edit
+  to `SCHEMA`, even a comment, makes every existing store `Corrupt`, while
+  all tests, which create fresh stores, still pass. This has happened once
+  already: dev stores created before `b35bab7` no longer open (D-0022).
+
+Supply chain and platform:
+
+- The RustCrypto and dalek major versions in use are newer than their
+  known audits.
+- The SQLite parser still runs over a file an attacker can write. D-0023
+  limits this; it does not remove it.
+- The staticlib exports SQLite's symbols, and the bundled SQLite is built
+  for macOS 26.2 while the app targets 14.0 (D-0028).
+- FFI copies in Phase 2: `Vec<u8>` values that cross UniFFI go through a
+  `RustBuffer` that is freed without being zeroed. The DEK passed to
+  `unlock` and every body returned by `read_body` would leave copies in
+  freed memory. Phase 2 must design those two calls with this in mind and
+  not export the Phase 1 signatures as they are.
+
+**Open questions for the product owner:**
+
+1. Length padding. Envelope padding is decided for Phase 3 (D-0027).
+   Still open: should stored content (names, subjects, bodies in the
+   database) be padded too, so the file does not show exact lengths?
+2. Client-side signature verification before Phase 3 (a `p256` crate
+   outside §4, or a Swift CryptoKit callback). Answered in `664e23c`: it
+   comes in Phase 3, in `brev-core` with `p256`, now in §4. Swift never
+   verifies, so there is no CryptoKit callback.
+3. Notification sender names while locked vs §1.5. Answered in `664e23c`:
+   the text is only "Ny melding".
+4. Wiping the Poly1305 state needs `poly1305` as a direct dependency
+   outside §4 (the design recommended not to). Answered in `664e23c`:
+   `poly1305` is approved with `zeroize` only, and was added in `ed2cf07`.
