@@ -662,6 +662,19 @@ func caseKeyTranslator() {
     nb.reset()
     let plain = nb.translate(keyCode: 14, flags: none) { Array($0) }
     check("KeyTranslator: reset drops the dead key, so e stays e", plain == Array("e".utf16) && !nb.hasDeadKey)
+    // A layout switch between a dead key and the next key (the input menu,
+    // ⌃Space): the state Norwegian ¨ leaves makes U.S. e give è.
+    let usFilter = [kTISPropertyInputSourceID as String: "com.apple.keylayout.US"] as CFDictionary
+    if let us = (TISCreateInputSourceList(usFilter, true)?.takeRetainedValue() as? [TISInputSource])?.first {
+        nb.reset()
+        var got: [UInt16] = []
+        nb.translate(keyCode: 30, flags: none) { got += $0 }
+        nb.translate(in: us, keyCode: 14, flags: none) { got += $0 }
+        check("KeyTranslator: a layout switch drops a waiting dead key (Norwegian ¨, then U.S. e gives e)",
+              got == Array("e".utf16), got.map { String($0, radix: 16) }.joined(separator: " "))
+    } else {
+        print("skip KeyTranslator's layout switch: Text Input Sources cannot find the U.S. layout")
+    }
 
     // Typing the marker key by key through KeyTranslator into an EditModel:
     // the text is in the model's SecretText only, and wipe leaves no copy.

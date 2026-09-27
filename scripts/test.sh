@@ -246,8 +246,10 @@ if [[ "$DARWIN" == yes ]]; then
     "$REPO_ROOT"/app/Sources/Shared/*.swift "$BINDINGS" "$REPO_ROOT"/app/Tests/*.swift \
     "$HARNESS_DIR/scan.o" "$STATICLIB" -o "$HARNESS_DIR/harness"
   # run_harness <label> <scribble|none> <harness arguments...>
+  # A case may skip a part this Mac cannot run (design §11) and still pass;
+  # its "skip ..." lines are shown under the result, never hidden.
   run_harness() {
-    local label="$1" mode="$2" i out
+    local label="$1" mode="$2" i out skips=""
     shift 2
     local env_args=(TMPDIR="$HARNESS_DIR/tmp/")
     if [[ "$mode" == scribble ]]; then env_args+=(MallocScribble=1); else env_args=(-u MallocScribble "${env_args[@]}"); fi
@@ -257,8 +259,10 @@ if [[ "$DARWIN" == yes ]]; then
         echo "error: harness $label failed in run $i of 5" >&2
         exit 1
       fi
+      skips+="$(grep '^skip ' <<<"$out" || true)"$'\n'
     done
     echo "    $label: 5 of 5 passed"
+    sort -u <<<"$skips" | sed '/^$/d; s/^/      /'
   }
   run_harness "case 1 (units)" scribble units
   run_harness "case 2 (InputFilter, LockState, LaunchGuard)" scribble shell

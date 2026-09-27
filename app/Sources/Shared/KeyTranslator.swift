@@ -9,7 +9,8 @@
 // layout with Brev's own dead-key state. The units (at most 4) go to the
 // caller in a stack buffer that is wiped before `translate` returns. A dead
 // key (´ ` ¨ ^ ~ on the Norwegian layout) gives no units and waits for the
-// next key; `reset` drops it when the view loses focus. No AppKit: compiled
+// next key; `reset` drops it when the view loses focus, and a layout switch
+// before the next key drops it too. No AppKit: compiled
 // into the app and the CLI harness, which injects a named layout. Main
 // thread only (Text Input Sources).
 
@@ -29,6 +30,8 @@ final class KeyTranslator {
     /// The named layout; nil means the current one.
     private let fixed: TISInputSource?
     private var deadKeyState: UInt32 = 0
+    /// The input source id of the layout `deadKeyState` belongs to.
+    private var stateLayout: CFString?
 
     /// nil if a named layout is not installed or Text Input Sources cannot
     /// list it.
@@ -69,10 +72,24 @@ final class KeyTranslator {
     /// buffer is wiped when `body` returns, so `body` copies what it keeps
     /// (EditModel.insert).
     func translate<R>(keyCode: UInt16, flags: CGEventFlags, _ body: (UnsafeBufferPointer<UInt16>) -> R) -> R {
+        translate(in: fixed ?? TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(), keyCode: keyCode, flags: flags, body)
+    }
+
+    /// `translate` in the given layout. The harness calls it to switch
+    /// layouts between keys, which it must not do to the user's own.
+    func translate<R>(in source: TISInputSource?, keyCode: UInt16, flags: CGEventFlags,
+                      _ body: (UnsafeBufferPointer<UInt16>) -> R) -> R {
         var buf: (UInt16, UInt16, UInt16, UInt16) = (0, 0, 0, 0)
         defer { _ = withUnsafeMutableBytes(of: &buf) { memset_s($0.baseAddress, $0.count, 0, $0.count) } }
         var len = 0
-        let source = fixed ?? TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue()
+        // The state indexes the records of the layout that left it; in
+        // another one it means another accent (Norwegian ¨, then e in U.S.,
+        // gives è). So a layout switch since the last key (the input menu,
+        // ⌃Space) drops it.
+        let id = source.flatMap { TISGetInputSourceProperty($0, kTISPropertyInputSourceID) }
+            .map { Unmanaged<CFString>.fromOpaque($0).takeUnretainedValue() }
+        if id == nil || stateLayout == nil || !CFEqual(id, stateLayout) { deadKeyState = 0 }
+        stateLayout = id
         let status = withUnsafeMutablePointer(to: &buf) { tuple in
             tuple.withMemoryRebound(to: UniChar.self, capacity: 4) { out -> OSStatus in
                 guard let source, let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData),
