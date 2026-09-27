@@ -35,11 +35,15 @@ cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p b
 
 # Wipe-on-drop of every key the crypto crates hold depends on their `zeroize`
 # features (CLAUDE.md §1.10). Memory cannot be inspected without `unsafe`, so
-# check that each feature is actually enabled in brev-core's build.
+# check that each feature is actually enabled in brev-core's build. Every
+# line for the crate must have it: a second version without the feature
+# (poly1305's direct dependency only works while both resolve to one version)
+# must fail the check, not hide behind the copy that has it.
 echo "==> zeroize features"
 FEATURES="$(cargo tree --manifest-path "$MANIFEST" -p brev-core -e normal -f '{p} [{f}]')"
 for crate in chacha20poly1305 chacha20 poly1305 x25519-dalek curve25519-dalek sha2 block-buffer; do
-  if ! grep -Eq "(^|[^a-z0-9_-])$crate v[^ ]+ \[[^]]*zeroize" <<<"$FEATURES"; then
+  LINES="$(grep -E "(^|[^a-z0-9_-])$crate v" <<<"$FEATURES" || true)"
+  if [[ -z "$LINES" ]] || grep -Evq "(^|[^a-z0-9_-])$crate v[^ ]+ \[[^]]*zeroize" <<<"$LINES"; then
     echo "error: $crate is built without its zeroize feature" >&2
     exit 1
   fi

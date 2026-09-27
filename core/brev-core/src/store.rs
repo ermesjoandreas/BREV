@@ -24,7 +24,7 @@ const SCHEMA_VERSION: i32 = 1;
 const SCHEMA: &str = "
 CREATE TABLE identity (
     id         BLOB PRIMARY KEY,           -- pt: own identity id
-    keys       BLOB NOT NULL               -- ct: X25519 secret || signing public key
+    keys       BLOB NOT NULL               -- ct: X25519 secret || X25519 public || signing public key
 ) STRICT;
 CREATE TABLE contacts (
     id         BLOB PRIMARY KEY,           -- pt: identity id
@@ -154,7 +154,10 @@ pub struct Core {
 struct Me {
     id: [u8; 32],
     secret: StaticSecret,
-    signing_key: Vec<u8>,
+    /// Test only: counts live `Me` values. A field, not `Drop for Me`, so
+    /// fields can still be moved out.
+    #[cfg(test)]
+    _live: tests::LiveMe,
 }
 
 impl Core {
@@ -232,10 +235,16 @@ impl Core {
 
     /// This identity's public bundle, to hand to a contact out of band.
     pub fn bundle(&self) -> Result<PublicBundle, Error> {
-        let me = self.me()?;
+        // Both public keys are in the row, so the X25519 secret is never
+        // built and never copied onto the stack (see `me()`).
+        let (_, keys) = self.identity_keys()?;
+        let (x25519, signing_key) = keys
+            .get(32..)
+            .and_then(|k| k.split_at_checked(32))
+            .ok_or(Error::Crypto)?;
         Ok(PublicBundle {
-            x25519: crypto::public_key(&me.secret),
-            signing_key: me.signing_key,
+            x25519: x25519.try_into().map_err(|_| Error::Crypto)?,
+            signing_key: signing_key.to_vec(),
         })
     }
 
@@ -398,8 +407,7 @@ impl Core {
         let id: [u8; 16] = crypto::random()?;
         let now = now();
         // The subject, payload and identity secret live only inside this
-        // block, so none of them is alive while the signer (Touch ID from
-        // Phase 3) runs.
+        // block, so none of them is alive while the signer runs.
         let (mut env, stored) = {
             // Opening the subject authenticates `contact_id` before we encrypt to it.
             let subject =
@@ -508,9 +516,12 @@ impl Core {
         crypto::fill(secret.as_mut_slice())?;
         let x25519 = crypto::public_key(&crypto::static_secret(secret.as_slice())?);
         let id = crypto::identity_id(signing_key, &x25519);
-        let mut keys = Zeroizing::new(Vec::with_capacity(32 + signing_key.len()));
+        let cap = 64 + signing_key.len();
+        let mut keys = Zeroizing::new(Vec::with_capacity(cap));
         keys.extend_from_slice(secret.as_slice());
+        keys.extend_from_slice(&x25519);
         keys.extend_from_slice(signing_key);
+        debug_assert_eq!(keys.capacity(), cap, "identity key buffer reallocated");
         let sealed = crypto::seal_column(&core.dek, &column_ad("identity.keys", &[&id]), &keys)?;
         let tx = core.db.transaction()?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
@@ -540,6 +551,9 @@ impl Core {
         db.pragma_update(None, "temp_store", "MEMORY")?;
         db.pragma_update(None, "foreign_keys", "ON")?;
         db.pragma_update(None, "cell_size_check", "ON")?;
+        // On macOS plain fsync() does not flush the drive's cache, so a power
+        // cut mid-commit could corrupt the only copy of the history.
+        db.pragma_update(None, "fullfsync", "ON")?;
         Ok(Core {
             db,
             dek: slot,
@@ -564,7 +578,8 @@ impl Core {
             .query_row("SELECT id FROM identity", [], |r| r.get(0))?)
     }
 
-    /// Own id and the decrypted identity row (X25519 secret || signing key).
+    /// Own id and the decrypted identity row (X25519 secret || X25519
+    /// public || signing key).
     fn identity_keys(&self) -> Result<([u8; 32], Plaintext), Error> {
         let dek = self.dek()?;
         let (id, sealed): ([u8; 32], Vec<u8>) =
@@ -579,16 +594,18 @@ impl Core {
     /// Decrypts the own identity for one operation; the secret is wiped on drop.
     fn me(&self) -> Result<Me, Error> {
         let (id, keys) = self.identity_keys()?;
-        let (secret, signing_key) = keys.split_at_checked(32).ok_or(Error::Crypto)?;
+        let secret = keys.get(..32).ok_or(Error::Crypto)?;
         let me = Me {
             id,
             secret: crypto::static_secret(secret)?,
-            signing_key: signing_key.to_vec(),
+            #[cfg(test)]
+            _live: tests::LiveMe::new(),
         };
         // Reaches only the frames below this one. In release builds
-        // `static_secret` is inlined, so its by-value [u8; 32] and the `Me`
-        // being built sit in this frame, which only a scrub the caller runs
-        // after `me()` returns can reach.
+        // `static_secret` is inlined here and `me()` may be inlined into its
+        // caller, so the by-value [u8; 32] and the `Me` being built can sit
+        // in the caller's own frame, which no scrub reaches until that frame
+        // returns. So call `me()` only where the secret is needed.
         crypto::scrub_stack();
         Ok(me)
     }
@@ -709,20 +726,23 @@ fn set_journal_mode(db: &Connection) -> Result<(), Error> {
 
 /// Payload inside the message AEAD:
 /// `message id (16) || thread id (16) || subject length (u16 BE) || subject || body`.
+/// Returned as a [`Plaintext`], so the tests' live counter sees it.
 fn encode_payload(
     id: &[u8; 16],
     thread: &[u8; 16],
     subject: &[u8],
     body: &[u8],
-) -> Result<Zeroizing<Vec<u8>>, Error> {
+) -> Result<Plaintext, Error> {
     let len = u16::try_from(subject.len()).map_err(|_| Error::Malformed)?;
-    let mut p = Zeroizing::new(Vec::with_capacity(34 + subject.len() + body.len()));
+    let cap = 34 + subject.len() + body.len();
+    let mut p = Zeroizing::new(Vec::with_capacity(cap));
     p.extend_from_slice(id);
     p.extend_from_slice(thread);
     p.extend_from_slice(&len.to_be_bytes());
     p.extend_from_slice(subject);
     p.extend_from_slice(body);
-    Ok(p)
+    debug_assert_eq!(p.capacity(), cap, "payload buffer reallocated");
+    Ok(Plaintext::new(p))
 }
 
 /// Message id, thread id, subject and body borrowed from a decrypted payload.
@@ -750,6 +770,31 @@ mod tests {
     use rusqlite::trace::{TraceEvent, TraceEventCodes};
 
     use super::*;
+
+    thread_local! {
+        static LIVE_ME: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The counting field of every [`Me`].
+    pub(super) struct LiveMe;
+
+    impl LiveMe {
+        pub(super) fn new() -> LiveMe {
+            LIVE_ME.with(|n| n.set(n.get() + 1));
+            LiveMe
+        }
+    }
+
+    impl Drop for LiveMe {
+        fn drop(&mut self) {
+            LIVE_ME.with(|n| n.set(n.get() - 1));
+        }
+    }
+
+    /// `Me` values (decrypted X25519 identity secrets) alive on this thread.
+    fn live_me() -> usize {
+        LIVE_ME.with(|n| n.get())
+    }
 
     fn temp_path() -> std::path::PathBuf {
         let r: [u8; 8] = crypto::random().unwrap();
@@ -803,15 +848,27 @@ mod tests {
         assert_eq!(right, [0u8; 32]);
         assert_eq!(core.dek_for_test(), original);
         assert_eq!(core.dek_addr_for_test(), addr);
+        core.bundle().unwrap();
         assert_eq!(
             crypto::secrets_built(),
             built,
-            "unlock never builds the X25519 secret"
+            "unlock and bundle never build the X25519 secret"
         );
 
         // All zeros (a wiped buffer, a failed unwrap) also locks a core that
         // was unlocked.
         assert!(matches!(core.unlock(&mut [0u8; 32]), Err(Error::WrongKey)));
+        assert!(core.is_locked());
+        assert_eq!(core.dek_for_test(), [0u8; 32]);
+        assert!(matches!(core.bundle().map(drop), Err(Error::Locked)));
+
+        // So does a failure that is not about the key: the right DEK with
+        // the identity row gone.
+        right = original;
+        core.unlock(&mut right).unwrap();
+        core.db.execute("DELETE FROM identity", []).unwrap();
+        right = original;
+        assert!(matches!(core.unlock(&mut right), Err(Error::NotFound)));
         assert!(core.is_locked());
         assert_eq!(core.dek_for_test(), [0u8; 32]);
         assert!(matches!(core.bundle().map(drop), Err(Error::Locked)));
@@ -855,6 +912,7 @@ mod tests {
         assert_eq!(q("temp_store"), "Integer(2)");
         assert_eq!(q("foreign_keys"), "Integer(1)");
         assert_eq!(q("cell_size_check"), "Integer(1)");
+        assert_eq!(q("fullfsync"), "Integer(1)");
         assert_eq!(q("trusted_schema"), "Integer(0)");
         assert_eq!(q("application_id"), format!("Integer({APPLICATION_ID})"));
         assert_eq!(q("user_version"), "Integer(1)");
@@ -981,14 +1039,14 @@ mod tests {
         }
     }
 
-    /// Nothing decrypted is alive while the signer (Touch ID from Phase 3)
-    /// runs: `send` drops the subject before it signs.
+    /// Nothing decrypted is alive while the signer runs: `send` drops the
+    /// subject, the payload and the X25519 secret before it signs.
     #[test]
-    fn no_plaintext_is_alive_while_signing() {
-        struct Counts(std::cell::Cell<Option<usize>>);
+    fn nothing_decrypted_is_alive_while_signing() {
+        struct Counts(std::cell::Cell<Option<(usize, usize)>>);
         impl Signer for Counts {
             fn sign(&self, _: &[u8]) -> Result<Vec<u8>, Error> {
-                self.0.set(Some(crypto::live_plaintexts()));
+                self.0.set(Some((crypto::live_plaintexts(), live_me())));
                 Ok(Vec::new())
             }
         }
@@ -996,14 +1054,21 @@ mod tests {
         let (mut a, b) = (new_core(&paths[0]), new_core(&paths[1]));
         let b_at_a = a.add_contact(&b.bundle().unwrap(), b"B").unwrap();
         let t = a.new_thread(b_at_a, b"s").unwrap();
-        // Positive control: the counter sees a decrypted subject.
+        // Positive controls: the counters see a decrypted subject, an
+        // encoded payload and a decrypted identity.
         let threads = a.threads().unwrap();
         assert_eq!(crypto::live_plaintexts(), 1);
         drop(threads);
+        let payload = encode_payload(&[0; 16], &t.0, b"s", b"x").unwrap();
+        assert_eq!(crypto::live_plaintexts(), 1);
+        drop(payload);
+        let me = a.me().unwrap();
+        assert_eq!(live_me(), 1);
+        drop(me);
 
         let signer = Counts(std::cell::Cell::new(None));
         a.send(t, b"x", &signer).unwrap();
-        assert_eq!(signer.0.get(), Some(0));
+        assert_eq!(signer.0.get(), Some((0, 0)));
         drop((a, b));
         for p in &paths {
             let _ = fs::remove_file(p);

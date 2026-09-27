@@ -80,9 +80,11 @@ impl From<rusqlite::Error> for Error {
 
 /// Fills an envelope's signature slot.
 ///
-/// Phase 1 tests implement it with an Ed25519 key; Phase 3 implements it with
-/// the Secure Enclave P-256 identity key via Swift. The envelope format does
-/// not change between the two.
+/// Phase 1 tests implement it with an Ed25519 key. From Phase 3 the Secure
+/// Enclave signature arrives through the two-step flow of CLAUDE.md §5
+/// (`sign_request`/`attach_signature`, built on [`Envelope::signed_bytes`]
+/// and [`Envelope::signature`]), so that `send` never holds the core during
+/// a Touch ID prompt. The envelope format does not change.
 pub trait Signer {
     /// Signs `signed_bytes` (from [`Envelope::signed_bytes`]) and returns the
     /// raw signature to store in [`Envelope::signature`]. Returns

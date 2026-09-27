@@ -80,7 +80,7 @@ pub(crate) fn column_ad(label: &str, fields: &[&[u8]]) -> Vec<u8> {
 pub struct Plaintext(Zeroizing<Vec<u8>>);
 
 impl Plaintext {
-    fn new(buf: Zeroizing<Vec<u8>>) -> Plaintext {
+    pub(crate) fn new(buf: Zeroizing<Vec<u8>>) -> Plaintext {
         #[cfg(test)]
         LIVE_PLAINTEXTS.with(|n| n.set(n.get() + 1));
         Plaintext(buf)

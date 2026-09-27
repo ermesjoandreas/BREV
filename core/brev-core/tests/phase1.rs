@@ -7,7 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use brev_core::{
-    Core, Envelope, Error, IdentityId, MockTransport, PublicBundle, Signer, ThreadId, Transport,
+    Core, Envelope, Error, IdentityId, MessageId, MockTransport, PublicBundle, Signer, ThreadId,
+    Transport,
 };
 use ed25519_dalek::{Signature, SigningKey};
 use rand::rngs::SysRng;
@@ -337,6 +338,18 @@ fn receive_rejects_strangers_misrouted_self_and_replays() {
         a.core.new_thread(IdentityId([9; 32]), b"s").map(drop),
         Err(Error::NotFound)
     ));
+
+    // A subject over 65535 bytes is refused and makes no thread; an
+    // unknown message cannot be marked read.
+    assert!(matches!(
+        a.core.new_thread(b_at_a, &[0; 65536]).map(drop),
+        Err(Error::Malformed)
+    ));
+    assert_eq!(a.core.threads().unwrap().len(), 1);
+    assert!(matches!(
+        a.core.mark_read(MessageId([0; 16])),
+        Err(Error::NotFound)
+    ));
 }
 
 /// One bad envelope never costs the ones behind it, and a locked core
@@ -573,6 +586,13 @@ fn create_and_open_refuse_bad_files() {
     assert_eq!(dek, [0u8; 32]);
     assert!(!dir.0.join("x.db").exists());
 
+    // A failure after the file is made (a directory where the rollback
+    // journal goes) removes the file.
+    fs::create_dir(dir.0.join("j.db-journal")).unwrap();
+    let r = Core::create(&dir.0.join("j.db"), &mut random(), &[1; 32]);
+    assert!(matches!(r, Err(Error::Storage(_))));
+    assert!(!dir.0.join("j.db").exists());
+
     // create refuses an existing store and leaves it untouched.
     let path = dir.0.join("a.db");
     drop(make(&dir.0, "a.db", MockTransport::pair().0));
@@ -642,6 +662,18 @@ fn create_and_open_refuse_bad_files() {
         drop(Core::open(&path).unwrap());
     }
 
+    // open refuses a store with a table redefined under the same name.
+    let altered = dir.0.join("altered.db");
+    fs::copy(&path, &altered).unwrap();
+    rusqlite::Connection::open(&altered)
+        .unwrap()
+        .execute_batch("ALTER TABLE contacts ADD COLUMN note BLOB")
+        .unwrap();
+    assert!(matches!(
+        Core::open(&altered).map(drop),
+        Err(Error::Corrupt)
+    ));
+
     // open refuses a store with a planted trigger.
     rusqlite::Connection::open(&path)
         .unwrap()
@@ -653,6 +685,31 @@ fn create_and_open_refuse_bad_files() {
     let missing = dir.0.join("missing.db");
     assert!(Core::open(&missing).is_err());
     assert!(!missing.exists());
+}
+
+/// WAL mode is saved in the file, so an agent can switch a store to it;
+/// `open` switches it back, and writes leave no -wal or -shm file.
+#[test]
+fn open_turns_a_wal_store_back_to_delete_mode() {
+    let dir = TempDir::new();
+    let a = make(&dir.0, "a.db", MockTransport::pair().0);
+    let mut dek = a.dek;
+    drop(a);
+    let raw = rusqlite::Connection::open(dir.0.join("a.db")).unwrap();
+    let mode: String = raw
+        .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    drop(raw);
+
+    let mut core = Core::open(&dir.0.join("a.db")).unwrap();
+    core.unlock(&mut dek).unwrap();
+    core.add_contact(&stranger(), b"n").unwrap();
+    let names: Vec<_> = fs::read_dir(&dir.0)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["a.db"]);
 }
 
 #[test]
