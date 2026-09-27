@@ -21,6 +21,10 @@ uniffi = { version = "0.32", default-features = false }
 thiserror = "2"
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
+# Direct dependency only to turn on `zeroize`: chacha20poly1305's own
+# `zeroize` feature does not reach poly1305, whose Drop then leaves the
+# one-time MAC key in memory (CLAUDE.md §1.10). Never imported in code.
+poly1305 = { version = "0.9.1", default-features = false, features = ["zeroize"] }
 x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets", "zeroize", "precomputed-tables"] }
 hkdf = "0.13.0"
 sha2 = { version = "0.11.0", default-features = false, features = ["zeroize"] }

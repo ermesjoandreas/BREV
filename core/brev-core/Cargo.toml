@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 brev-proto = { path = "../brev-proto" }
 rusqlite = { workspace = true }
 chacha20poly1305 = { workspace = true }
+poly1305 = { workspace = true }  # only for its `zeroize` feature (see core/Cargo.toml)
 x25519-dalek = { workspace = true }
 hkdf = { workspace = true }
 sha2 = { workspace = true }

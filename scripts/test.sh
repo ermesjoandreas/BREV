@@ -29,6 +29,18 @@ cargo clippy --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace 
 echo "==> cargo test"
 cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace
 
+# Wipe-on-drop of every key the crypto crates hold depends on their `zeroize`
+# features (CLAUDE.md §1.10). Memory cannot be inspected without `unsafe`, so
+# check that each feature is actually enabled in brev-core's build.
+echo "==> zeroize features"
+FEATURES="$(cargo tree --manifest-path "$MANIFEST" -p brev-core -e normal -f '{p} [{f}]')"
+for crate in chacha20poly1305 chacha20 poly1305 x25519-dalek curve25519-dalek sha2 block-buffer; do
+  if ! grep -Eq "(^|[^a-z0-9_-])$crate v[^ ]+ \[[^]]*zeroize" <<<"$FEATURES"; then
+    echo "error: $crate is built without its zeroize feature" >&2
+    exit 1
+  fi
+done
+
 # cargo-audit is optional on a dev machine but required clean from Phase 1 on
 # (CLAUDE.md §5, Phase 1 definition of done; in CI from Phase 5), so skipping
 # it is loud, never silent.
