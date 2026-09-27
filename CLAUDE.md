@@ -41,8 +41,8 @@ In scope — must be defended against:
 * Keyloggers and event taps → secure event input while composing.
 * Synthetic input (AppleScript, CGEvent injection, agents "clicking") → rejected in the app.
 * macOS system AI features (notification summaries, Writing Tools, Spotlight, Siri suggestions) → nothing exposed to them.
-* The relay server (our own backend) → zero-access; sees only ciphertext and minimal routing metadata.
-* Spam / mass messaging / AI-generated noise → identity, contact approval, rate limits, delayed delivery (Phase 4).
+* The relay server (our own backend) → zero-access; sees only ciphertext and minimal routing metadata. It also serves the address directory, so a malicious relay could hand out a false key on first contact; key pinning, key-change warnings, invite codes that carry a key fingerprint, and optional safety-code comparison make that detectable (Phase 3–4).
+* Spam / mass messaging / AI-generated noise → identity, contact approval, invite codes, rate limits (Phase 4).
 
 Out of scope — explicitly NOT defended against:
 
@@ -157,22 +157,22 @@ Each phase ends with a short summary in `docs/DECISIONS.md` and passing `scripts
 
 ### Phase 3 — Real transport
 
-* `brev-relay`: minimal axum server. Endpoints: register public identity, submit envelope, poll envelopes for a recipient. Stores only ciphertext + routing metadata. Deletes envelopes after delivery. No accounts yet beyond a public key.
+* `brev-relay`: minimal axum server. Endpoints: register public identity with a chosen address, look up an address, submit envelope, poll envelopes for a recipient. Stores only ciphertext + routing metadata. Deletes envelopes after delivery. No accounts yet beyond a public key and its address.
 * `RelayTransport` in `brev-core` (HTTP, polling every N seconds; no websockets yet).
 * Envelope signatures now come from the Secure Enclave via Swift: `core.sign_request(bytes) -> Swift signs with Touch ID → core.attach_signature()`. Relay verifies the P-256 signature against the registered identity; `brev-core` verifies it on receive (`p256`, §4). Swift never verifies.
 * Padding: the plaintext payload is padded before encryption, as part of the envelope format in `brev-proto`, to fixed buckets of 256 B / 1 KiB / 4 KiB / 16 KiB, and above that to the next multiple of 16 KiB. The padding is unambiguous so the recipient can strip it (a length prefix; PKCS#7 cannot express more than 255 bytes of padding). Hard maximum: 1 MiB padded payload, defined in `brev-proto` and enforced by both the app and the relay. Tests: payloads within one bucket give ciphertexts of equal length; boundary sizes (exact bucket, bucket + 1, maximum, maximum + 1).
-* Contact exchange: out-of-band by sharing a short identity code (base32 of public key hash) which the app renders; no QR codes yet.
-* Definition of done: two Macs (or two app instances with separate data dirs) exchange messages through a local relay; relay DB contains no plaintext (test it).
+* Contact exchange by address, like email (docs/DECISIONS.md D-0031): a user registers a short, unique address; adding a contact means typing their address, and the relay returns their public keys. The app pins a contact's identity key the first time it sees it (trust on first use). If that key later changes, the app shows a clear warning and sends nothing until the user accepts the new key. Each contact's identity code (base32 of the public-key hash) is shown in the app so people who want to can compare it; comparing is optional. No QR codes, no links.
+* Definition of done: two Macs (or two app instances with separate data dirs) exchange messages through a local relay; relay DB contains no plaintext (test it); a changed key for a pinned contact triggers the warning and blocks sending (test it).
 
 ### Phase 4 — Human-only guarantees (anti-noise)
 
-* Contact approval: messages only from approved contacts; one short contact request otherwise.
-* Invite codes: new identities need an invite from an existing one; relay tracks the invite graph.
+* Contact approval: messages only from approved contacts; one short contact request otherwise, which the recipient approves or declines with one click.
+* Invite codes: one-time text codes that carry the inviter's address and identity-key fingerprint. Redeeming one makes inviter and invitee approved contacts of each other, with the inviter's key already verified against the fingerprint. A new identity needs one to register; the relay tracks the invite graph. Codes are text to paste, never links (§1.4 forbids URL schemes). Addresses and invite codes are not message content, so copy and paste of them is allowed on the contact screen only, never in content views.
 * Rate limits: max N messages/day per identity (relay-enforced).
-* Delayed delivery: relay releases envelopes at fixed "postombæring" times (configurable; default 08:00 and 18:00 local).
+* Delivery: like ordinary email, the relay hands an envelope to the recipient on their next poll after it passes the checks above. No delayed or batched delivery (docs/DECISIONS.md D-0030).
 * App Attest (`DCAppAttestService`): relay accepts registrations only from attested app builds. Stub behind a feature flag if unavailable on the dev machine.
 * BankID/ID-porten: stub only — a `IdentityVerifier` trait with a `DevVerifier` that always passes. Document the real integration as a future task.
-* Definition of done: an unapproved sender cannot reach an inbox; rate limit and delivery windows are covered by relay tests.
+* Definition of done: an unapproved sender cannot reach an inbox; an invite code whose fingerprint does not match the key the relay returns is rejected; rate limits and immediate delivery of approved envelopes are covered by relay tests.
 
 ### Phase 5 — Hardening and trust
 
