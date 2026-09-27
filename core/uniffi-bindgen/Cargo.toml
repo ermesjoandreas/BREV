@@ -3,7 +3,9 @@ name = "uniffi-bindgen"
 description = "Tool crate: generates the Swift bindings for brev-core (not shipped)"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# uniffi's `cli` feature pulls in askama 0.16, which needs 1.88. The shipped
+# crates keep the workspace's 1.85 (docs/DECISIONS.md).
+rust-version = "1.88"
 license.workspace = true
 publish.workspace = true
 
