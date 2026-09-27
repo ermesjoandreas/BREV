@@ -953,11 +953,40 @@ install `cargo-audit`.
   shows it exports 282 `_sqlite3_*` functions, so the app must never also
   link the system `libsqlite3`.
 
+### D-0029 — Follow-ups after the review: `scrub_stack` call sites tested, SQLite built for macOS 14.0
+
+- **Date:** 2026-09-27
+- **Decision:**
+  1. `scrub_stack()` counts its calls in test builds (a thread-local, like
+     the other test counters in D-0024). Two tests pin the call sites:
+     `public_key`, `seal_column`, `open_column`, `seal_message` and
+     `open_message` scrub exactly once each; `me()` and `lock()` add one
+     of their own. This closes the deferred review finding "no test checks
+     that it is called".
+  2. `scripts/gen-bindings.sh` exports `MACOSX_DEPLOYMENT_TARGET=14.0` on
+     macOS before the cargo build, matching `app/project.yml`. This fixes
+     D-0028 item 1 now instead of in Phase 2. `scripts/test.sh` exports
+     the same value, so its release test shares one SQLite build with the
+     archive instead of rebuilding it.
+- **Reasoning:** The product owner asked for a release test that proves
+  `scrub_stack()` actually runs (D-0027). The release test proves the wipe
+  survives the optimiser; without the counter, removing the calls would
+  still pass. The deployment target matters because the app claims macOS
+  14 and now contains C code (SQLite).
+- **Verified:** macOS 26.2, 2026-09-27, at `ea95ae0`: removing the scrub
+  in `me()`, or the one in `open_column`, fails the new tests (1 != 2, and
+  the per-operation count). After `scripts/build.sh`, `otool -l` on
+  `sqlite3.o` from `libbrev_core.a` shows `minos 14.0`, the app binary
+  `minos 14.0`, and the linker warning is gone. The remaining objects with
+  `minos 11.0` are Rust's own precompiled ones, which are older than 14.0
+  and therefore fine. The app launches and logs
+  `brev-core ping: brev-core 0.0.1 ok`. `scripts/test.sh` exits 0.
+
 ---
 
 ## Phase 1 summary
 
-**Built (2026-09-27, commits `0fa9fae` to `af02935`):**
+**Built (2026-09-27, commits `0fa9fae` to `ea95ae0`):**
 
 - `brev-proto`: `Envelope`, `HEADER_LEN`, `header_bytes`, `signed_bytes`
   (D-0018), and the Phase 3 padding TODO (D-0027).
@@ -972,9 +1001,9 @@ install `cargo-audit`.
   still the only UniFFI export.
 - `scripts/test.sh`: a release run of the scrub test, and the zeroize
   feature check.
-- Tests: 35 in `cargo test --workspace` (brev-core: 19 unit, 11
+- Tests: 37 in `cargo test --workspace` (brev-core: 21 unit, 11
   integration, 3 doctests; brev-proto: 2), plus the release scrub test.
-  0fa9fae had 25; the review added the rest.
+  0fa9fae had 25; the review and D-0029 added the rest.
 
 **Review:** three rounds after `0fa9fae` (`91f1803`, `b35bab7`,
 `af02935`). Each applied finding is in the entry it belongs to. The code
@@ -990,7 +1019,8 @@ skipped: a test of `init`'s commit-time scoping (D-0024).
 
 **Definition of done status (CLAUDE.md §5, Phase 1): met on 2026-09-27.**
 Checked with `scripts/gen-bindings.sh` then `scripts/test.sh` at
-`af02935` on macOS 26.2, exit 0.
+`af02935` on macOS 26.2, exit 0, and again with `scripts/build.sh` then
+`scripts/test.sh` at `ea95ae0`.
 
 - Data model, encrypted SQLite store, DEK column encryption,
   `Locked`/`Unlocked` state machine and zeroization: D-0020 to D-0025.
@@ -1008,7 +1038,7 @@ Checked with `scripts/gen-bindings.sh` then `scripts/test.sh` at
 - Lock test: `locked_core_refuses_every_content_call` (`Err(Locked)`) and
   `lock_zeroes_the_dek_buffer` (DEK memory zeroed, through a
   `#[cfg(test)]` accessor).
-- All tests pass: fmt, clippy `-D warnings`, the 35 tests, the release
+- All tests pass: fmt, clippy `-D warnings`, the 37 tests, the release
   scrub test, the zeroize check and the Xcode Debug compile.
 - `cargo audit` clean: `cargo audit --deny warnings` exits 0 over 122
   crates and 1271 advisories.
@@ -1023,8 +1053,9 @@ What the tests cannot prove:
 
 - Stack and register residue inside the crypto crates (D-0024), accepted
   in CLAUDE.md §2. The release test proves `scrub_stack()`'s wipe
-  survives the optimiser, but no test checks that it is called: deleting
-  every call site passes every test.
+  survives the optimiser, and a test counter proves each crypto operation
+  calls it (D-0029). What it cannot prove is that the wipe reaches every
+  stale copy.
 - The send and receive orderings are tested for live values (counters),
   not for dead stack copies. `init`'s ordering holds by structure only.
 - Returned plaintext: `lock()` cannot wipe a `Plaintext` the caller still
@@ -1073,8 +1104,9 @@ Supply chain and platform:
   known audits.
 - The SQLite parser still runs over a file an attacker can write. D-0023
   limits this; it does not remove it.
-- The staticlib exports SQLite's symbols, and the bundled SQLite is built
-  for macOS 26.2 while the app targets 14.0 (D-0028).
+- The staticlib exports SQLite's symbols, so the app must never also link
+  the system `libsqlite3` (D-0028). The bundled SQLite now targets macOS
+  14.0 (D-0029), but the app has not been run on macOS 14.
 - FFI copies in Phase 2: `Vec<u8>` values that cross UniFFI go through a
   `RustBuffer` that is freed without being zeroed. The DEK passed to
   `unlock` and every body returned by `read_body` would leave copies in
