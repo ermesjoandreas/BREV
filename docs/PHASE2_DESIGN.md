@@ -611,6 +611,8 @@ Starting points (copy them now; `/private/tmp` is volatile): WP1 `R/core/brev-co
 
 ## 13. Decision-log entries to add (D-0033 onward)
 
+> Numbering note (2026-09-27): D-0033 was used for the owner's answers to this design's open questions. Every number below shifts by one (D-0033 → D-0034 … D-0058 → D-0059), and the topics of D-0055 and D-0056 are already recorded in D-0033.
+
 - D-0033: Phase 2 UniFFI surface: `Brev` + `OpenText`, unit-variant `BrevError`, content in only as `&[u8]` + length, out only as 960-byte chunks, no content `String`; no replies or read state in Phase 2.
 - D-0034: `OpenText` registry; `lock()` closes every open text; Swift reads a text completely and closes it.
 - D-0035: `unlock` drop guard (lock on any failure or panic, 64 KiB scrub on every exit); poisoned mutex → lock all, `Locked`.

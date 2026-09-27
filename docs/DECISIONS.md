@@ -1266,3 +1266,36 @@ the new numbers.
   reflected above (for example "one run each"). Still open: the user's
   Touch ID test of the full HPKE unwrap, and the GUI spikes on screen
   capture, input, accessibility and lock triggers.
+
+### D-0033 — Owner decisions after the Phase 2 design and the Touch ID test
+
+- **Date:** 2026-09-27
+- **Decision:** The product owner accepted the Phase 2 design's three open
+  questions and a corrected version of D-0032 item 2. CLAUDE.md §1.9, §2 and
+  §5 Phase 5 were changed and `docs/THREAT_MODEL.md` re-synced:
+  1. Key files not bound to Brev: accepted again on corrected facts. The
+     Touch ID dialog is not a mitigation; the rule is behavioural (Brev asks
+     only right after "Lås opp"; onboarding says to cancel any other
+     request).
+  2. File substitution by a process that can write the container: accepted
+     for Phase 2, with the onboarding warning, and a login-keychain anchor
+     if the GUI session shows it works without prompts.
+  3. New accepted residual risks: keystrokes in macOS event objects and the
+     window server; letter pixels in backing stores until blank-on-lock; the
+     Phase 2 echo contacts' copies; reliance on `MallocScribble=1`.
+  4. Brev's container is excluded from Time Machine.
+  5. Developer ID and keychain storage are required before Brev holds real
+     letters (Phase 5 at the latest). This closes items 1 and 2.
+- **Reasoning:** The owner's Touch ID test on 2026-09-27 (enclave spike,
+  `user_test.sh --rogue`, macOS 26.2): unwrapping without interaction was
+  refused (LocalAuthentication -1004); the HPKE unwrap after Touch ID
+  matched (1.9 s including the prompt); a different, unsandboxed binary
+  unwrapped the same DEK from a copy of the KEK blob after Touch ID; neither
+  dialog offered a password; the owner could not tell the two dialogs
+  apart. Keychain items under a Developer ID are bound to the app's signing
+  identity, so other processes can neither use nor replace them.
+- **Verified:** The test output is in the session scratchpad
+  (`p2/enclave/out/user-*.stdout`). The dialog observations are the owner's.
+- **Numbering:** `docs/PHASE2_DESIGN.md` §13 planned D-0033 to D-0058. Those
+  entries shift by one (D-0034 to D-0059); its D-0055 and D-0056 topics are
+  covered here.
