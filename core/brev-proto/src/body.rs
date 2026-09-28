@@ -1579,7 +1579,7 @@ mod tests {
             Err(BodyError::Length)
         );
 
-        let tag = invite::tag(&[0; 16], &id, &peer);
+        let tag = invite::tag(&[0; 16], &id, &peer, b"anna").unwrap();
         let body = invite_redeem_body(&id, &token, &a, &tag);
         assert_eq!(body, [&prefix[..], &a[..], &tag[..]].concat());
         assert_eq!(

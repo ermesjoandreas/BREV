@@ -73,7 +73,7 @@ The relay holds a directed **link** per pair: `links(owner, peer)` is *approved*
 
 Derived values (brev-proto, `sha2` + `hkdf`):
 - `a = SHA-256("brev/invite/relay\0" ‖ s)` (32 bytes): what the relay sees for open, register and redeem. It stores `SHA-256(a)`.
-- `tag = HKDF-SHA256(ikm = s, salt = none, info = "brev/invite/peer\0" ‖ invitee id ‖ inviter id)`, 32 bytes: the invitee's proof to the inviter (§3.4). For a root invite the tag is 32 zero bytes and the relay ignores it.
+- `tag = HKDF-SHA256(ikm = s, salt = none, info = "brev/invite/peer\0" ‖ invitee id ‖ inviter id ‖ L ‖ invitee address)`, 32 bytes: the invitee's proof to the inviter (§3.4). The address is in it because the key id does not cover it, so a relay cannot put a real bundle and tag under another name. For a root invite the tag is 32 zero bytes and the relay ignores it.
 
 ### 3.2 Bodies (binary `POST`; paths stay `/v1`; health still answers `brev-relay v1`)
 
@@ -101,7 +101,7 @@ Derived values (brev-proto, `sha2` + `hkdf`):
 ### 3.4 Integrity of a code, both directions
 
 - **Invitee checks inviter:** the relay's answer to `a` must match the code's form (2-part code → only `00`; 4-part → only a bundle), address and fingerprint. A lying relay cannot fit a 150-bit fingerprint to its own key. Otherwise `InviteMismatch`, and nothing is stored or sent.
-- **Inviter checks invitee:** the inviter keeps `s` sealed in its store (§5.1). The *invited* event carries the invitee's bundle and `tag`. The inviter recomputes `HKDF(s, … ‖ bundle.id() ‖ my id)` for each of its open invites; a match pins the invitee with `VERIFIED` and deletes that invite row. No match → the event is marked seen and dropped. The relay knows only `a`, not `s`, so it can neither forge an *invited* event nor swap the invitee's key. This meets D-0031's "invite codes avoid [a false key] entirely" for both people.
+- **Inviter checks invitee:** the inviter keeps `s` sealed in its store (§5.1). The *invited* event carries the invitee's bundle and `tag`. The inviter recomputes `HKDF(s, … ‖ bundle.id() ‖ my id ‖ L ‖ event address)` for each of its open invites; a match pins the invitee with `VERIFIED` and deletes that invite row. No match → the event is marked seen and dropped. The relay knows only `a`, not `s`, so it can neither forge an *invited* event nor swap the invitee's key or address. This meets D-0031's "invite codes avoid [a false key] entirely" for both people.
 
 ## 4. Relay (`brev-relay`)
 
@@ -207,7 +207,7 @@ This goes beyond Phase 3, where who-writes-to-whom lived only until delivery. It
 - **Answer a request** (`answer_request(peer, approve)`): peer in `session.requests` (`NotFound`); `/v1/events/answer`; yes → pin with `APPROVED_ME`, return the contact id; no → remove, return an empty id.
 - **Create an invite** (`create_invite`): registered (`NotFound`); `s` from the RNG; `/v1/invites` with `SHA-256(a)`; on 201/200 store the sealed row; return the code as bytes; wipe `s` in memory. 429 → `RateLimited`.
 - **Open an invite** (`open_invite(code)`): `parse` (`InviteInvalid`); `/v1/invites/open` with `a` (404 → `InviteInvalid`); form, address and fingerprint must match (§3.4), else `InviteMismatch` and nothing stored or sent. Own identity → `Malformed`. **Existing contact:** same key → fine (redeem will set `VERIFIED`); different key → the code-verified bundle goes into that contact's `pending` and `KeyChanged` is returned (Phase 3's warning; after `accept_new_key` the user opens the code again). The verified inviter and `s` are kept in `session.invite`.
-- **Register:** `register_request(address)` needs `session.invite` (`InviteInvalid`), computes `a` and the tag (own id, inviter id; zeros for root), builds body v2. `register(signature, attestation)` → 201/200: set the address, pin the inviter with `APPROVED_ME | VERIFIED` (the bundle checked at open), clear the invite. 403 → `InviteInvalid`; 428 → `Refused`.
+- **Register:** `register_request(address)` needs `session.invite` (`InviteInvalid`), computes `a` and the tag (own id, inviter id, own address; zeros for root), builds body v2. `register(signature, attestation)` → 201/200: set the address, pin the inviter with `APPROVED_ME | VERIFIED` (the bundle checked at open), clear the invite. 403 → `InviteInvalid`; 428 → `Refused`.
 - **Redeem while registered** (`redeem_invite`): needs a non-root `session.invite`; `/v1/invites/redeem` with `a` and tag → pin (or flag) the inviter with `APPROVED_ME | VERIFIED`.
 
 ### 5.4 UniFFI surface (additions; the rest is Phase 3's)
@@ -297,7 +297,7 @@ Attestation at registration proves the app was genuine once. The next step would
 
 ## 8. Test plan
 
-**brev-proto:** `invite_code_round_trip_and_known_answers` (all-zero id and secret, a real id, root form, 96 bytes at the longest address); `invite_parse_refuses` (no prefix, 3 parts, bad address, non-base32, wrong length, non-zero padding bits, 97 bytes); `base32_decode_inverts_identity_code`; `invite_derivations_known_answers` (`a`, `tag`; the tag changes with either id); `registration_v2_layout` (offsets; v1 domain fails; attestation 0 and 8 192, 8 193 refused); `lookup_reply_status`; `events_answer_parse` (count 33 refused, trailing byte, address rules); `submit_body_prefix`.
+**brev-proto:** `invite_code_round_trip_and_known_answers` (all-zero id and secret, a real id, root form, 96 bytes at the longest address); `invite_parse_refuses` (no prefix, 3 parts, bad address, non-base32, wrong length, non-zero padding bits, 97 bytes); `base32_decode_inverts_identity_code`; `invite_derivations_known_answers` (`a`, `tag`; the tag changes with either id and with one byte of the invitee's address); `registration_v2_layout` (offsets; v1 domain fails; attestation 0 and 8 192, 8 193 refused); `lookup_reply_status`; `events_answer_parse` (count 33 refused, trailing byte, address rules); `submit_body_prefix`.
 
 **brev-relay** (`tests/relay.rs` updated, new `tests/phase4.rs`; clock via `Config`):
 1. `registration_needs_an_invite` (none, unknown, used, expired → 403; root → 201, `invited_by` NULL; Same retry after use → 200; the largest v2 body (address 32, attestation 8 192) goes through the real router, not 413).
@@ -316,7 +316,7 @@ Attestation at registration proves the app was genuine once. The next step would
 **brev-mail** (`tests/phase4.rs`, two or three sessions, the relay in-process, p256 test signers):
 1. **`invite_with_wrong_fingerprint_is_rejected`** (DoD): (a) fingerprint changed in one character, (b) address changed, (c) the relay lies (another bundle in its row for the inviter), (d) a 4-part code answered with `00`. Each → `InviteMismatch`; the request log has no `/v1/register` or `/v1/invites/redeem`; no contact stored.
 2. `invite_makes_both_approved_and_verified` (root → A; A invites B; B registers with A `verified`; A's sync pins B `verified`; letters both ways; the A invite row is gone).
-3. **`forged_invited_event_is_dropped`**: the relay handle inserts a kind-2 event with a random tag, and one with a real tag but another bundle → A pins nothing; a letter from that identity is dropped by the client rule.
+3. **`forged_invited_event_is_dropped`**: the relay handle inserts a kind-2 event with a random tag, one with a real tag but another bundle, and one with a real bundle and tag under another address → A pins nothing; a letter from that identity is dropped by the client rule.
 4. **`a_stranger_cannot_reach_an_inbox`** (DoD): C cannot `prepare_send` to A (`NotApproved`, no digest); a forced submit (test hook) → `NotApproved`; A's sync gets nothing.
 5. `request_approve_and_decline`; `add_contact_always_requests` (decline then re-add unblocks); `events_are_processed_once` (lost answers → same events next sync, no duplicate contact).
 6. `key_change_through_a_request` (release B, B′ with an invite from D requests A → `pending`, no answer; after `accept_new_key` the next sync answers yes); `open_invite_on_existing_contact` (same key → redeem sets `VERIFIED`; different key → `KeyChanged` and `pending` holds the code-verified bundle).

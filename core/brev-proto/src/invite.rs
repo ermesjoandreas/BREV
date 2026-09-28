@@ -241,15 +241,33 @@ pub fn stored_hash(relay_key: &[u8; 32]) -> [u8; 32] {
 
 /// The invitee's proof to the inviter (design §3.4):
 /// HKDF-SHA256(ikm = `s`, no salt, info = `"brev/invite/peer\0"` ‖ invitee
-/// id ‖ inviter id), 32 bytes. The relay knows only `a`, so it can neither
-/// make one nor move one to another identity. A root invite uses
-/// [`ROOT_TAG`] instead.
-pub fn tag(secret: &[u8; SECRET_LEN], invitee: &[u8; 32], inviter: &[u8; 32]) -> [u8; 32] {
+/// id ‖ inviter id ‖ L ‖ invitee address), 32 bytes. The relay knows only
+/// `a`, so it can neither make one nor move one to another identity or
+/// another address. Refuses an address that breaks the rules. A root invite
+/// uses [`ROOT_TAG`] instead.
+pub fn tag(
+    secret: &[u8; SECRET_LEN],
+    invitee: &[u8; 32],
+    inviter: &[u8; 32],
+    invitee_address: &[u8],
+) -> Result<[u8; 32], InviteError> {
+    if !is_valid_address(invitee_address) {
+        return Err(InviteError::Address);
+    }
+    let len = [u8::try_from(invitee_address.len()).map_err(|_| InviteError::Address)?];
     let mut out = [0u8; 32];
     // 32 bytes is far below HKDF-SHA256's limit, so expand cannot fail.
-    let _ = Hkdf::<Sha256>::new(None, secret)
-        .expand_multi_info(&[PEER_LABEL, &invitee[..], &inviter[..]], &mut out);
-    out
+    let _ = Hkdf::<Sha256>::new(None, secret).expand_multi_info(
+        &[
+            PEER_LABEL,
+            &invitee[..],
+            &inviter[..],
+            &len,
+            invitee_address,
+        ],
+        &mut out,
+    );
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -516,8 +534,8 @@ mod tests {
     }
 
     /// `a` and its hash against Python's hashlib, the tag against HKDF
-    /// written out with Python's hmac; the tag changes with either id and
-    /// with the secret, and differs from `a`.
+    /// written out with Python's hmac; the tag changes with either id, with
+    /// the invitee's address and with the secret, and differs from `a`.
     #[test]
     fn invite_derivations_known_answers() {
         let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
@@ -544,28 +562,58 @@ mod tests {
             "c6059bd50a39da53756518df81d0cb142726f1bf85e3a4564a8b061a978fa289"
         );
 
+        let tag = |s: &[u8; 16], invitee: &[u8; 32], inviter: &[u8; 32], address: &[u8]| {
+            tag(s, invitee, inviter, address).unwrap()
+        };
         assert_eq!(
-            hex(&tag(&[0; 16], &[0; 32], &[0; 32])),
-            "2c83ee2773c611babf1f66b30eb26a921df67240663c4c9085307870ac4cd9d1"
+            hex(&tag(&[0; 16], &[0; 32], &[0; 32], b"anna")),
+            "12c0fdd79b37933b0f4417e4d34a0d8c4c769279ca72cd27a305522051dccbd9"
         );
         let id = real_id();
-        let t = tag(&SEQ, &id, &[0; 32]);
+        let t = tag(&SEQ, &id, &[0; 32], b"per-2");
         assert_eq!(
             hex(&t),
-            "ecde16638e03ba63eba5f4d0038bdaa5c533b04899f55dc891f573bd89c21afd"
+            "7df259c801255c2ee112b5318094551d7fe87fd9ec07bf707b64ef14eb8760f5"
         );
         // Swapping the ids changes the tag: the order is part of the proof.
         assert_eq!(
-            hex(&tag(&SEQ, &[0; 32], &id)),
-            "f4ee7639cecedd7cc87334864957832b28d224c170318218324706bb5b2ccac2"
+            hex(&tag(&SEQ, &[0; 32], &id, b"per-2")),
+            "f45eb011cccbd54391d4c8fd2e2e84a1e8240aa23a825eb49b1fa8dff03c5f1e"
+        );
+        // One byte of the invitee's address changes the tag, so a relay
+        // cannot hand the inviter a real bundle and tag under another name.
+        assert_eq!(
+            hex(&tag(&SEQ, &id, &[0; 32], b"per-3")),
+            "d04f736cfc46d1996e1ce9f4b7ae5339d70664873c1a09a07cff4758bc13a9f4"
+        );
+        assert_eq!(
+            hex(&tag(
+                &SEQ,
+                &id,
+                &[0; 32],
+                b"abcdefghijklmnopqrstuvwxyz012345"
+            )),
+            "883b87290a15196c8e134a05ed294b265a70ff6cafd0c4986ebbd8b99ec83772"
         );
         let mut other = id;
         other[31] ^= 1;
-        assert_ne!(tag(&SEQ, &other, &[0; 32]), t, "invitee id");
-        assert_ne!(tag(&SEQ, &id, &other), tag(&SEQ, &id, &id), "inviter id");
+        assert_ne!(tag(&SEQ, &other, &[0; 32], b"per-2"), t, "invitee id");
+        assert_ne!(
+            tag(&SEQ, &id, &other, b"per-2"),
+            tag(&SEQ, &id, &id, b"per-2"),
+            "inviter id"
+        );
+        assert_ne!(tag(&SEQ, &id, &[0; 32], b"per-2a"), t, "address");
         let mut s = SEQ;
         s[0] ^= 1;
-        assert_ne!(tag(&s, &id, &[0; 32]), t, "secret");
+        assert_ne!(tag(&s, &id, &[0; 32], b"per-2"), t, "secret");
+        // An address that breaks the rules gives no tag.
+        for bad in [&b"Per-2"[..], b"pe", b"per.2", b"2per", &[b'a'; 33]] {
+            assert_eq!(
+                super::tag(&SEQ, &id, &[0; 32], bad),
+                Err(InviteError::Address)
+            );
+        }
         assert_ne!(t, relay_key(&SEQ));
         assert_ne!(stored_hash(&a), a);
         assert_eq!(ROOT_TAG, [0; 32]);
