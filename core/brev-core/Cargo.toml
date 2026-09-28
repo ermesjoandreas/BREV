@@ -3,7 +3,10 @@ name = "brev-core"
 description = "Brev core: storage, crypto and session state, exposed to Swift via UniFFI"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Not the workspace's 1.85: reqwest -> url -> idna -> idna_adapter 1.2.2 ->
+# ICU4X 2.3 declares 1.88 (docs/PHASE3_DESIGN.md §0). brev-proto and
+# brev-relay stay at 1.85.
+rust-version = "1.88"
 license.workspace = true
 publish.workspace = true
 
@@ -26,11 +29,15 @@ sha2 = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
 zeroizing-alloc = { workspace = true }
+# The relay client (src/relay.rs): blocking, no TLS, no proxy, no JSON.
+reqwest = { workspace = true }
 
 [dev-dependencies]
-# Test-only signer/verifier for the envelope signature slot (CLAUDE.md §4:
-# ed25519-dalek is relay-side only; never a normal dependency of brev-core).
-ed25519-dalek = { workspace = true }
+# Test signers for the identity key (src/test_keys.rs and tests/ only;
+# production code never builds a signing key).
+p256 = { workspace = true }
+# The relay in-process on 127.0.0.1:0 for the network tests.
+brev-relay = { path = "../brev-relay" }
 # `trace` (a no-dependency feature of an approved crate) lets one test record
 # every SQL statement with its bound values. Test builds only.
 rusqlite = { workspace = true, features = ["trace"] }

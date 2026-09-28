@@ -10,8 +10,8 @@
 //! wipes; they keep no copy.
 //!
 //! The padding is used for every sealed store column from Phase 2 (schema
-//! v2). TODO(Phase 3, WP3): brev-core pads the envelope payload with the same
-//! functions before encryption (docs/PHASE3_DESIGN.md §2.2).
+//! v2), and brev-core pads the envelope payload with the same functions
+//! before encryption (docs/PHASE3_DESIGN.md §2.2).
 
 #![forbid(unsafe_code)]
 

@@ -87,7 +87,7 @@ brev/
 * Encrypted store: SQLite via `rusqlite` (bundled). Every content column is a ciphertext BLOB, padded before encryption to the same buckets as envelopes (§5 Phase 3), so stored lengths show only the bucket. Metadata that must be queryable (contact id, timestamp, read flag) may be plaintext, but never subject lines or bodies.
 * Crypto (see §4): identity keys, message encryption/decryption, envelope signing/verification.
 * Session state: an `Unlocked` / `Locked` state machine. When locked, the data-encryption key and all plaintext are zeroized and every content call returns `Err(Locked)`.
-* Transport trait: `trait Transport { send(Envelope); poll() -> Vec<Envelope> }` with a `MockTransport` (in-process, Phase 2) and `RelayTransport` (HTTP, Phase 3).
+* Transport trait: `trait Transport { send(&Envelope) -> Result<(), NetError>; poll() -> Result<Vec<Envelope>, NetError>; ack(&[[u8; 32]]) -> Result<(), NetError> }`. `poll` deletes nothing; the receiver acknowledges each envelope after it is stored (or refused for good), and the relay deletes it then. `MockTransport` (in-process, Phase 1 tests) and `RelayTransport` (blocking HTTP to `http://127.0.0.1:<port>` only, never under the session mutex; Phase 3).
 * Exposed to Swift with UniFFI (`uniffi` crate, proc-macro style). The Swift side never sees raw keys; it passes opaque handles. `brev-core` uses a zeroing global allocator (`zeroizing-alloc`), so every freed Rust buffer, including UniFFI's, is wiped. `scripts/gen-bindings.sh` patches the generated Swift so byte buffers are wiped before they are freed; the build fails if a patch no longer applies.
 
 ### 3.2 Swift app (`app/`) — owns only what must be Mac-native

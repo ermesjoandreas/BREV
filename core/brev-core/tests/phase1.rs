@@ -1,101 +1,78 @@
-//! Phase 1 invariants through the public API: round trip, tamper, no
-//! plaintext on disk, lock, plus the store-integrity and hygiene checks. (The
-//! DEK-zeroed half of the lock test, the pragma readback and the SQL trace
-//! are unit tests in `store.rs`, because their accessors are cfg(test) only.)
+//! Phase 1 invariants through the public `Core` API, with P-256 identity
+//! keys, local contact ids and the `MockTransport`: round trip, tamper, no
+//! plaintext on disk, lock, plus the store-integrity and hygiene checks.
+//! (The DEK-zeroed half of the lock test, the pragma readback and the SQL
+//! trace are unit tests in `store/tests.rs`, because their accessors are
+//! cfg(test) only.)
+
+mod common;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use brev_core::{
-    Core, Envelope, Error, IdentityId, MessageId, MockTransport, PublicBundle, Signer, ThreadId,
-    Transport,
+    ContactId, Core, Envelope, Error, MessageId, MockTransport, PublicBundle, Transport,
 };
-use ed25519_dalek::{Signature, SigningKey};
-use rand::rngs::SysRng;
-use rand::TryRng;
-
-fn random<const N: usize>() -> [u8; N] {
-    let mut out = [0u8; N];
-    SysRng.try_fill_bytes(&mut out).unwrap();
-    out
-}
-
-/// A fresh directory under the system temp dir, removed on drop.
-struct TempDir(PathBuf);
-impl TempDir {
-    fn new() -> TempDir {
-        let p =
-            std::env::temp_dir().join(format!("brev-test-{:016x}", u64::from_le_bytes(random())));
-        fs::create_dir(&p).unwrap();
-        TempDir(p)
-    }
-}
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Ed25519 test key for the signature slot (dev-dependency only).
-struct TestSigner(SigningKey);
-impl Signer for TestSigner {
-    fn sign(&self, signed_bytes: &[u8]) -> Result<Vec<u8>, Error> {
-        use ed25519_dalek::Signer as _;
-        Ok(self.0.sign(signed_bytes).to_bytes().to_vec())
-    }
-}
+use brev_proto::sig;
+use common::{contains, random, TempDir, TestKey};
 
 struct Party {
     core: Core,
     dek: [u8; 32],
     net: MockTransport,
-    signer: TestSigner,
+    key: TestKey,
 }
 
 fn make(dir: &Path, name: &str, net: MockTransport) -> Party {
     let dek = random();
-    let signer = TestSigner(SigningKey::from_bytes(&random()));
-    let vk = signer.0.verifying_key().to_bytes();
-    let core = Core::create(&dir.join(name), &mut dek.clone(), &vk).unwrap();
+    let key = TestKey::new();
+    let core = Core::create(&dir.join(name), &mut dek.clone(), &key.public).unwrap();
     Party {
         core,
         dek,
         net,
-        signer,
+        key,
     }
 }
 
 /// A and B in one directory, each with the other as a contact.
-fn pair(dir: &Path) -> (Party, Party, IdentityId, IdentityId) {
+fn pair(dir: &Path) -> (Party, Party, ContactId, ContactId) {
     let (net_a, net_b) = MockTransport::pair();
     let mut a = make(dir, "a.db", net_a);
     let mut b = make(dir, "b.db", net_b);
     let b_at_a = a
         .core
-        .add_contact(&b.core.bundle().unwrap(), b"Bob")
+        .add_contact(&b.core.bundle().unwrap(), b"bob")
         .unwrap();
     let a_at_b = b
         .core
-        .add_contact(&a.core.bundle().unwrap(), b"Alice")
+        .add_contact(&a.core.bundle().unwrap(), b"alice")
         .unwrap();
     (a, b, b_at_a, a_at_b)
 }
 
+/// A valid bundle nobody holds the keys of.
 fn stranger() -> PublicBundle {
-    PublicBundle {
-        signing_key: vec![1; 32],
-        x25519: random(),
-    }
+    PublicBundle::new(&TestKey::new().public, random()).unwrap()
 }
 
-fn send(from: &mut Party, thread: ThreadId, body: &[u8]) -> Envelope {
-    let env = from.core.send(thread, body, &from.signer).unwrap();
-    from.net.send(env.clone());
-    env
+/// Seals, signs (the test key stands in for the Enclave), stores the own
+/// copy and hands the envelope to the transport.
+fn send(from: &mut Party, to: ContactId, subject: &[u8], body: &[u8]) -> Envelope {
+    let mut letter = from.core.seal_letter(to, subject, body).unwrap();
+    let der = from.key.sign_digest(&letter.digest());
+    from.core.attach_signature(&mut letter, &der).unwrap();
+    from.core.store_sent(&letter).unwrap();
+    from.net.send(letter.envelope()).unwrap();
+    letter.envelope().clone()
 }
 
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    hay.windows(needle.len()).any(|w| w == needle)
+/// Polls, receives the first waiting envelope and acknowledges it.
+fn receive_one(p: &mut Party) -> MessageId {
+    let inbox = p.net.poll().unwrap();
+    let m = p.core.receive(&inbox[0]).unwrap();
+    p.net.ack(&[inbox[0].id()]).unwrap();
+    m
 }
 
 #[test]
@@ -108,16 +85,17 @@ fn round_trip_a_encrypts_b_decrypts() {
         b.core.bundle().unwrap().x25519
     );
     let body = "Hei Bob, dette er et brev. Blåbær.".as_bytes();
-    let t = a.core.new_thread(b_at_a, b"Hei").unwrap();
-    send(&mut a, t, body);
+    send(&mut a, b_at_a, b"Hei", body);
 
-    let inbox = b.net.poll();
+    let inbox = b.net.poll().unwrap();
     assert_eq!(inbox.len(), 1);
     let m = b.core.receive(&inbox[0]).unwrap();
+    b.net.ack(&[inbox[0].id()]).unwrap();
+    assert!(b.net.poll().unwrap().is_empty());
 
     let threads = b.core.threads().unwrap();
     assert_eq!(threads.len(), 1);
-    assert_eq!(threads[0].id, t);
+    let t = threads[0].id;
     assert_eq!(threads[0].contact, a_at_b);
     assert_eq!(&threads[0].subject[..], b"Hei");
     let got = b.core.messages(t).unwrap();
@@ -126,37 +104,41 @@ fn round_trip_a_encrypts_b_decrypts() {
     assert!(!got[0].outgoing && !got[0].read);
     assert_eq!(&b.core.read_body(m).unwrap()[..], body);
 
-    // The sender's own copy has the same id and reads back.
+    // The sender's own copy has the same thread and message ids and reads
+    // back.
+    let mine = a.core.threads().unwrap();
+    assert_eq!((mine[0].id, mine[0].contact), (t, b_at_a));
     let mine = a.core.messages(t).unwrap();
     assert_eq!(mine[0].id, m);
     assert!(mine[0].outgoing && mine[0].read);
     assert_eq!(&a.core.read_body(m).unwrap()[..], body);
 
-    // A reply in the same thread goes the other way.
-    send(&mut b, t, b"Takk!");
-    a.core.receive(&a.net.poll()[0]).unwrap();
-    let mine = a.core.messages(t).unwrap();
-    assert_eq!(mine.len(), 2);
-    assert!(mine[0].outgoing && !mine[1].outgoing);
-    assert_eq!(&a.core.read_body(mine[1].id).unwrap()[..], b"Takk!");
+    // A letter the other way starts its own thread.
+    send(&mut b, a_at_b, b"Svar", b"Takk!");
+    let reply = receive_one(&mut a);
+    let threads = a.core.threads().unwrap();
+    assert_eq!(threads.len(), 2);
+    assert_eq!(a.core.thread_of(reply).unwrap(), threads[1].id);
+    assert_eq!(&threads[1].subject[..], b"Svar");
+    assert_eq!(&a.core.read_body(reply).unwrap()[..], b"Takk!");
 
     // mark_read flags that message only, and the flag is not bound to the body.
-    send(&mut b, t, b"Og en til.");
-    a.core.receive(&a.net.poll()[0]).unwrap();
-    let before = a.core.messages(t).unwrap();
-    assert!(!before[1].read && !before[2].read);
-    a.core.mark_read(before[1].id).unwrap();
-    let after = a.core.messages(t).unwrap();
-    assert!(after[1].read && !after[1].outgoing && !after[2].read);
-    assert_eq!(&a.core.read_body(after[1].id).unwrap()[..], b"Takk!");
+    send(&mut b, a_at_b, b"Igjen", b"Og en til.");
+    let third = receive_one(&mut a);
+    a.core.mark_read(reply).unwrap();
+    let flags = |id| {
+        let t = a.core.thread_of(id).unwrap();
+        a.core.messages(t).unwrap()[0].read
+    };
+    assert!(flags(reply) && !flags(third));
+    assert_eq!(&a.core.read_body(reply).unwrap()[..], b"Takk!");
 }
 
 #[test]
 fn tamper_any_flipped_byte_fails() {
     let dir = TempDir::new();
     let (mut a, mut b, b_at_a, _) = pair(&dir.0);
-    let t = a.core.new_thread(b_at_a, b"s").unwrap();
-    let env = send(&mut a, t, b"body");
+    let env = send(&mut a, b_at_a, b"s", b"body");
     for i in 0..env.ciphertext.len() {
         let mut bad = env.clone();
         bad.ciphertext[i] ^= 0x01;
@@ -168,32 +150,39 @@ fn tamper_any_flipped_byte_fails() {
     let mut bad = env.clone();
     bad.nonce[0] ^= 0x01;
     assert!(matches!(b.core.receive(&bad), Err(Error::Crypto)));
+    for i in [0, 31, 32, 63] {
+        let mut bad = env.clone();
+        bad.signature[i] ^= 0x01;
+        assert!(
+            matches!(b.core.receive(&bad), Err(Error::Crypto)),
+            "signature byte {i}"
+        );
+    }
     assert!(
         b.core.threads().unwrap().is_empty(),
-        "nothing stored from a failed decrypt"
+        "nothing stored from a failed check"
     );
     b.core.receive(&env).unwrap();
 }
 
 #[test]
 fn no_plaintext_in_any_file() {
-    const NAME: &[u8] = b"BREV-NAME-MARKER-3b8e61";
+    const ADDRESS: &[u8] = b"brev-address-marker-3b8e61";
     const SUBJECT: &[u8] = b"BREV-SUBJECT-MARKER-94d0a7";
     const BODY: &[u8] = b"BREV-BODY-MARKER-c25f18";
-    let markers = [NAME, SUBJECT, BODY];
+    let markers = [ADDRESS, SUBJECT, BODY];
     let dir = TempDir::new();
     let (mut a, mut b, b_at_a, a_at_b) = pair(&dir.0);
-    b.core.add_contact(&stranger(), NAME).unwrap();
-    let t = a.core.new_thread(b_at_a, SUBJECT).unwrap();
-    let env = send(&mut a, t, BODY);
-    let wire = [env.signed_bytes(), env.signature.clone()].concat();
+    b.core.add_contact(&stranger(), ADDRESS).unwrap();
+    let env = send(&mut a, b_at_a, SUBJECT, BODY);
+    let wire = env.to_wire().unwrap();
     for m in markers {
         assert!(!contains(&wire, m), "marker in envelope bytes");
     }
-    let m = b.core.receive(&b.net.poll()[0]).unwrap();
+    let m = receive_one(&mut b);
     b.core.mark_read(m).unwrap();
-    send(&mut b, t, BODY);
-    a.core.receive(&a.net.poll()[0]).unwrap();
+    send(&mut b, a_at_b, SUBJECT, BODY);
+    receive_one(&mut a);
 
     // Not vacuous: the content really went in and comes back out.
     assert_eq!(&b.core.read_body(m).unwrap()[..], BODY);
@@ -203,8 +192,9 @@ fn no_plaintext_in_any_file() {
         .contacts()
         .unwrap()
         .iter()
-        .any(|c| &c.name[..] == NAME));
+        .any(|c| &c.address[..] == ADDRESS));
 
+    let own = b.core.bundle().unwrap().id();
     let scan = |when: &str| {
         let mut saw_id = false;
         for entry in fs::read_dir(&dir.0).unwrap() {
@@ -213,7 +203,7 @@ fn no_plaintext_in_any_file() {
             for m in markers {
                 assert!(!contains(&bytes, m), "{when}: marker in {}", path.display());
             }
-            saw_id |= contains(&bytes, &a_at_b.0);
+            saw_id |= contains(&bytes, &own.0);
         }
         // Positive control: a plaintext id is visible, so the scan reads store data.
         assert!(saw_id, "{when}: control id not found");
@@ -222,14 +212,8 @@ fn no_plaintext_in_any_file() {
     drop(a);
     drop(b);
     scan("closed");
-
-    let mut names: Vec<_> = fs::read_dir(&dir.0)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    names.sort();
     assert_eq!(
-        names,
+        TempDir::files(&dir),
         ["a.db", "b.db"],
         "no journal, WAL or SHM left behind"
     );
@@ -245,29 +229,44 @@ fn no_plaintext_in_any_file() {
 #[test]
 fn locked_core_refuses_every_content_call() {
     let dir = TempDir::new();
-    let (mut a, mut b, b_at_a, _) = pair(&dir.0);
-    let t = a.core.new_thread(b_at_a, b"s").unwrap();
-    let env = send(&mut a, t, b"x");
+    let (mut a, mut b, b_at_a, a_at_b) = pair(&dir.0);
+    let env = send(&mut a, b_at_a, b"s", b"x");
+    let t = a.core.threads().unwrap()[0].id;
     let msg = a.core.messages(t).unwrap()[0].id;
     // An unread letter from B, to show that a locked mark_read writes nothing.
-    b.core.receive(&b.net.poll()[0]).unwrap();
-    send(&mut b, t, b"y");
-    let unread = a.core.receive(&a.net.poll()[0]).unwrap();
+    receive_one(&mut b);
+    send(&mut b, a_at_b, b"s", b"y");
+    let unread = receive_one(&mut a);
+    let mut letter = a.core.seal_letter(b_at_a, b"s", b"z").unwrap();
+    let der = a.key.sign_digest(&letter.digest());
 
     a.core.lock();
     assert!(a.core.is_locked());
     let locked = |r: Result<(), Error>| assert!(matches!(r, Err(Error::Locked)));
     locked(a.core.bundle().map(drop));
-    locked(a.core.add_contact(&stranger(), b"n").map(drop));
+    locked(a.core.address().map(drop));
+    locked(a.core.is_registered().map(drop));
+    locked(a.core.set_address(b"anna"));
+    locked(a.core.registration(b"anna").map(drop));
+    locked(a.core.relay_token().map(drop));
+    locked(a.core.verify_own(b"x", &der).map(drop));
+    locked(a.core.check_new_address(b"carl"));
+    locked(a.core.add_contact(&stranger(), b"carl").map(drop));
     locked(a.core.contacts().map(drop));
-    locked(a.core.new_thread(b_at_a, b"s").map(drop));
+    locked(a.core.contact_address(b_at_a).map(drop));
+    locked(a.core.contact_bundle(b_at_a).map(drop));
+    locked(a.core.pending_bundle(b_at_a).map(drop));
+    locked(a.core.check_key(b_at_a, &stranger()));
+    locked(a.core.accept_new_key(b_at_a, &[b'A'; 35]));
+    locked(a.core.seal_letter(b_at_a, b"s", b"y").map(drop));
+    locked(a.core.attach_signature(&mut letter, &der));
+    locked(a.core.store_sent(&letter).map(drop));
     locked(a.core.threads().map(drop));
     locked(a.core.messages(t).map(drop));
     locked(a.core.read_body(msg).map(drop));
+    locked(a.core.thread_of(msg).map(drop));
     locked(a.core.mark_read(unread));
-    locked(a.core.send(t, b"y", &a.signer).map(drop));
     locked(a.core.receive(&env).map(drop));
-    locked(a.core.receive_all(&a.net).map(drop));
 
     assert!(matches!(a.core.unlock(&mut random()), Err(Error::WrongKey)));
     assert!(matches!(a.core.unlock(&mut [0; 32]), Err(Error::WrongKey)));
@@ -283,9 +282,10 @@ fn locked_core_refuses_every_content_call() {
     again.unlock(&mut dek).unwrap();
     assert_eq!(dek, [0u8; 32]);
     assert_eq!(&again.read_body(msg).unwrap()[..], b"x");
+    let ut = again.thread_of(unread).unwrap();
     assert!(
         again
-            .messages(t)
+            .messages(ut)
             .unwrap()
             .iter()
             .any(|m| m.id == unread && !m.read),
@@ -293,31 +293,43 @@ fn locked_core_refuses_every_content_call() {
     );
 }
 
+/// The envelope carries a P-256 signature by the sender's identity key over
+/// its signed bytes; a signature by any other key is refused before
+/// anything is stored.
 #[test]
-fn signature_slot_holds_a_verifiable_signature_and_signing_can_fail() {
+fn signature_is_by_the_identity_key_and_signing_can_fail() {
     let dir = TempDir::new();
     let (mut a, _b, b_at_a, _) = pair(&dir.0);
-    let t = a.core.new_thread(b_at_a, b"s").unwrap();
-    let env = send(&mut a, t, b"x");
-    let vk = a.signer.0.verifying_key();
-    assert_eq!(a.core.bundle().unwrap().signing_key, vk.to_bytes());
-    let sig = Signature::from_slice(&env.signature).unwrap();
-    vk.verify_strict(&env.signed_bytes(), &sig).unwrap();
+    let env = send(&mut a, b_at_a, b"s", b"x");
+    assert_eq!(a.core.bundle().unwrap().signing_key, a.key.public);
+    let signature: &[u8; 64] = env.signature.as_slice().try_into().unwrap();
+    sig::verify(&a.key.public, &env.signed_bytes(), signature).unwrap();
     let mut bad = env.clone();
     bad.ciphertext[0] ^= 1;
-    assert!(vk.verify_strict(&bad.signed_bytes(), &sig).is_err());
+    assert!(sig::verify(&a.key.public, &bad.signed_bytes(), signature).is_err());
 
-    struct Refuses;
-    impl Signer for Refuses {
-        fn sign(&self, _: &[u8]) -> Result<Vec<u8>, Error> {
+    // A signature from another key (a replaced keychain item), over
+    // another message, or not DER: `Signing`, and nothing is stored.
+    let mut letter = a.core.seal_letter(b_at_a, b"s", b"y").unwrap();
+    for der in [
+        TestKey::new().sign_digest(&letter.digest()),
+        a.key.sign_digest(&[1; 32]),
+        vec![0x30, 0x00],
+    ] {
+        assert!(matches!(
+            a.core.attach_signature(&mut letter, &der),
             Err(Error::Signing)
-        }
+        ));
     }
     assert!(matches!(
-        a.core.send(t, b"y", &Refuses),
-        Err(Error::Signing)
+        a.core.store_sent(&letter).map(drop),
+        Err(Error::Malformed)
     ));
-    assert_eq!(a.core.messages(t).unwrap().len(), 1, "nothing stored");
+    assert_eq!(a.core.threads().unwrap().len(), 1, "nothing stored");
+    // The signature over the digest equals one over the signed bytes.
+    let der = a.key.sign_der(&letter.envelope().signed_bytes());
+    a.core.attach_signature(&mut letter, &der).unwrap();
+    assert!(letter.is_signed());
 }
 
 #[test]
@@ -328,55 +340,75 @@ fn receive_rejects_strangers_misrouted_self_and_replays() {
     let mut c = make(&dir.0, "c.db", MockTransport::pair().0);
     let b_at_c = c
         .core
-        .add_contact(&b.core.bundle().unwrap(), b"Bob")
+        .add_contact(&b.core.bundle().unwrap(), b"bob")
         .unwrap();
-    let tc = c.core.new_thread(b_at_c, b"s").unwrap();
-    let from_c = c.core.send(tc, b"x", &c.signer).unwrap();
+    let from_c = send(&mut c, b_at_c, b"s", b"x");
     assert!(matches!(b.core.receive(&from_c), Err(Error::NotFound)));
 
     // An envelope for B handed to A.
-    let t = a.core.new_thread(b_at_a, b"s").unwrap();
-    let env = send(&mut a, t, b"x");
+    let env = send(&mut a, b_at_a, b"s", b"x");
     assert!(matches!(a.core.receive(&env), Err(Error::Malformed)));
 
     // Replay: stored once.
-    b.core.receive(&env).unwrap();
+    let m = b.core.receive(&env).unwrap();
     assert!(matches!(b.core.receive(&env), Err(Error::Duplicate)));
+    let t = b.core.thread_of(m).unwrap();
     assert_eq!(b.core.messages(t).unwrap().len(), 1);
 
-    // Own identity is not a contact; a contact is added once; a thread needs a contact.
+    // Own identity and own address are not contacts; a contact is added
+    // once, by identity and by address.
     let me = a.core.bundle().unwrap();
     assert!(matches!(
-        a.core.add_contact(&me, b"me"),
+        a.core.add_contact(&me, b"myself"),
+        Err(Error::Malformed)
+    ));
+    a.core.set_address(b"alice").unwrap();
+    assert!(matches!(
+        a.core.add_contact(&stranger(), b"alice"),
         Err(Error::Malformed)
     ));
     assert!(matches!(
-        a.core
-            .add_contact(&b.core.bundle().unwrap(), b"Bob")
-            .map(drop),
+        a.core.add_contact(&b.core.bundle().unwrap(), b"bob-2"),
         Err(Error::Duplicate)
     ));
     assert!(matches!(
-        a.core.new_thread(IdentityId([9; 32]), b"s").map(drop),
-        Err(Error::NotFound)
+        a.core.add_contact(&stranger(), b"bob"),
+        Err(Error::Duplicate)
     ));
-    // A signing key must be 1..=255 bytes; a refused bundle adds no contact.
-    for signing_key in [vec![], vec![1; 256]] {
-        let bad = PublicBundle {
-            signing_key,
-            x25519: random(),
-        };
+    // Addresses follow the rules.
+    for bad in [
+        &b"ab"[..],
+        b"Bob",
+        b"1bob",
+        b"-bob",
+        b"bo_b",
+        "blåbær".as_bytes(),
+    ] {
         assert!(matches!(
-            a.core.add_contact(&bad, b"n").map(drop),
+            a.core.add_contact(&stranger(), bad),
+            Err(Error::Malformed)
+        ));
+    }
+    // A signing key must be an uncompressed P-256 point.
+    let good = TestKey::new().public;
+    let mut off_curve = good;
+    off_curve[64] ^= 1;
+    for key in [&[][..], &[4; 65], &off_curve, &good[..64], &good[1..]] {
+        assert!(matches!(
+            PublicBundle::new(key, random()),
             Err(Error::Malformed)
         ));
     }
     assert_eq!(a.core.contacts().unwrap().len(), 1);
 
-    // A subject over 65535 bytes is refused and makes no thread; an
-    // unknown message cannot be marked read.
+    // A letter needs a contact; a subject over 65535 bytes is refused and
+    // makes nothing; an unknown message cannot be marked read.
     assert!(matches!(
-        a.core.new_thread(b_at_a, &[0; 65536]).map(drop),
+        a.core.seal_letter(ContactId([9; 16]), b"s", b"x").map(drop),
+        Err(Error::NotFound)
+    ));
+    assert!(matches!(
+        a.core.seal_letter(b_at_a, &[0; 65536], b"x").map(drop),
         Err(Error::Malformed)
     ));
     assert_eq!(a.core.threads().unwrap().len(), 1);
@@ -386,49 +418,23 @@ fn receive_rejects_strangers_misrouted_self_and_replays() {
     ));
 }
 
-/// One bad envelope never costs the ones behind it, and a locked core
-/// drains nothing.
+/// `poll` deletes nothing; `ack` deletes exactly the listed envelopes.
 #[test]
-fn receive_all_isolates_bad_envelopes_and_waits_while_locked() {
+fn mock_transport_keeps_letters_until_acked() {
     let dir = TempDir::new();
-    let (mut a, mut b, b_at_a, _) = pair(&dir.0);
-    let mut c = make(&dir.0, "c.db", MockTransport::pair().0);
-    let b_at_c = c
-        .core
-        .add_contact(&b.core.bundle().unwrap(), b"Bob")
-        .unwrap();
-    let tc = c.core.new_thread(b_at_c, b"s").unwrap();
-    let t = a.core.new_thread(b_at_a, b"s").unwrap();
-    let first = a.core.send(t, b"first", &a.signer).unwrap();
-    b.core.receive(&first).unwrap();
-
-    let good = a.core.send(t, b"good", &a.signer).unwrap();
-    let mut tampered = good.clone();
-    tampered.ciphertext[0] ^= 1;
-    // Everything a.net sends lands in B's inbox.
-    a.net.send(first); // replay
-    a.net.send(c.core.send(tc, b"x", &c.signer).unwrap()); // not B's contact
-    a.net.send(tampered);
-    a.net.send(good);
-    let d = b.core.receive_all(&b.net).unwrap();
-    assert_eq!(d.received.len(), 1);
-    assert_eq!(&b.core.read_body(d.received[0]).unwrap()[..], b"good");
-    assert!(matches!(
-        d.rejected[..],
-        [Error::Duplicate, Error::NotFound, Error::Crypto]
-    ));
-
-    // Locked: nothing is polled, so the letter waits for unlock.
-    send(&mut a, t, b"later");
-    b.core.lock();
-    assert!(matches!(
-        b.core.receive_all(&b.net).map(drop),
-        Err(Error::Locked)
-    ));
-    b.core.unlock(&mut b.dek.clone()).unwrap();
-    let d = b.core.receive_all(&b.net).unwrap();
-    assert_eq!((d.received.len(), d.rejected.len()), (1, 0));
-    assert_eq!(b.core.messages(t).unwrap().len(), 3);
+    let (mut a, b, b_at_a, _) = pair(&dir.0);
+    let first = send(&mut a, b_at_a, b"s", b"1");
+    let second = send(&mut a, b_at_a, b"s", b"2");
+    assert_eq!(b.net.poll().unwrap(), [first.clone(), second.clone()]);
+    assert_eq!(b.net.poll().unwrap().len(), 2, "poll deletes nothing");
+    b.net.ack(&[first.id(), [0; 32]]).unwrap();
+    assert_eq!(b.net.poll().unwrap(), std::slice::from_ref(&second));
+    b.net.ack(&[second.id()]).unwrap();
+    assert!(b.net.poll().unwrap().is_empty());
+    assert!(
+        a.net.poll().unwrap().is_empty(),
+        "each end has its own inbox"
+    );
 }
 
 /// A filesystem agent that edits plaintext metadata cannot redirect,
@@ -440,25 +446,27 @@ fn stored_metadata_is_bound_to_ciphertext() {
     let m = make(&dir.0, "m.db", MockTransport::pair().0);
     let m_at_a = a
         .core
-        .add_contact(&m.core.bundle().unwrap(), b"Mallory")
+        .add_contact(&m.core.bundle().unwrap(), b"mallory")
         .unwrap();
-    let t = a.core.new_thread(b_at_a, b"s").unwrap();
-    let t2 = a.core.new_thread(b_at_a, b"s2").unwrap();
-    let other = a.core.new_thread(m_at_a, b"s3").unwrap();
-    send(&mut a, t, b"first");
-    send(&mut a, t, b"second");
-    send(&mut a, t2, b"third");
-    let ids: Vec<_> = a.core.messages(t).unwrap().iter().map(|m| m.id).collect();
+    send(&mut a, b_at_a, b"s", b"first");
+    send(&mut a, b_at_a, b"s2", b"second");
+    send(&mut a, m_at_a, b"s3", b"third");
+    let threads = a.core.threads().unwrap();
+    let (t, t2, other) = (threads[0].id, threads[1].id, threads[2].id);
+    drop(threads);
+    let ids: Vec<_> = [t, t2]
+        .iter()
+        .map(|t| a.core.messages(*t).unwrap()[0].id)
+        .collect();
     // Each thread lists only its own messages.
-    let in_t2 = a.core.messages(t2).unwrap();
-    assert_eq!((ids.len(), in_t2.len()), (2, 1));
-    assert!(!ids.contains(&in_t2[0].id) && a.core.messages(other).unwrap().is_empty());
+    assert!(a.core.messages(other).unwrap()[0].id != ids[0]);
     let raw = rusqlite::Connection::open(dir.0.join("a.db")).unwrap();
     let sql = |q: &str, p: &[&[u8]]| {
         raw.execute(q, rusqlite::params_from_iter(p.iter()))
             .unwrap();
     };
-    // Swaps one column between two rows; a second call undoes it.
+    // Swaps one column between two rows; a second call undoes it. A
+    // UNIQUE column (the tag) passes through a placeholder.
     let swap = |table: &str, column: &str, x: &[u8], y: &[u8]| {
         let get = |id: &[u8]| -> rusqlite::types::Value {
             let q = format!("SELECT {column} FROM {table} WHERE id = ?1");
@@ -466,19 +474,19 @@ fn stored_metadata_is_bound_to_ciphertext() {
         };
         let (vx, vy) = (get(x), get(y));
         let set = format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2");
-        raw.execute(&set, rusqlite::params![vy, x]).unwrap();
+        if column == "tag" {
+            raw.execute(&set, rusqlite::params![&[0u8; 32][..], x])
+                .unwrap();
+        }
         raw.execute(&set, rusqlite::params![vx, y]).unwrap();
+        raw.execute(&set, rusqlite::params![vy, x]).unwrap();
     };
 
-    // Re-point B's thread at Mallory: nothing is encrypted to Mallory.
+    // Re-point B's thread at Mallory: its subject and body no longer open.
     sql(
         "UPDATE threads SET contact_id = ?1 WHERE id = ?2",
         &[&m_at_a.0, &t.0],
     );
-    assert!(matches!(
-        a.core.send(t, b"secret", &a.signer),
-        Err(Error::Crypto)
-    ));
     assert!(matches!(a.core.threads().map(drop), Err(Error::Crypto)));
     assert!(matches!(
         a.core.read_body(ids[0]).map(drop),
@@ -542,22 +550,30 @@ fn stored_metadata_is_bound_to_ciphertext() {
     }
     assert_eq!(a.core.threads().unwrap().len(), 3);
 
-    // Contact rows are bound to their id. Bob's and Mallory's bundles
-    // swapped: nothing is encrypted to Mallory in Bob's thread, and no new
-    // thread is started. Their names swapped: Mallory is not shown as Bob.
+    // Contact rows are bound to their local id. Bob's and Mallory's
+    // bundles swapped: nothing is sealed to Mallory as Bob. Their tags
+    // swapped: the bundle no longer matches the tag. Their addresses
+    // swapped: Mallory is not shown as Bob.
     swap("contacts", "bundle", &b_at_a.0, &m_at_a.0);
     assert!(matches!(
-        a.core.send(t, b"secret", &a.signer),
-        Err(Error::Crypto)
-    ));
-    assert!(matches!(
-        a.core.new_thread(b_at_a, b"s").map(drop),
+        a.core.seal_letter(b_at_a, b"s", b"secret").map(drop),
         Err(Error::Crypto)
     ));
     swap("contacts", "bundle", &b_at_a.0, &m_at_a.0);
-    swap("contacts", "name", &b_at_a.0, &m_at_a.0);
-    assert!(matches!(a.core.contacts().map(drop), Err(Error::Crypto)));
-    swap("contacts", "name", &b_at_a.0, &m_at_a.0);
+    swap("contacts", "tag", &b_at_a.0, &m_at_a.0);
+    assert!(matches!(
+        a.core.seal_letter(b_at_a, b"s", b"secret").map(drop),
+        Err(Error::Corrupt)
+    ));
+    swap("contacts", "tag", &b_at_a.0, &m_at_a.0);
+    for column in ["address", "pending"] {
+        swap("contacts", column, &b_at_a.0, &m_at_a.0);
+        assert!(
+            matches!(a.core.contacts().map(drop), Err(Error::Crypto)),
+            "{column}"
+        );
+        swap("contacts", column, &b_at_a.0, &m_at_a.0);
+    }
     assert_eq!(a.core.contacts().unwrap().len(), 2);
 
     // Swap ciphertext between rows and between columns.
@@ -570,17 +586,22 @@ fn stored_metadata_is_bound_to_ciphertext() {
         Err(Error::Crypto)
     ));
     sql(
-        "UPDATE contacts SET name = (SELECT subject FROM threads WHERE id = ?2) WHERE id = ?1",
+        "UPDATE contacts SET address = (SELECT subject FROM threads WHERE id = ?2) WHERE id = ?1",
         &[&b_at_a.0, &t.0],
     );
     assert!(matches!(a.core.contacts().map(drop), Err(Error::Crypto)));
+    sql(
+        "UPDATE identity SET address = (SELECT address FROM contacts WHERE id = ?1)",
+        &[&m_at_a.0],
+    );
+    assert!(matches!(a.core.address().map(drop), Err(Error::Crypto)));
 
     // The identity row is bound to the own id: with the id edited, the
     // right DEK no longer unlocks, so no envelope carries a forged sender.
     let own: Vec<u8> = raw
         .query_row("SELECT id FROM identity", [], |r| r.get(0))
         .unwrap();
-    sql("UPDATE identity SET id = ?1", &[&m_at_a.0]);
+    sql("UPDATE identity SET id = ?1", &[&[7u8; 32]]);
     a.core.lock();
     assert!(matches!(
         a.core.unlock(&mut a.dek.clone()),
@@ -593,15 +614,16 @@ fn stored_metadata_is_bound_to_ciphertext() {
 #[test]
 fn create_and_open_refuse_bad_files() {
     let dir = TempDir::new();
+    let key = TestKey::new().public;
 
     // The caller's DEK is wiped even when create fails before touching disk.
     let mut dek: [u8; 32] = random();
-    let r = Core::create(&dir.0.join("no/such/dir.db"), &mut dek, &[1; 32]);
+    let r = Core::create(&dir.0.join("no/such/dir.db"), &mut dek, &key);
     assert!(matches!(r, Err(Error::Io(_))));
     assert_eq!(dek, [0u8; 32]);
     // Retrying with the same (now zeroed) buffer must not seal a store under
     // the all-zero key.
-    let r = Core::create(&dir.0.join("z.db"), &mut dek, &[1; 32]);
+    let r = Core::create(&dir.0.join("z.db"), &mut dek, &key);
     assert!(matches!(r, Err(Error::Malformed)));
     assert!(!dir.0.join("z.db").exists());
 
@@ -610,7 +632,7 @@ fn create_and_open_refuse_bad_files() {
     // Each early refusal wipes the DEK too.
     for p in ["file:u.db", uri.as_str(), "u.db", ":memory:", ""] {
         dek = random();
-        let r = Core::create(Path::new(p), &mut dek, &[1; 32]);
+        let r = Core::create(Path::new(p), &mut dek, &key);
         assert!(matches!(r, Err(Error::Malformed)), "create {p:?}");
         assert_eq!(dek, [0u8; 32], "create {p:?}");
         assert!(
@@ -619,16 +641,21 @@ fn create_and_open_refuse_bad_files() {
         );
     }
     assert!(!Path::new("file:u.db").exists() && !Path::new("u.db").exists());
-    dek = random();
-    let r = Core::create(&dir.0.join("x.db"), &mut dek, &[]);
-    assert!(matches!(r, Err(Error::Malformed)));
-    assert_eq!(dek, [0u8; 32]);
-    assert!(!dir.0.join("x.db").exists());
+    // The signing key must be an uncompressed P-256 point.
+    let mut off_curve = key;
+    off_curve[64] ^= 1;
+    for bad in [&[][..], &[1; 32], &[4; 65], &off_curve, &key[..64]] {
+        dek = random();
+        let r = Core::create(&dir.0.join("x.db"), &mut dek, bad);
+        assert!(matches!(r, Err(Error::Malformed)));
+        assert_eq!(dek, [0u8; 32]);
+        assert!(!dir.0.join("x.db").exists());
+    }
 
     // A failure after the file is made (a directory where the rollback
     // journal goes) removes the file.
     fs::create_dir(dir.0.join("j.db-journal")).unwrap();
-    let r = Core::create(&dir.0.join("j.db"), &mut random(), &[1; 32]);
+    let r = Core::create(&dir.0.join("j.db"), &mut random(), &key);
     assert!(matches!(r, Err(Error::Storage(_))));
     assert!(!dir.0.join("j.db").exists());
 
@@ -636,7 +663,7 @@ fn create_and_open_refuse_bad_files() {
     let path = dir.0.join("a.db");
     drop(make(&dir.0, "a.db", MockTransport::pair().0));
     let before = fs::read(&path).unwrap();
-    match Core::create(&path, &mut random(), &[1; 32]) {
+    match Core::create(&path, &mut random(), &key) {
         Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         _ => panic!("create reused an existing file"),
     }
@@ -692,8 +719,8 @@ fn create_and_open_refuse_bad_files() {
     }
 
     // open refuses a store whose header names another application or
-    // schema version.
-    for (pragma, bad) in [("application_id", 1), ("user_version", 1)] {
+    // schema version (2 is Phase 2's).
+    for (pragma, bad) in [("application_id", 1), ("user_version", 2)] {
         let raw = rusqlite::Connection::open(&path).unwrap();
         let good: i32 = raw.pragma_query_value(None, pragma, |r| r.get(0)).unwrap();
         raw.pragma_update(None, pragma, bad).unwrap();
@@ -747,12 +774,8 @@ fn open_turns_a_wal_store_back_to_delete_mode() {
 
     let mut core = Core::open(&dir.0.join("a.db")).unwrap();
     core.unlock(&mut dek).unwrap();
-    core.add_contact(&stranger(), b"n").unwrap();
-    let names: Vec<_> = fs::read_dir(&dir.0)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    assert_eq!(names, ["a.db"]);
+    core.add_contact(&stranger(), b"someone").unwrap();
+    assert_eq!(TempDir::files(&dir), ["a.db"]);
 }
 
 #[test]
@@ -760,5 +783,6 @@ fn core_and_transport_can_move_between_threads() {
     fn send_bound<T: Send>() {}
     fn shared_bound<T: Send + Sync>() {}
     send_bound::<Core>();
+    send_bound::<brev_core::Letter>();
     shared_bound::<MockTransport>();
 }

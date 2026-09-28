@@ -33,7 +33,6 @@ zeroize = "1.9.0"
 # brev-core's global allocator: zeroes every freed heap block, including the
 # RustBuffers Swift frees through UniFFI (docs/DECISIONS.md D-0032 item 4).
 zeroizing-alloc = "0.1.1"
-ed25519-dalek = "3.0.0"
 # Phase 3 (docs/PHASE3_DESIGN.md §0, §3.3, §5.1). P-256 verification of the
 # Secure Enclave's signatures, in brev-proto for brev-core and brev-relay;
 # `ecdsa` always brings ecdsa's `der`, so `Signature::from_der` needs no DER

@@ -6,7 +6,12 @@
 //!   padded with `brev_proto::pad_into` first, so a stored length shows only
 //!   the bucket;
 //! * messages: key = HKDF-SHA256(salt = nonce, ikm = X25519(static, static),
-//!   info = label || sender id || recipient id), AD = envelope header.
+//!   info = label || sender id || recipient id), AD = envelope header. The
+//!   payload is padded with the same function first (docs/PHASE3_DESIGN.md
+//!   §2.2), so an envelope's length shows only the bucket.
+//!
+//! Plus one keyed hash: the contact tag, HKDF-SHA256 under the DEK of a
+//! contact's identity id, which finds a sender's row without storing its id.
 //!
 //! Plaintext only ever sits in a [`Zeroizing`] buffer, a [`Plaintext`], or the
 //! caller's slice.
@@ -17,7 +22,7 @@ use chacha20poly1305::{KeyInit, Tag, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use rand::rngs::SysRng;
 use rand::TryRng;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -25,9 +30,9 @@ use crate::Error;
 
 const NONCE_LEN: usize = 24;
 const TAG_LEN: usize = 16;
-const IDENTITY_LABEL: &[u8] = b"brev/v0/identity";
 const MESSAGE_KEY_LABEL: &[u8] = b"brev/v0/message-key";
 const COLUMN_LABEL: &[u8] = b"brev/v0/column/";
+const CONTACT_TAG_LABEL: &[u8] = b"brev/v1/contact-tag";
 
 /// Fills `out` from the OS CSPRNG.
 pub(crate) fn fill(out: &mut [u8]) -> Result<(), Error> {
@@ -41,16 +46,16 @@ pub(crate) fn random<const N: usize>() -> Result<[u8; N], Error> {
     Ok(out)
 }
 
-/// Identity id: SHA-256("brev/v0/identity" || len || signing key || X25519
-/// key). `signing_key` is 1..=255 bytes (checked by the caller), so the
-/// encoding is unambiguous.
-pub(crate) fn identity_id(signing_key: &[u8], x25519: &[u8; 32]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(IDENTITY_LABEL);
-    h.update([u8::try_from(signing_key.len()).unwrap_or(0)]);
-    h.update(signing_key);
-    h.update(x25519);
-    h.finalize().into()
+/// The keyed tag of a contact's identity id (docs/PHASE3_DESIGN.md §6.1):
+/// HKDF-SHA256(ikm = DEK, no salt, info = `"brev/v1/contact-tag"` || id),
+/// 32 bytes. Stored in place of the id, so a reader of the file can neither
+/// see a contact's id nor join the file with the relay's directory.
+pub(crate) fn contact_tag(dek: &[u8; 32], id: &[u8; 32]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    // 32 bytes is far below HKDF-SHA256's limit, so expand cannot fail.
+    let _ = Hkdf::<Sha256>::new(None, dek).expand_multi_info(&[CONTACT_TAG_LABEL, id], &mut out);
+    scrub_stack();
+    out
 }
 
 /// AEAD associated data for a column: label, NUL, then the row's immutable
@@ -129,6 +134,7 @@ thread_local! {
     static LIVE_SECRETS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SCRUBS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DEEP_SCRUBS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MESSAGE_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Test only: `Plaintext` values alive on this thread.
@@ -159,6 +165,13 @@ pub(crate) fn scrubs() -> usize {
 #[cfg(test)]
 pub(crate) fn deep_scrubs() -> usize {
     DEEP_SCRUBS.with(|n| n.get())
+}
+
+/// Test only: how many times [`open_message`] has started a decryption on
+/// this thread.
+#[cfg(test)]
+pub(crate) fn message_opens() -> usize {
+    MESSAGE_OPENS.with(|n| n.get())
 }
 
 /// Test only: compiles only if `T` wipes itself on drop. Memory cannot be
@@ -223,7 +236,9 @@ pub(crate) fn open_column(dek: &[u8; 32], ad: &[u8], stored: &[u8]) -> Result<Pl
     r
 }
 
-/// Seals `payload` from `sender` to `recipient`. The signature slot is empty.
+/// Pads `payload` to its bucket and seals it from `sender` to `recipient`.
+/// The signature slot is empty. A payload above the padding maximum gives
+/// `Malformed`.
 pub(crate) fn seal_message(
     my_secret: &StaticSecret,
     their_public: &[u8; 32],
@@ -232,9 +247,10 @@ pub(crate) fn seal_message(
     payload: &[u8],
 ) -> Result<Envelope, Error> {
     let nonce: [u8; NONCE_LEN] = random()?;
-    let r = message_key(my_secret, their_public, &sender, &recipient, &nonce).and_then(|key| {
+    let r = pad(payload).and_then(|padded| {
+        let key = message_key(my_secret, their_public, &sender, &recipient, &nonce)?;
         let ad = Envelope::header_bytes(&sender, &recipient, &nonce);
-        encrypt(&key, &nonce, &ad, &[], payload)
+        encrypt(&key, &nonce, &ad, &[], &padded)
     });
     scrub_stack();
     Ok(Envelope {
@@ -246,12 +262,17 @@ pub(crate) fn seal_message(
     })
 }
 
-/// Opens an envelope addressed to the holder of `my_secret`.
+/// Opens an envelope addressed to the holder of `my_secret` and strips the
+/// padding. A failed tag gives `Crypto`; bad padding under a valid tag gives
+/// `Malformed` (the sender's fault, not a damaged row). The padded plaintext
+/// is wiped when it drops.
 pub(crate) fn open_message(
     my_secret: &StaticSecret,
     their_public: &[u8; 32],
     env: &Envelope,
 ) -> Result<Plaintext, Error> {
+    #[cfg(test)]
+    MESSAGE_OPENS.with(|n| n.set(n.get() + 1));
     let r = message_key(
         my_secret,
         their_public,
@@ -262,6 +283,10 @@ pub(crate) fn open_message(
     .and_then(|key| {
         let ad = Envelope::header_bytes(&env.sender, &env.recipient, &env.nonce);
         decrypt(&key, &env.nonce, &ad, &env.ciphertext)
+    })
+    .and_then(|padded| {
+        let content = brev_proto::unpad(&padded).map_err(|_| Error::Malformed)?;
+        Ok(Plaintext::new(Zeroizing::new(content.to_vec())))
     });
     scrub_stack();
     r
@@ -461,6 +486,7 @@ mod tests {
         );
         let env = env.unwrap();
         assert_eq!(scrubs_in(|| drop(open_message(&b, &pa, &env))), 1);
+        assert_eq!(scrubs_in(|| _ = contact_tag(&dek, &[1; 32])), 1);
     }
 
     #[test]
@@ -538,12 +564,49 @@ mod tests {
         assert_ne!(e1.ciphertext, e2.ciphertext);
     }
 
-    /// The id commits to both keys, so a relay cannot swap the X25519 key
-    /// behind a known id.
+    /// The tag is keyed: another DEK or another id gives another tag, and
+    /// it is not the id itself. It is HKDF-SHA256 as design §6.1 says.
     #[test]
-    fn identity_id_commits_to_both_keys() {
-        let id = identity_id(&[7; 32], &[1; 32]);
-        assert_ne!(id, identity_id(&[7; 32], &[2; 32]));
-        assert_ne!(id, identity_id(&[8; 32], &[1; 32]));
+    fn contact_tag_is_keyed_hkdf() {
+        let dek: [u8; 32] = random().unwrap();
+        let id = [7u8; 32];
+        let tag = contact_tag(&dek, &id);
+        assert_eq!(tag, contact_tag(&dek, &id));
+        assert_ne!(tag, contact_tag(&random().unwrap(), &id));
+        assert_ne!(tag, contact_tag(&dek, &[8; 32]));
+        assert_ne!(tag, id);
+        let mut by_hand = [0u8; 32];
+        Hkdf::<Sha256>::new(None, &dek)
+            .expand(&[&b"brev/v1/contact-tag"[..], &id].concat(), &mut by_hand)
+            .unwrap();
+        assert_eq!(tag, by_hand);
+    }
+
+    /// The payload inside the AEAD is padded: a sealed letter is one bucket
+    /// plus the tag, and bad padding under a valid tag is `Malformed`.
+    #[test]
+    fn message_payload_is_padded_and_strictly_unpadded() {
+        let (a, b) = (secret(), secret());
+        let (pa, pb) = (public_key(&a), public_key(&b));
+        let env = seal_message(&a, &pb, [1; 32], [2; 32], b"x").unwrap();
+        assert_eq!(env.ciphertext.len(), 256 + TAG_LEN);
+        assert_eq!(&open_message(&b, &pa, &env).unwrap()[..], b"x");
+        let big = vec![0u8; brev_proto::MAX_PADDED - 3];
+        assert!(matches!(
+            seal_message(&a, &pb, [1; 32], [2; 32], &big),
+            Err(Error::Malformed)
+        ));
+        // Unpadded content sealed under the right key (a version 0 letter).
+        let nonce: [u8; NONCE_LEN] = random().unwrap();
+        let key = message_key(&a, &pb, &[1; 32], &[2; 32], &nonce).unwrap();
+        let ad = Envelope::header_bytes(&[1; 32], &[2; 32], &nonce);
+        let raw = Envelope {
+            sender: [1; 32],
+            recipient: [2; 32],
+            nonce,
+            ciphertext: encrypt(&key, &nonce, &ad, &[], &[9u8; 256]).unwrap(),
+            signature: Vec::new(),
+        };
+        assert!(matches!(open_message(&b, &pa, &raw), Err(Error::Malformed)));
     }
 }
