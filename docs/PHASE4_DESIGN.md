@@ -115,9 +115,12 @@ Derived values (brev-proto, `sha2` + `hkdf`):
 | `POST /v1/requests` | token | **202** for new, pending, declined and over the pending cap alike; 200 when the target already approved the caller; 400 own address; 404 unknown address; 429 over the request limit |
 | `POST /v1/events` | token | 200 events (never deletes) |
 | `POST /v1/events/answer` | token | 204; 404 no such event; 400 a decline of a non-request |
-| `POST /v1/invites` | token | 201; 200 same hash again; 429 at the open cap or the daily cap |
+| `POST /v1/invites` | token | 201; 200 same hash again; 409 a hash another inviter holds; 429 at the open cap or the daily cap |
 | `POST /v1/invites/open` | none | 200; 404 unknown, used or expired |
 | `POST /v1/invites/redeem` | token | 200 (also again by the same caller); 404 unknown, used by another, expired; 400 root or own |
+| `POST /v1/block` (*Blokker*, owner answer 6; body `prefix ‖ peer id 32`) | token | 204 (also again); 400 own id; 404 unknown id |
+
+Transitional (WP2 until WP3/WP4 move brev-mail's client and the app): `serve --phase3` and `Relay::open` serve Phase 3's `/v1/register`, `/v1/lookup` and bare-wire `/v1/envelopes` with none of the checks below and none of the new endpoints; test.sh starts the harness relay with it. The default relay refuses Phase 3's bodies (400).
 
 ### 4.2 Schema v2 (`application_id` "BRLY", `user_version` 2; v1 refused as `NotRelay`)
 
@@ -147,10 +150,12 @@ Pragmas, modes, `secure_delete` and the single `Mutex<Connection>` are Phase 3's
 ### 4.3 The rules, in order (each in one transaction with its writes)
 
 - **Register:** parse (400); signature (401); attestation (feature `app-attest`, 428); **Same → 200** (a retry after the invite was used still works; only the key holder can hit it); **invite** by `SHA-256(a)`: exists, not redeemed, within its life (403); **then** address or id conflict (409); `IdentityVerifier` (428); `Policy::register` (429). Insert with `invited_by = inviter`, set `redeemed_by`. Unless root: `links` approved both ways and event (inviter, new, *invited*, tag). The invite check comes before the conflict check, so nobody without a valid invite learns which addresses are taken (Phase 3's no-directory-probe promise). A 409 does not consume the invite.
-- **Submit:** parse; token (401); caller = `envelope.sender` (403); Phase 3's signature and recipient checks; `links(recipient, sender)` approved (409); letter count < limit (429); `Policy::submit`; insert; **only if inserted** (202) the count goes up. A 200 (already waiting) does not count.
+- **Submit:** parse; token (401); caller = `envelope.sender` (403); Phase 3's signature and recipient checks; `links(recipient, sender)` approved (409); the same envelope already waiting → 200 (checked before the limit, so a retry of a stored letter is never told 429); letter count < limit (429); `Policy::submit`; insert; **only if inserted** (202) the count goes up. A 200 (already waiting) does not count.
 - **Request S→R:** R exists (404); R ≠ S (400). If `links(R, S)` approved: set `links(S, R)` approved; if an event (S, R, *request*) is pending (R asked S), delete it and add event (R, S, *approved*); 200, no count. Otherwise: request count < limit (429); count it; set `links(S, R)` approved (overriding S's own earlier decline of R); then, only if `links(R, S)` is not declined, no event (R, S) exists, and R has fewer than **16** pending requests, add event (R, S, *request*); 202 in every case. So the requester cannot tell new, pending, declined or capped apart (Q5), and at the limit all get 429 alike.
 - **Event answer by R about P:** event must exist (404). *Request* + yes → `links(R, P)` approved, delete, add event (P, R, *approved*). *Request* + no → `links(R, P)` declined, delete. *Invited*/*approved* + yes → delete (seen). No on those → 400.
-- **Invite create:** open invites (not redeemed, in life) < cap and invites made today < daily cap, else 429; insert (201, and count it) or same hash (200, no count).
+- **Invite create:** same hash of the same inviter → 200, no count; held by another → 409; open invites (not redeemed, in life) < cap and invites made today < daily cap, else 429; insert (201, and count it). An invite made on day `d` lives through day `d + 7`.
+- **Events** (a newer event for a pair replaces the older) with one exception: an *approved* event never replaces a waiting *invited* one, which implies it; otherwise an invitee that also answers the inviter's old request would erase the tag and the inviter would never pin it.
+- ***Blokker* by R of P:** P = R (400); P unknown (404); `links(R, P)` declined and any event (R, P) deleted; 204. P's letters then get 409 and P's requests store nothing (the rules above). R lifts it by requesting P. Residual: a second invite code of R's that P holds still overrides it on redeem (the redeem rule), so the app's sealed local flag is what keeps P out after that.
 - **Invite open:** by `SHA-256(a)`. Unknown, redeemed, too old → 404. Root → `00`. Else the inviter's address and bundle.
 - **Invite redeem by a registered B:** unknown or too old → 404. Redeemed by B → 200; by another → 404. Root or B's own → 400. Else `redeemed_by = B`, `links` approved both ways (an explicit invite overrides an earlier decline), event (inviter, B, *invited*, tag); 200. `invited_by` does not change.
 - **`release`** (operator) also deletes the identity's links, events (as recipient or peer), invites it made, and counts. Its invitees keep `invited_by` (a dangling id; history kept).

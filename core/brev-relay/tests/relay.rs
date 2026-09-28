@@ -1,150 +1,34 @@
-//! Relay tests (docs/PHASE3_DESIGN.md §4.6). The relay runs in-process on
-//! 127.0.0.1:0 and is spoken to over real HTTP with reqwest, as brev-core
-//! will; identities sign with p256 test keys (tests only). The binary is run
-//! for `serve`'s port file, trace and listen rule, and for `release`.
+//! Relay tests of Phase 3's properties (docs/PHASE3_DESIGN.md §4.6) on the
+//! Phase 4 relay (docs/PHASE4_DESIGN.md §8): registration rules with an
+//! invite, token checks on every endpoint, envelope checks with the sender's
+//! token, inbox and ack, deletion from the file, no plaintext, the policy
+//! hook, release, and the binary's listen rule, port file and trace. Plus
+//! the transitional Phase 3 mode that brev-mail's client and the app still
+//! use until Phase 4 WP3 and WP4. The relay runs in-process on 127.0.0.1:0
+//! and is spoken to over real HTTP with reqwest, as brev-core does;
+//! identities sign with p256 test keys (tests only).
+
+mod common;
 
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::net::{Ipv4Addr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::path::Path;
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
-use brev_proto::body::{self, token_hash, INBOX_ANSWER_MAX, INBOX_MAX, INBOX_MAX_BYTES};
-use brev_proto::{identity_id, pad_into, padded_len, Envelope, MAX_PADDED, MAX_WIRE};
-use brev_relay::{parse_listen, Decision, Endpoint, Error, Open, Policy, Relay, Server};
+use brev_proto::body::{self, token_hash, INBOX_MAX, INBOX_MAX_BYTES, SUBMIT_MAX};
+use brev_proto::{invite, pad_into, padded_len, Envelope, MAX_PADDED, MAX_WIRE};
+use brev_relay::{
+    parse_listen, Config, Decision, Endpoint, Error, Gates, Open, Policy, Relay, Server,
+};
 use chacha20poly1305::aead::AeadInOut;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-use p256::ecdsa::signature::Signer;
-use p256::ecdsa::{Signature, SigningKey};
-use reqwest::blocking::Client;
+use common::*;
+use p256::ecdsa::Signature;
 use reqwest::StatusCode;
-
-const BIN: &str = env!("CARGO_BIN_EXE_brev-relay");
-
-/// A fresh directory under the system temp dir, removed on drop.
-struct TempDir(PathBuf);
-impl TempDir {
-    fn new() -> TempDir {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!("brev-relay-test-{}-{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&p);
-        fs::create_dir(&p).unwrap();
-        TempDir(p)
-    }
-}
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Deterministic bytes, different for every seed (xorshift32).
-fn noise(seed: u32, len: usize) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(0x9E37_79B9) | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
-            x as u8
-        })
-        .collect()
-}
-
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    hay.windows(needle.len()).any(|w| w == needle)
-}
-
-/// A test identity: a P-256 key from `seed`, an X25519 public key and a
-/// relay token.
-struct Identity {
-    key: SigningKey,
-    public: [u8; 65],
-    x25519: [u8; 32],
-    token: [u8; 32],
-    id: [u8; 32],
-}
-
-impl Identity {
-    fn new(seed: u8) -> Identity {
-        let key = SigningKey::from_slice(&[seed; 32]).unwrap();
-        let public: [u8; 65] = key
-            .verifying_key()
-            .to_sec1_point(false)
-            .as_bytes()
-            .try_into()
-            .unwrap();
-        let x25519: [u8; 32] = noise(1000 + u32::from(seed), 32).try_into().unwrap();
-        Identity {
-            id: identity_id(&public, &x25519),
-            key,
-            public,
-            x25519,
-            token: noise(2000 + u32::from(seed), 32).try_into().unwrap(),
-        }
-    }
-
-    /// Raw r ‖ s over `msg`.
-    fn sign(&self, msg: &[u8]) -> [u8; 64] {
-        let sig: Signature = self.key.sign(msg);
-        sig.to_bytes().into()
-    }
-
-    /// A registration body with any address bytes and signing-key field,
-    /// signed by this identity's key (design §2.4).
-    fn registration_with(&self, address: &[u8], key_field: &[u8]) -> Vec<u8> {
-        let mut unsigned = vec![u8::try_from(address.len()).unwrap()];
-        unsigned.extend_from_slice(address);
-        unsigned.extend_from_slice(key_field);
-        unsigned.extend_from_slice(&self.x25519);
-        unsigned.extend_from_slice(&token_hash(&self.token));
-        let sig = self.sign(&body::register_preimage(&unsigned));
-        [&unsigned[..], &sig].concat()
-    }
-
-    fn registration(&self, address: &[u8]) -> Vec<u8> {
-        self.registration_with(address, &self.public)
-    }
-
-    /// A lookup, inbox or ack body: id ‖ token ‖ payload.
-    fn request(&self, payload: &[u8]) -> Vec<u8> {
-        [&self.id[..], &self.token, payload].concat()
-    }
-
-    /// The lookup answer the relay gives for this identity.
-    fn bundle(&self) -> Vec<u8> {
-        body::lookup_answer(&self.public, &self.x25519).to_vec()
-    }
-}
-
-/// An envelope from `from` to `to` with a ciphertext of `padded` + 16 noise
-/// bytes (different for every `n`), signed by `from`.
-fn envelope(from: &Identity, to: &[u8; 32], padded: usize, n: u32) -> Envelope {
-    let mut nonce = [0u8; 24];
-    nonce[..4].copy_from_slice(&n.to_be_bytes());
-    let mut env = Envelope {
-        sender: from.id,
-        recipient: *to,
-        nonce,
-        ciphertext: noise(n, padded + 16),
-        signature: Vec::new(),
-    };
-    env.signature = from.sign(&env.signed_bytes()).to_vec();
-    env
-}
-
-fn wire(env: &Envelope) -> Vec<u8> {
-    env.to_wire().unwrap()
-}
-
-fn id(wire: &[u8]) -> [u8; 32] {
-    Envelope::from_wire(wire).unwrap().id()
-}
 
 fn is_high_s(sig: &Signature) -> bool {
     sig.normalize_s() != *sig
@@ -156,107 +40,6 @@ fn negate_s(sig: &Signature) -> Signature {
     Signature::from_scalars(r, -s).unwrap()
 }
 
-fn client() -> Client {
-    Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(60))
-        .build()
-        .unwrap()
-}
-
-/// The relay in-process on 127.0.0.1:0 with its file in a temp dir. Fields
-/// drop in order: the server stops before the directory is removed.
-struct Relayed {
-    _server: Server,
-    relay: Arc<Relay>,
-    client: Client,
-    base: String,
-    tmp: TempDir,
-}
-
-impl Relayed {
-    fn new() -> Relayed {
-        Relayed::with(Box::new(Open))
-    }
-
-    fn with(policy: Box<dyn Policy>) -> Relayed {
-        let tmp = TempDir::new();
-        let relay = Arc::new(Relay::open(&tmp.0.join("relay").join("relay.db"), policy).unwrap());
-        let listen = parse_listen("127.0.0.1:0").unwrap();
-        let server = Server::start(Arc::clone(&relay), listen, false).unwrap();
-        let base = format!("http://{}", server.addr());
-        Relayed {
-            _server: server,
-            relay,
-            client: client(),
-            base,
-            tmp,
-        }
-    }
-
-    fn folder(&self) -> PathBuf {
-        self.tmp.0.join("relay")
-    }
-
-    fn db(&self) -> PathBuf {
-        self.folder().join("relay.db")
-    }
-
-    fn post(&self, path: &str, body: Vec<u8>) -> (StatusCode, Vec<u8>) {
-        let response = self
-            .client
-            .post(format!("{}{path}", self.base))
-            .body(body)
-            .send()
-            .unwrap();
-        let status = response.status();
-        (status, response.bytes().unwrap().to_vec())
-    }
-
-    fn register(&self, who: &Identity, address: &str) -> StatusCode {
-        self.post("/v1/register", who.registration(address.as_bytes()))
-            .0
-    }
-
-    fn lookup(&self, who: &Identity, address: &str) -> (StatusCode, Vec<u8>) {
-        self.post("/v1/lookup", who.request(address.as_bytes()))
-    }
-
-    fn submit(&self, wire: &[u8]) -> StatusCode {
-        self.post("/v1/envelopes", wire.to_vec()).0
-    }
-
-    /// `who`'s inbox answer, parsed.
-    fn inbox(&self, who: &Identity) -> Vec<Vec<u8>> {
-        let (status, answer) = self.post("/v1/inbox", who.request(&[]));
-        assert_eq!(status, StatusCode::OK);
-        assert!(answer.len() <= INBOX_ANSWER_MAX);
-        body::parse_inbox_answer(&answer)
-            .unwrap()
-            .into_iter()
-            .map(<[u8]>::to_vec)
-            .collect()
-    }
-
-    fn ack(&self, who: &Identity, ids: &[[u8; 32]]) -> StatusCode {
-        self.post("/v1/inbox/ack", who.request(&ids.concat())).0
-    }
-
-    fn waiting(&self) -> u64 {
-        self.relay.waiting().unwrap()
-    }
-
-    /// Whether any file in the relay's folder (the file and any `-journal`)
-    /// holds `needle`.
-    fn files_contain(&self, needle: &[u8]) -> bool {
-        fs::read_dir(self.folder())
-            .unwrap()
-            .filter_map(|e| fs::read(e.unwrap().path()).ok())
-            .any(|bytes| contains(&bytes, needle))
-    }
-}
-
 #[test]
 fn register_rules() {
     let r = Relayed::new();
@@ -264,17 +47,38 @@ fn register_rules() {
 
     // The test's body builder gives brev-proto's body (RFC 6979 signatures
     // are deterministic).
-    let unsigned =
-        body::registration_body(b"anna", &a.public, &a.x25519, &token_hash(&a.token)).unwrap();
-    let sig = a.sign(&body::register_preimage(&unsigned));
-    assert_eq!(a.registration(b"anna"), [&unsigned[..], &sig].concat());
-
-    // New, idempotent, taken, one address and one token per identity.
-    assert_eq!(r.register(&a, "anna"), StatusCode::CREATED);
-    assert_eq!(r.register(&a, "anna"), StatusCode::OK, "idempotent");
-    assert_eq!(r.register(&b, "anna"), StatusCode::CONFLICT, "taken");
+    let root = r.root();
+    let unsigned = body::registration_body_v2(
+        b"anna",
+        &a.public,
+        &a.x25519,
+        &token_hash(&a.token),
+        &root.key(),
+        &invite::ROOT_TAG,
+    )
+    .unwrap();
+    let sig = a.sign(&body::register_preimage_v2(&unsigned));
     assert_eq!(
-        r.register(&a, "anna-2"),
+        a.registration(b"anna", &root.key(), &invite::ROOT_TAG),
+        body::signed_registration_v2(&unsigned, &sig, ATTESTATION).unwrap()
+    );
+
+    // New, idempotent, taken, one address and one token per identity. A
+    // refused registration does not use its invite.
+    assert_eq!(r.register_by(&a, "anna", &root, None), StatusCode::CREATED);
+    assert_eq!(
+        r.register_by(&a, "anna", &root, None),
+        StatusCode::OK,
+        "idempotent, also with the used invite"
+    );
+    let spare = r.root();
+    assert_eq!(
+        r.register_by(&b, "anna", &spare, None),
+        StatusCode::CONFLICT,
+        "taken"
+    );
+    assert_eq!(
+        r.register_by(&a, "anna-2", &spare, None),
         StatusCode::CONFLICT,
         "a second address for one identity"
     );
@@ -284,19 +88,23 @@ fn register_rules() {
     };
     assert_eq!(a_again.id, a.id);
     assert_eq!(
-        r.register(&a_again, "anna"),
+        r.register_by(&a_again, "anna", &spare, None),
         StatusCode::CONFLICT,
         "another token"
     );
-    assert_eq!(r.register(&a_again, "other"), StatusCode::CONFLICT);
-    // Nothing of that changed the first registration.
-    assert_eq!(r.lookup(&a, "anna"), (StatusCode::OK, a.bundle()));
+    assert_eq!(
+        r.register_by(&a_again, "other", &spare, None),
+        StatusCode::CONFLICT
+    );
+    // Nothing of that changed the first registration or used the invite.
+    assert_eq!(r.lookup(&a, "anna"), (StatusCode::OK, a.reply(false)));
     assert_eq!(
         r.post("/v1/inbox", a_again.request(&[])).0,
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(r.lookup(&a, "anna-2").0, StatusCode::NOT_FOUND);
     assert_eq!(r.lookup(&a, "other").0, StatusCode::NOT_FOUND);
+    assert_eq!(r.open_invite(&spare), (StatusCode::OK, vec![0]));
 
     // Address rules (brev_proto::body::is_valid_address): charset, length,
     // first letter.
@@ -316,8 +124,9 @@ fn register_rules() {
     ];
     for (i, address) in refused.iter().enumerate() {
         let who = Identity::new(10 + u8::try_from(i).unwrap());
+        let body = who.registration(address, &spare.key(), &invite::ROOT_TAG);
         assert_eq!(
-            r.post("/v1/register", who.registration(address)).0,
+            r.post("/v1/register", body).0,
             StatusCode::BAD_REQUEST,
             "{address:?}"
         );
@@ -329,24 +138,25 @@ fn register_rules() {
         "z9--".into(),
     ];
     for (seed, address) in (30..).zip(&accepted) {
-        assert_eq!(
-            r.register(&Identity::new(seed), address),
-            StatusCode::CREATED,
-            "{address}"
-        );
+        r.join(&Identity::new(seed), address);
     }
 
-    // Signatures: a flipped bit, another key, no signing domain.
-    let good = c.registration(b"carl");
-    let unsigned = &good[..good.len() - 64];
+    // Signatures: a flipped bit, another key, no signing domain, Phase 3's
+    // domain.
+    let good = c.registration(b"carl", &spare.key(), &invite::ROOT_TAG);
+    let signed = good.len() - 2 - ATTESTATION.len();
+    let unsigned = &good[..signed - 64];
+    let tail = &good[signed..];
     let mut flipped = good.clone();
-    *flipped.last_mut().unwrap() ^= 1;
-    let by_a = a.sign(&body::register_preimage(unsigned));
+    flipped[signed - 1] ^= 1;
+    let by_a = a.sign(&body::register_preimage_v2(unsigned));
     let no_domain = c.sign(unsigned);
+    let v1_domain = c.sign(&body::register_preimage(unsigned));
     for bad in [
         flipped,
-        [unsigned, &by_a].concat(),
-        [unsigned, &no_domain].concat(),
+        [unsigned, &by_a, tail].concat(),
+        [unsigned, &no_domain, tail].concat(),
+        [unsigned, &v1_domain, tail].concat(),
     ] {
         assert_eq!(r.post("/v1/register", bad).0, StatusCode::UNAUTHORIZED);
     }
@@ -365,17 +175,17 @@ fn register_rules() {
     let mut off_curve = c.public;
     off_curve[64] ^= 1;
     for key in [&compressed[..], &prefixed, &off_curve] {
-        assert_eq!(
-            r.post("/v1/register", c.registration_with(b"carl", key)).0,
-            StatusCode::BAD_REQUEST
-        );
+        let body = c.registration_with(b"carl", key, &spare.key(), &invite::ROOT_TAG, ATTESTATION);
+        assert_eq!(r.post("/v1/register", body).0, StatusCode::BAD_REQUEST);
     }
 
-    // Bodies: empty, one byte short, one byte more, over the 16 KiB limit.
+    // Bodies: empty, one byte short, one byte more, Phase 3's registration,
+    // over the 16 KiB limit.
     for bad in [
         Vec::new(),
         good[..good.len() - 1].to_vec(),
         [&good[..], &[0]].concat(),
+        c.registration_v1(b"carl"),
     ] {
         assert_eq!(r.post("/v1/register", bad).0, StatusCode::BAD_REQUEST);
     }
@@ -386,21 +196,38 @@ fn register_rules() {
 
     // None of the refused bodies registered carl; the good one does.
     assert_eq!(r.lookup(&a, "carl").0, StatusCode::NOT_FOUND);
-    assert_eq!(r.register(&c, "carl"), StatusCode::CREATED);
-    assert_eq!(r.lookup(&a, "carl"), (StatusCode::OK, c.bundle()));
+    assert_eq!(r.post("/v1/register", good).0, StatusCode::CREATED);
+    assert_eq!(r.lookup(&a, "carl"), (StatusCode::OK, c.reply(false)));
 }
 
 #[test]
 fn requests_need_the_token() {
     let r = Relayed::new();
     let (a, b, c) = (Identity::new(1), Identity::new(2), Identity::new(3));
-    assert_eq!(r.register(&a, "anna"), StatusCode::CREATED);
-    assert_eq!(r.register(&b, "bob"), StatusCode::CREATED);
+    r.join(&a, "anna");
+    r.join(&b, "bob");
 
-    let cases: [(&str, Vec<u8>, StatusCode); 3] = [
+    // Every token endpoint but /v1/envelopes (submit_checks), in an order
+    // where each valid request is answered by its rules.
+    let secret = Secret::new(1);
+    let cases: [(&str, Vec<u8>, StatusCode); 9] = [
         ("/v1/lookup", b"bob".to_vec(), StatusCode::OK),
         ("/v1/inbox", Vec::new(), StatusCode::OK),
         ("/v1/inbox/ack", vec![7; 32], StatusCode::NO_CONTENT),
+        ("/v1/requests", b"bob".to_vec(), StatusCode::ACCEPTED),
+        ("/v1/events", Vec::new(), StatusCode::OK),
+        (
+            "/v1/events/answer",
+            [&b.id[..], &[1]].concat(),
+            StatusCode::NOT_FOUND,
+        ),
+        ("/v1/invites", secret.hash().to_vec(), StatusCode::CREATED),
+        (
+            "/v1/invites/redeem",
+            [Secret::new(2).key(), [0; 32]].concat(),
+            StatusCode::NOT_FOUND,
+        ),
+        ("/v1/block", b.id.to_vec(), StatusCode::NO_CONTENT),
     ];
     for (path, payload, ok) in cases {
         assert_eq!(r.post(path, a.request(&payload)).0, ok, "{path}");
@@ -425,33 +252,53 @@ fn requests_need_the_token() {
     assert_eq!(r.lookup(&a, "Bob").0, StatusCode::BAD_REQUEST);
     assert_eq!(r.lookup(&c, "Bob").0, StatusCode::UNAUTHORIZED);
     assert_eq!(r.lookup(&a, "nobody").0, StatusCode::NOT_FOUND);
-    assert_eq!(r.lookup(&a, "anna"), (StatusCode::OK, a.bundle()));
-    assert_eq!(
-        r.post("/v1/inbox", a.request(&[0])).0,
-        StatusCode::BAD_REQUEST
-    );
+    assert_eq!(r.lookup(&a, "anna"), (StatusCode::OK, a.reply(false)));
+    for (path, payload) in [
+        ("/v1/inbox", vec![0]),
+        ("/v1/events", vec![0]),
+        ("/v1/requests", b"Bob".to_vec()),
+        ("/v1/events/answer", [&b.id[..], &[2]].concat()),
+        ("/v1/events/answer", b.id.to_vec()),
+        ("/v1/block", b.id[..31].to_vec()),
+        ("/v1/invites", vec![0; 33]),
+        ("/v1/invites/redeem", vec![0; 63]),
+    ] {
+        assert_eq!(
+            r.post(path, a.request(&payload)).0,
+            StatusCode::BAD_REQUEST,
+            "{path} {}",
+            payload.len()
+        );
+    }
+    // Opening an invite takes no token: exactly `a`, 32 bytes.
+    assert_eq!(r.open_invite(&secret).0, StatusCode::OK);
+    for bad in [Vec::new(), vec![0; 31], a.request(&secret.key())] {
+        assert_eq!(r.post("/v1/invites/open", bad).0, StatusCode::BAD_REQUEST);
+    }
 }
 
 #[test]
 fn submit_checks() {
     let r = Relayed::new();
     let (a, b, c) = (Identity::new(1), Identity::new(2), Identity::new(3));
-    assert_eq!(r.register(&a, "anna"), StatusCode::CREATED);
-    assert_eq!(r.register(&b, "bob"), StatusCode::CREATED);
+    r.join(&a, "anna");
+    r.join(&b, "bob");
+    r.approve(&a, &b, "bob");
+    let submit = |w: &[u8]| r.submit_as(&a, w);
 
     // Stored once; the same id again is 200, also with the other S.
     let first = envelope(&a, &b.id, 256, 1);
     let w1 = wire(&first);
     assert_eq!(w1.len(), 430);
-    assert_eq!(r.submit(&w1), StatusCode::ACCEPTED);
-    assert_eq!(r.submit(&w1), StatusCode::OK, "already waiting");
+    assert_eq!(submit(&w1), StatusCode::ACCEPTED);
+    assert_eq!(submit(&w1), StatusCode::OK, "already waiting");
     let mut resigned = first.clone();
     resigned.signature = negate_s(&Signature::from_slice(&first.signature).unwrap())
         .to_bytes()
         .to_vec();
     assert_ne!(resigned.signature, first.signature);
     assert_eq!(
-        r.submit(&wire(&resigned)),
+        submit(&wire(&resigned)),
         StatusCode::OK,
         "the id excludes the signature"
     );
@@ -469,21 +316,22 @@ fn submit_checks() {
         };
         assert_eq!(is_high_s(&sig), want_high);
         env.signature = sig.to_bytes().to_vec();
-        assert_eq!(r.submit(&wire(env)), StatusCode::ACCEPTED);
+        assert_eq!(submit(&wire(env)), StatusCode::ACCEPTED);
     }
 
-    // Unknown sender: 403, also to an unknown recipient, so an unsigned
-    // request cannot probe the directory. Unknown recipient: 404.
+    // An unregistered sender has no token: 401, also to an unknown
+    // recipient, so it cannot probe the directory. A registered sender to
+    // an unknown recipient: 404.
     assert_eq!(
-        r.submit(&wire(&envelope(&c, &b.id, 256, 4))),
-        StatusCode::FORBIDDEN
+        r.submit_as(&c, &wire(&envelope(&c, &b.id, 256, 4))),
+        StatusCode::UNAUTHORIZED
     );
     assert_eq!(
-        r.submit(&wire(&envelope(&c, &[9; 32], 256, 5))),
-        StatusCode::FORBIDDEN
+        r.submit_as(&c, &wire(&envelope(&c, &[9; 32], 256, 5))),
+        StatusCode::UNAUTHORIZED
     );
     assert_eq!(
-        r.submit(&wire(&envelope(&a, &c.id, 256, 6))),
+        submit(&wire(&envelope(&a, &c.id, 256, 6))),
         StatusCode::NOT_FOUND
     );
 
@@ -498,7 +346,7 @@ fn submit_checks() {
     let mut zero_r = envelope(&a, &b.id, 256, 10);
     zero_r.signature[..32].fill(0);
     for bad in [flipped_body, flipped_sig, wire(&forged), wire(&zero_r)] {
-        assert_eq!(r.submit(&bad), StatusCode::FORBIDDEN);
+        assert_eq!(submit(&bad), StatusCode::FORBIDDEN);
     }
 
     // Wire rules (Envelope::from_wire): version 0, magic, a ciphertext that
@@ -518,17 +366,18 @@ fn submit_checks() {
         good[..429].to_vec(),
         Vec::new(),
     ] {
-        assert_eq!(r.submit(&bad), StatusCode::BAD_REQUEST);
+        assert_eq!(submit(&bad), StatusCode::BAD_REQUEST);
     }
 
     // The largest envelope is accepted; one byte more is refused before
     // parsing.
     let max = wire(&envelope(&a, &b.id, MAX_PADDED, 13));
     assert_eq!(max.len(), MAX_WIRE);
-    assert_eq!(r.submit(&max), StatusCode::ACCEPTED);
+    assert_eq!(a.request(&max).len(), SUBMIT_MAX);
+    assert_eq!(submit(&max), StatusCode::ACCEPTED);
     let mut over = max.clone();
     over.push(0);
-    assert_eq!(r.submit(&over), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(submit(&over), StatusCode::PAYLOAD_TOO_LARGE);
 
     // Only the accepted ones wait, byte for byte, in arrival order.
     assert_eq!(r.waiting(), 4);
@@ -540,14 +389,17 @@ fn inbox_and_ack() {
     let r = Relayed::new();
     let (a, b, c) = (Identity::new(1), Identity::new(2), Identity::new(3));
     for (who, address) in [(&a, "anna"), (&b, "bob"), (&c, "carl")] {
-        assert_eq!(r.register(who, address), StatusCode::CREATED);
+        r.join(who, address);
     }
+    r.approve(&a, &b, "bob");
+    r.approve(&a, &c, "carl");
+    r.approve(&c, &b, "bob");
     let e1 = wire(&envelope(&a, &b.id, 256, 1));
     let e2 = wire(&envelope(&a, &b.id, 1024, 2));
     let e3 = wire(&envelope(&a, &c.id, 256, 3));
     let e4 = wire(&envelope(&c, &b.id, 4096, 4));
-    for e in [&e1, &e2, &e3, &e4] {
-        assert_eq!(r.submit(e), StatusCode::ACCEPTED);
+    for (from, e) in [(&a, &e1), (&a, &e2), (&a, &e3), (&c, &e4)] {
+        assert_eq!(r.submit_as(from, e), StatusCode::ACCEPTED);
     }
 
     // Only one's own envelopes, oldest first; polling deletes nothing.
@@ -567,7 +419,7 @@ fn inbox_and_ack() {
     // letter comes after them.
     assert_eq!(r.ack(&b, &[id(&e2)]), StatusCode::NO_CONTENT);
     let e5 = wire(&envelope(&a, &b.id, 256, 5));
-    assert_eq!(r.submit(&e5), StatusCode::ACCEPTED);
+    assert_eq!(r.submit_as(&a, &e5), StatusCode::ACCEPTED);
     assert_eq!(r.inbox(&b), [e1.clone(), e4.clone(), e5.clone()]);
 
     // Ack bodies: no id, 257 ids, a cut id.
@@ -585,12 +437,13 @@ fn inbox_and_ack() {
 
     // At most 16 envelopes per answer.
     let d = Identity::new(4);
-    assert_eq!(r.register(&d, "dora"), StatusCode::CREATED);
+    r.join(&d, "dora");
+    r.approve(&a, &d, "dora");
     let many: Vec<Vec<u8>> = (0..17)
         .map(|n| wire(&envelope(&a, &d.id, 256, 100 + n)))
         .collect();
     for e in &many {
-        assert_eq!(r.submit(e), StatusCode::ACCEPTED);
+        assert_eq!(r.submit_as(&a, e), StatusCode::ACCEPTED);
     }
     assert_eq!(r.inbox(&d), many[..INBOX_MAX]);
     let first: Vec<[u8; 32]> = many[..INBOX_MAX].iter().map(|w| id(w)).collect();
@@ -601,12 +454,13 @@ fn inbox_and_ack() {
     // fourth would not.
     const _: () = assert!(3 * MAX_WIRE <= INBOX_MAX_BYTES && 4 * MAX_WIRE > INBOX_MAX_BYTES);
     let e = Identity::new(5);
-    assert_eq!(r.register(&e, "emil"), StatusCode::CREATED);
+    r.join(&e, "emil");
+    r.approve(&a, &e, "emil");
     let big: Vec<Vec<u8>> = (0..5)
         .map(|n| wire(&envelope(&a, &e.id, MAX_PADDED, 200 + n)))
         .collect();
     for w in &big {
-        assert_eq!(r.submit(w), StatusCode::ACCEPTED);
+        assert_eq!(r.submit_as(&a, w), StatusCode::ACCEPTED);
     }
     assert_eq!(r.inbox(&e), big[..3]);
     let first: Vec<[u8; 32]> = big[..3].iter().map(|w| id(w)).collect();
@@ -618,8 +472,9 @@ fn inbox_and_ack() {
 fn ack_deletes_bytes_from_the_file() {
     let r = Relayed::new();
     let (a, b) = (Identity::new(1), Identity::new(2));
-    assert_eq!(r.register(&a, "anna"), StatusCode::CREATED);
-    assert_eq!(r.register(&b, "bob"), StatusCode::CREATED);
+    r.join(&a, "anna");
+    r.join(&b, "bob");
+    r.approve(&a, &b, "bob");
     // One small envelope and one of the largest letter brev-core makes
     // (5 × 16 KiB), which spans SQLite overflow pages.
     let small = envelope(&a, &b.id, 256, 1);
@@ -628,8 +483,8 @@ fn ack_deletes_bytes_from_the_file() {
         &small.ciphertext[100..132],
         &large.ciphertext[70_000..70_032],
     ];
-    assert_eq!(r.submit(&wire(&small)), StatusCode::ACCEPTED);
-    assert_eq!(r.submit(&wire(&large)), StatusCode::ACCEPTED);
+    assert_eq!(r.submit_as(&a, &wire(&small)), StatusCode::ACCEPTED);
+    assert_eq!(r.submit_as(&a, &wire(&large)), StatusCode::ACCEPTED);
 
     // Positive control: the scan reads the relay's file.
     for slice in slices {
@@ -652,10 +507,10 @@ fn ack_deletes_bytes_from_the_file() {
         .collect();
     assert_eq!(names, ["relay.db"]);
 
-    // No tombstones: the same envelope again is stored and delivered again
-    // (brev-core drops it as a duplicate).
+    // No tombstones: the sender can store the same envelope again, and it
+    // is delivered again (brev-core drops it as a duplicate).
     assert!(r.inbox(&b).is_empty());
-    assert_eq!(r.submit(&wire(&small)), StatusCode::ACCEPTED);
+    assert_eq!(r.submit_as(&a, &wire(&small)), StatusCode::ACCEPTED);
     assert_eq!(r.inbox(&b), [wire(&small)]);
 }
 
@@ -664,11 +519,12 @@ fn relay_file_holds_no_plaintext() {
     const MARKER: &str = "BREV-SECRET-BODY \u{e6}\u{f8}\u{e5}";
     let r = Relayed::new();
     let (a, b) = (Identity::new(1), Identity::new(2));
-    assert_eq!(r.register(&a, "brev-secret-me"), StatusCode::CREATED);
-    assert_eq!(r.register(&b, "brev-secret-peer"), StatusCode::CREATED);
+    r.join(&a, "brev-secret-me");
+    r.join(&b, "brev-secret-peer");
+    r.approve(&a, &b, "brev-secret-peer");
     assert_eq!(
         r.lookup(&a, "brev-secret-peer"),
-        (StatusCode::OK, b.bundle())
+        (StatusCode::OK, b.reply(true))
     );
 
     // A letter sealed as brev-core seals it: the marker in UTF-8 and
@@ -698,7 +554,7 @@ fn relay_file_holds_no_plaintext() {
     sealed.extend_from_slice(&tag);
     env.ciphertext = sealed;
     env.signature = a.sign(&env.signed_bytes()).to_vec();
-    assert_eq!(r.submit(&wire(&env)), StatusCode::ACCEPTED);
+    assert_eq!(r.submit_as(&a, &wire(&env)), StatusCode::ACCEPTED);
 
     let check = |delivered: bool| {
         for needle in [MARKER.as_bytes(), &utf16, b"BREV-SECRET-BODY"] {
@@ -763,36 +619,53 @@ impl Policy for Recording {
 #[test]
 fn policy_hook_denies_before_writing() {
     let switch = Arc::new(Switch::default());
-    let r = Relayed::with(Box::new(Recording(Arc::clone(&switch))));
+    let r = Relayed::with(
+        Box::new(Recording(Arc::clone(&switch))),
+        |_| {},
+        Gates::default(),
+    );
     let deny = |on: bool| switch.deny.store(on, Ordering::SeqCst);
     let (a, b) = (Identity::new(1), Identity::new(2));
-    assert_eq!(r.register(&b, "bob"), StatusCode::CREATED);
+    r.join(&b, "bob");
 
-    // Registration: 429 and nothing written. A bad signature is refused
-    // before the policy is asked.
+    // Registration: 429 and nothing written, the invite not used. It is
+    // asked last: a bad signature, a missing invite and a taken address are
+    // refused before it.
+    let root = r.root();
     deny(true);
-    assert_eq!(r.register(&a, "anna"), StatusCode::TOO_MANY_REQUESTS);
-    let mut unsigned = a.registration(b"anna");
-    *unsigned.last_mut().unwrap() ^= 1;
+    assert_eq!(
+        r.register_by(&a, "anna", &root, None),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let mut unsigned = a.registration(b"anna", &root.key(), &invite::ROOT_TAG);
+    unsigned[80] ^= 1; // in the X25519 key
     assert_eq!(r.post("/v1/register", unsigned).0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        r.register_by(&a, "anna", &Secret::new(9), None),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(r.register_by(&a, "bob", &root, None), StatusCode::CONFLICT);
     deny(false);
     assert_eq!(r.lookup(&b, "anna").0, StatusCode::NOT_FOUND);
+    assert_eq!(r.open_invite(&root).0, StatusCode::OK, "not used");
     assert_eq!(
-        r.register(&a, "anna"),
+        r.register_by(&a, "anna", &root, None),
         StatusCode::CREATED,
         "not 200: nothing was there"
     );
 
-    // Submit: 429 and nothing stored; a bad signature never reaches the
-    // policy.
+    // Submit: 429 and nothing stored or counted; it is asked after the
+    // approval check, and a bad signature never reaches it.
     let env = envelope(&a, &b.id, 256, 1);
     let w = wire(&env);
+    assert_eq!(r.submit_as(&a, &w), StatusCode::CONFLICT, "not approved");
+    r.approve(&a, &b, "bob");
     deny(true);
-    assert_eq!(r.submit(&w), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(r.waiting(), 0);
+    assert_eq!(r.submit_as(&a, &w), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!((r.waiting(), r.count(&a, 1)), (0, 0));
     let mut forged = w.clone();
     forged[100] ^= 1;
-    assert_eq!(r.submit(&forged), StatusCode::FORBIDDEN);
+    assert_eq!(r.submit_as(&a, &forged), StatusCode::FORBIDDEN);
 
     // Token requests: 429 after the token check; a wrong token is 401
     // without asking.
@@ -808,7 +681,7 @@ fn policy_hook_denies_before_writing() {
 
     // Ack: 429 and nothing deleted.
     deny(false);
-    assert_eq!(r.submit(&w), StatusCode::ACCEPTED);
+    assert_eq!(r.submit_as(&a, &w), StatusCode::ACCEPTED);
     deny(true);
     assert_eq!(r.ack(&b, &[env.id()]), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(r.waiting(), 1);
@@ -817,8 +690,8 @@ fn policy_hook_denies_before_writing() {
     assert_eq!(r.ack(&b, &[env.id()]), StatusCode::NO_CONTENT);
     assert_eq!(r.waiting(), 0);
 
-    // The hooks saw exactly the authenticated, valid requests, with their
-    // arguments.
+    // The hooks saw exactly the requests that passed every other check,
+    // with their arguments.
     let (lookup, inbox, ack) = (Endpoint::Lookup, Endpoint::Inbox, Endpoint::Ack);
     assert_eq!(
         *switch.calls.lock().unwrap(),
@@ -842,16 +715,19 @@ fn policy_hook_denies_before_writing() {
 fn release_frees_an_address() {
     let r = Relayed::new();
     let (a, b, c) = (Identity::new(1), Identity::new(2), Identity::new(3));
-    assert_eq!(r.register(&a, "anna"), StatusCode::CREATED);
-    assert_eq!(r.register(&b, "bob"), StatusCode::CREATED);
+    r.join(&a, "anna");
+    r.join(&b, "bob");
+    // Asking means taking the answerer's letters: both ways now.
+    r.approve(&a, &b, "bob");
     let to_a = [
         wire(&envelope(&b, &a.id, 256, 1)),
         wire(&envelope(&b, &a.id, 1024, 2)),
     ];
     let to_b = wire(&envelope(&a, &b.id, 256, 3));
-    for w in to_a.iter().chain([&to_b]) {
-        assert_eq!(r.submit(w), StatusCode::ACCEPTED);
+    for w in &to_a {
+        assert_eq!(r.submit_as(&b, w), StatusCode::ACCEPTED);
     }
+    assert_eq!(r.submit_as(&a, &to_b), StatusCode::ACCEPTED);
 
     assert!(r.relay.release("anna").unwrap());
     assert_eq!(r.waiting(), 1, "anna's waiting letters go with her");
@@ -865,9 +741,13 @@ fn release_frees_an_address() {
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(r.lookup(&b, "anna").0, StatusCode::NOT_FOUND);
-    assert_eq!(r.submit(&to_a[0]), StatusCode::NOT_FOUND);
-    assert_eq!(r.register(&c, "anna"), StatusCode::CREATED, "free again");
-    assert_eq!(r.lookup(&b, "anna"), (StatusCode::OK, c.bundle()));
+    assert_eq!(r.submit_as(&b, &to_a[0]), StatusCode::NOT_FOUND);
+    r.join(&c, "anna");
+    assert_eq!(
+        r.lookup(&b, "anna"),
+        (StatusCode::OK, c.reply(false)),
+        "free again, a new identity with no links"
+    );
     assert!(!r.relay.release("nobody").unwrap());
 
     // The operator command, on the file the relay is serving.
@@ -897,7 +777,7 @@ fn release_frees_an_address() {
         assert_eq!(out.status.code(), Some(code), "{address}");
     }
     assert!(!missing.parent().unwrap().exists());
-    assert_eq!(r.lookup(&c, "anna"), (StatusCode::OK, c.bundle()));
+    assert_eq!(r.lookup(&c, "anna"), (StatusCode::OK, c.reply(false)));
 }
 
 #[test]
@@ -931,7 +811,13 @@ fn listen_refuses_anything_but_127_0_0_1() {
 
     // Server::start refuses the others too, before it binds.
     let tmp = TempDir::new();
-    let relay = Arc::new(Relay::open(&tmp.0.join("relay.db"), Box::new(Open)).unwrap());
+    let relay = Relay::open_with(
+        &tmp.0.join("relay.db"),
+        Box::new(Open),
+        Config::default(),
+        Gates::default(),
+    );
+    let relay = Arc::new(relay.unwrap());
     for bad in [
         "0.0.0.0:0",
         "[::1]:0",
@@ -962,46 +848,13 @@ fn listen_refuses_anything_but_127_0_0_1() {
     }
 }
 
-/// Kills the child on drop.
-struct Running(Child);
-impl Drop for Running {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 #[test]
 fn serve_writes_the_port_file_and_traces_path_and_status() {
     let tmp = TempDir::new();
     let db = tmp.0.join("brev-relay").join("relay.db");
-    let port_file = tmp.0.join("port");
-    let mut child = Running(
-        Command::new(BIN)
-            .args(["serve", "--db"])
-            .arg(&db)
-            .args(["--listen", "127.0.0.1:0", "--port-file"])
-            .arg(&port_file)
-            .arg("--trace")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let port = loop {
-        if let Ok(text) = fs::read_to_string(&port_file) {
-            break text;
-        }
-        assert!(Instant::now() < deadline, "no port file");
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let port: u16 = port.strip_suffix('\n').unwrap().parse().unwrap();
-    assert_ne!(port, 0);
-    assert!(!tmp.0.join("port.tmp").exists());
+    let (mut child, base) = spawn(&tmp, &db, &["--trace"]);
 
     let client = client();
-    let base = format!("http://127.0.0.1:{port}");
     let health = client.get(format!("{base}/v1/health")).send().unwrap();
     assert_eq!(health.status(), StatusCode::OK);
     assert_eq!(health.text().unwrap(), "brev-relay v1");
@@ -1029,7 +882,13 @@ fn serve_writes_the_port_file_and_traces_path_and_status() {
 #[test]
 fn stop_closes_the_port_and_a_new_server_reuses_it() {
     let tmp = TempDir::new();
-    let relay = Arc::new(Relay::open(&tmp.0.join("relay.db"), Box::new(Open)).unwrap());
+    let relay = Relay::open_with(
+        &tmp.0.join("relay.db"),
+        Box::new(Open),
+        Config::default(),
+        Gates::default(),
+    );
+    let relay = Arc::new(relay.unwrap());
     let server = Server::start(
         Arc::clone(&relay),
         parse_listen("127.0.0.1:0").unwrap(),
@@ -1056,4 +915,72 @@ fn stop_closes_the_port_and_a_new_server_reuses_it() {
     assert_eq!(server.addr(), addr);
     assert_eq!(health().unwrap().status(), StatusCode::OK);
     assert_eq!(server.requests(), 1);
+}
+
+/// The transitional Phase 3 mode (`Relay::open`, `serve --phase3`), which
+/// brev-mail's client and the app still speak until Phase 4 WP3 and WP4:
+/// Phase 3's registration, lookup and bare-wire submit with none of Phase
+/// 4's checks, and none of Phase 4's endpoints. The Phase 4 relay refuses
+/// Phase 3's bodies.
+#[test]
+fn phase3_mode_keeps_phase3_bodies_until_wp3() {
+    let (a, b) = (Identity::new(1), Identity::new(2));
+    let r = Relayed::phase3();
+    for (who, address) in [(&a, "anna"), (&b, "bob")] {
+        let body = who.registration_v1(address.as_bytes());
+        assert_eq!(r.post("/v1/register", body.clone()).0, StatusCode::CREATED);
+        assert_eq!(r.post("/v1/register", body).0, StatusCode::OK);
+    }
+    assert_eq!(r.lookup(&a, "bob"), (StatusCode::OK, b.bundle()));
+    let w = wire(&envelope(&a, &b.id, 256, 1));
+    assert_eq!(r.post("/v1/envelopes", w.clone()).0, StatusCode::ACCEPTED);
+    assert_eq!(r.post("/v1/envelopes", w.clone()).0, StatusCode::OK);
+    assert_eq!(r.inbox(&b), std::slice::from_ref(&w));
+    assert_eq!(r.ack(&b, &[id(&w)]), StatusCode::NO_CONTENT);
+    let root = Secret::new(1);
+    let v2 = Identity::new(3).registration(b"carl", &root.key(), &invite::ROOT_TAG);
+    assert_eq!(r.post("/v1/register", v2).0, StatusCode::BAD_REQUEST);
+    for path in [
+        "/v1/requests",
+        "/v1/events",
+        "/v1/events/answer",
+        "/v1/block",
+        "/v1/invites",
+        "/v1/invites/open",
+        "/v1/invites/redeem",
+    ] {
+        assert_eq!(
+            r.post(path, a.request(&[])).0,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+
+    // The Phase 4 relay: Phase 3's registration and a bare wire are 400,
+    // and a lookup answers with the status byte.
+    let r = Relayed::new();
+    r.join(&b, "bob");
+    assert_eq!(
+        r.post("/v1/register", a.registration_v1(b"anna")).0,
+        StatusCode::BAD_REQUEST
+    );
+    r.join(&a, "anna");
+    r.approve(&a, &b, "bob");
+    assert_eq!(
+        r.post("/v1/envelopes", w.clone()).0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(r.waiting(), 0);
+    assert_eq!(r.lookup(&a, "bob"), (StatusCode::OK, b.reply(true)));
+
+    // The binary with --phase3, as scripts/test.sh starts it for the app's
+    // harness until WP4.
+    let tmp = TempDir::new();
+    let (_child, base) = spawn(&tmp, &tmp.0.join("relay.db"), &["--phase3"]);
+    let answer = client()
+        .post(format!("{base}/v1/register"))
+        .body(a.registration_v1(b"anna"))
+        .send()
+        .unwrap();
+    assert_eq!(answer.status(), StatusCode::CREATED);
 }

@@ -424,14 +424,16 @@ fi
 # (docs/PHASE3_DESIGN.md §8): brev-relay on 127.0.0.1 with a port the OS
 # picks and a fresh database under core/target, written to --port-file; the
 # script waits for /v1/health and stops the relay when it ends, also on a
-# failure (trap). Nothing listens anywhere but 127.0.0.1.
+# failure (trap). Nothing listens anywhere but 127.0.0.1. --phase3: the
+# harness and the lock probe speak brev-mail's Phase 3 bodies until Phase 4
+# WP4 moves them (docs/PHASE4_DESIGN.md §9).
 if [[ "$DARWIN" == yes ]]; then
-  echo "==> relay for the harness and the lock probe (127.0.0.1, fresh database)"
+  echo "==> relay for the harness and the lock probe (127.0.0.1, fresh database, Phase 3 bodies)"
   cargo build --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-relay
   RELAY_DIR="$TARGET_DIR/test-relay"
   rm -rf "$RELAY_DIR"
   mkdir -p -m 700 "$RELAY_DIR"
-  "$TARGET_DIR/release/brev-relay" serve --db "$RELAY_DIR/relay.db" --listen 127.0.0.1:0 \
+  "$TARGET_DIR/release/brev-relay" serve --phase3 --db "$RELAY_DIR/relay.db" --listen 127.0.0.1:0 \
     --port-file "$RELAY_DIR/port" 2>"$RELAY_DIR/relay.log" &
   RELAY_PID=$!
   trap 'kill "$RELAY_PID" 2>/dev/null || true; wait "$RELAY_PID" 2>/dev/null || true' EXIT
