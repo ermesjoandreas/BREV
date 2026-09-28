@@ -34,6 +34,17 @@ zeroize = "1.9.0"
 # RustBuffers Swift frees through UniFFI (docs/DECISIONS.md D-0032 item 4).
 zeroizing-alloc = "0.1.1"
 ed25519-dalek = "3.0.0"
+# Phase 3 (docs/PHASE3_DESIGN.md §0, §3.3, §5.1). P-256 verification of the
+# Secure Enclave's signatures, in brev-proto for brev-core and brev-relay;
+# `ecdsa` always brings ecdsa's `der`, so `Signature::from_der` needs no DER
+# code of ours.
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa"] }
+# The relay client in brev-core: `blocking` only, so no TLS, no system proxy
+# and no JSON.
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking"] }
+# The relay server (brev-relay).
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1.53.1", default-features = false, features = ["rt", "net", "macros"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

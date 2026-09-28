@@ -1,4 +1,4 @@
-# Phase 2 spike sources
+# Spike sources (Phase 2 and 3)
 
 The sources of the Phase 2 spikes, copied from the session scratchpad
 (`/private/tmp/claude-503/…/scratchpad/p2/`, which is volatile) so the GUI-spike
@@ -16,6 +16,7 @@ built by `tools/verify/build.sh` or linked into Brev.app, except InputLab
 | `enclave/` | the CryptoKit Secure Enclave keys + HPKE, and the owner's Touch ID test | D-0032, D-0033 | superseded by D-0035 (keychain keys, ECIES) |
 | `ffi/` | FFI copies, zeroing allocator, binding patches, Core Text | D-0032 | done; `core/` is the spike's modified Phase 1 core the harness links |
 | `keychain/` | the team-signed keychain probe | D-0035 | done |
+| `p3/` | Phase 3: Security.framework P-256 signatures verified with p256, and the four vectors brev-proto's tests commit (its own README; copied from `…/scratchpad/p3/`) | docs/PHASE3_DESIGN.md §0 | done |
 
 The anchor spike (A) is not kept: the anchor it tested (WP9) is obsolete with
 D-0035. The `USER_STEPS.md` files name the scratchpad paths they were written
