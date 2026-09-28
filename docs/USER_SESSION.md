@@ -1,107 +1,131 @@
-# Brev: det du må gjøre (fase 2)
+# Brev: det du må gjøre (fase 2, fase 3 og delingen av kjernen)
 
-Skrevet 28. september 2026 for eieren. Alt står i rekkefølge. Kjør kommandoene i Terminal fra `~/BREV`.
+Skrevet 28. september 2026 for eieren. Kjør alt i Terminal fra `~/BREV`. Ber macOS om en tillatelse du ikke venter: trykk «Ikke tillat» og noter det.
 
-Merk: listen gjelder fase 2-grenen (`claude/laughing-knuth-yhp8ji`). På fase 3-grenen heter V53 og V54 V69 og V70 i `docs/VERIFY.md`, og V42 er erstattet av V57.
+## Hvor vi er
 
-## Dette skjedde i natt
+- Fase 2 og fase 3 er ferdig kodet på grenen `claude/laughing-knuth-yhp8ji` (`cc7dbd6`). Ingenting er pushet.
+- Rust-kjernen er delt i `brev-vault` og `brev-mail`. Svarene dine (Q1 til Q6) er bygget inn.
+- Alle automatiske tester er grønne (`scripts/test.sh`, 28. september kl. 17).
+- Maskinen har kjørt alt den kan uten deg (`docs/VERIFY-RESULTS.md`). V9 feiler som skrevet (beslutning 7).
+- Brev har aldri vært installert her. Alt med Touch ID, ekte brev og Brev B venter på deg.
+- Brev B mangler: `scripts/build.sh --instance b` finnes ikke ennå (fase 3, WP6). Se Runde 1, steg 7.
+- Avgjort: signeringsnøkkelen (godtatt for testbrev), releet kjører som deg, og App ID `no.brev.app.b`.
 
-- Fase 2 er ferdig kodet: onboarding, Touch ID-opplåsing, postvinduet, skrivevinduet, autolås og vern mot skjermopptak.
-- Alle arbeidspakkene er committet på grenen `claude/laughing-knuth-yhp8ji`. Ingenting er pushet.
-- To gjennomganger av hele fasen fant 32 mulige feil. 21 er rettet, 10 var ikke reelle, og 1 venter på deg (beslutning 6).
-- Alle automatiske tester er grønne (`scripts/test.sh`, 28. september kl. 12:56).
-- Beslutningene står i `docs/DECISIONS.md` (D-0036 til D-0053, og «Phase 2 summary» til slutt).
-- Det meste av sjekklisten (`docs/VERIFY.md`) trenger deg og Touch ID. Det står under.
-- Ingen Touch ID- eller passorddialog ble åpnet. Én tillatelsesdialog står igjen fra en agent (se A1).
+## Beslutninger som gjenstår
 
-## Beslutninger du må ta
+Svar kort, for eksempel «2c 4b 5a 6b 7a».
 
-**1. Signeringsnøkkelen på denne Macen.** Med nøkkelen her kan et hvilket som helst program du kjører, også en AI-agent, late som det er Brev overfor nøkkelringen. Du godtok dette 28. september kl. 11:28, for testbrev.
-- a) Passord hver gang `codesign` bruker nøkkelen (hver bygging spør).
-- b) Ekte brev bare på en Mac uten nøkkelen, med Developer ID-bygg laget et annet sted.
-- c) Godta det mens Brev bare har testbrev.
-- Anbefaling: c nå og b før ekte brev. Det er det du valgte. Bare si fra hvis det har endret seg.
+**2. Touch ID-vinduet og lås ved opplåsing.** Brev låser når en annen app kommer foran. Tar Touch ID-vinduet over, havner du på låseskjermen rett etter opplåsing. Svaret kommer i Runde 1, steg 5.
+- a) Vent inntil 1,5 sekunder på at Brev blir aktiv igjen, bare etter Touch ID.
+- b) Vis Touch ID inne i Brev-vinduet (et nytt rammeverk du må godkjenne).
+- c) Behold regelen som den er.
+- Anbefaling: c hvis opplåsingen virker, ellers a.
 
-**2. Touch ID-vinduet og lås ved appbytte.** Brev låser når en annen app kommer foran. Hvis Touch ID-vinduet regnes som en annen app, låser Brev seg rett etter opplåsing. Det vet vi først etter V27 og V47.
-- a) Vent inntil 1,5 sekunder på at Brev blir aktiv igjen, men bare hvis det var Touch ID-vinduet som tok over.
-- b) Vis Touch ID inne i Brev-vinduet (et nytt rammeverk som du må godkjenne).
-- c) Behold regelen som den er, hvis opplåsingen virker.
-- Anbefaling: c hvis V27 virker, ellers a.
-
-**3. Feilkoder for sperret Touch ID og endrede fingeravtrykk.** Å måle dem krever fem feil fingre, og et nytt fingeravtrykk som gjør alle slike nøkler på Macen ubrukelige.
-- a) Hopp over. Ukjente feil viser «Prøv igjen», og «fingeravtrykk endret» vises bare når fingeravtrykkene også er endret.
-- b) Mål dem senere med et eget skript.
-- Anbefaling: a. Slik er det bygget. V48 viser kodene i loggen uansett.
-
-**4. Oppstart: hvilke miljøvariabler Brev godtar.** I dag fjerner Brev kjente farlige variabler (en forbudsliste).
+**4. Hvilke miljøvariabler Brev godtar ved oppstart.** I dag en forbudsliste. Rust nekter i tillegg `DYLD_*` og krever `MallocScribble=1`.
 - a) Behold forbudslisten.
-- b) Godta bare variablene macOS selv setter (en tillatsliste). Alt annet regnes som utrygt.
-- Anbefaling: b, men først når steg B4 har vist hva Finder setter. TSMEventTracing er allerede ordnet: Brev låser ikke opp når den er på.
+- b) En tillatsliste: bare det macOS selv setter. Alt annet regnes som utrygt.
+- Anbefaling: b, når V49 (Runde 2, A) har vist hva Finder og Dock setter.
 
-**5. Falske tastetrykk fra andre programmer (V32, V33).** Det er ikke testet om tastetrykk sendt via systemets felles kø, System Events, Tilgjengelighetstastatur eller Skjermdeling slipper inn.
+**5. Falske tastetrykk og klikk (V32, V33).** Ikke testet: systemets felles kø, System Events, Tilgjengelighetstastatur og Skjermdeling.
 - a) Kjør testen mens du sitter ved Macen.
 - b) La hullet stå åpent til senere.
 - Anbefaling: a. Skriver noe seg selv inn i Brev: stopp og si fra.
 
-**6. ⌘Q mens skrivevinduet er åpent.** macOS ignorerer da «Avslutt». Brev blir stående ulåst til en annen lås slår inn (appbytte, skjermlås, dvale eller 5 minutter uten bruk).
+**6. ⌘Q mens et ark er åpent** (skrivevinduet eller «Slett alt»-arket). macOS ignorerer da «Avslutt», også fra Dock og ved utlogging. Brev står ulåst til en annen lås slår inn.
 - a) La det være. Slik gjør alle Mac-apper.
 - b) ⌘Q låser og avslutter. Et halvskrevet brev forsvinner, som ved ⌘-Tab.
 - Anbefaling: b.
 
-**7. V9 og fire usynlige menylinje-vinduer.** Alle apper har fire slike vinduer som kan tas opp. De viser bare menylinjen (Brev, Arkiv).
+**7. V9 og fire usynlige menylinje-vinduer.** Alle apper har dem. De viser bare menylinjen (Brev, Arkiv).
 - a) V9 teller bare vinduene Brev lager selv.
 - b) La V9 feile og godta det som restrisiko.
 - Anbefaling: a.
 
-## Ting bare du kan gjøre ved Mac-en
+## Runde 1 (ca. 25 min)
 
-Ber macOS om en tillatelse du ikke venter, trykk «Ikke tillat» og noter det.
+Byggingen kommer i tillegg. Noter hver rad: nummer, pass eller feil, og hva du så. Filen lages i steg 3.
 
-**A. Rydd skjermen (2 min)**
-1. Dialogen «Terminal vil ha tilgang til data fra andre apper»: trykk «Ikke tillat». Den kom fra en agent i natt.
-2. Andre gamle dialoger (krasjrapport, tilgjengelighet, varsler): «Ignorer», «Avslå» eller lukk.
-
-**B. Små tester før Brev (ca. 8 min)**
-1. Bygg testappene (2 min):
+1. **Rydd skjermen (1 min).** «Terminal vil ha tilgang til data fra andre apper»: trykk «Ikke tillat». Andre gamle dialoger (krasjrapport, tilgjengelighet): «Ignorer» eller lukk.
+2. **Bygg.** `scripts/build.sh && tools/verify/build.sh && (cd core && cargo build --release -p brev-relay)`
+3. **Tre Terminal-vinduer i `~/BREV` (2 min).** Lim inn blokken under «Setup» i `docs/VERIFY.md` i alle tre.
+   - Vindu 3, releet (tomt fra start): `[ -e "$RD" ] && mv "$RD" "$R/relay-before-$(date +%s)"`, så `"$RELAY" serve --db "$RDB" --listen 127.0.0.1:8787 --trace > "$R/relay.log"`
+   - Vindu 2, loggen: `/usr/bin/log stream --level debug --predicate 'process == "Brev"' > "$R/stream.log"`
+   - Vindu 1: `curl -s http://127.0.0.1:8787/v1/health; echo; head -1 "$R/stream.log"`. Forventet: `brev-relay v1` og `Filtering the log data …`.
+   - Vindu 1: `{ sw_vers; xcodebuild -version; git rev-parse --short HEAD; } > "$R/miljo.txt"; touch "$R/resultater.txt"; open -e "$R/resultater.txt"`
+4. **V51, før Brev finnes (3 min).** I vindu 1. `--dry` gir ingen dialog. Hver `--unlock` gir én Touch ID-dialog uten passordknapp.
    ```
-   cd ~/BREV/tools/verify/spikes
-   (cd capture && mkdir -p bin out && xcrun swiftc -O -target arm64-apple-macos14.0 src/probe/main.swift -o bin/probe && bash src/app/build.sh)
-   input/build.sh && launch/build.sh
+   PROBE="$T/touchid-probe/Build/Products/Release/TouchIDProbe.app"
+   PROBE0="$T/touchid-probe-scrub0/Build/Products/Release/TouchIDProbe.app"
+   open -W --stdout "$R/v51-dry.txt" "$PROBE" --args --dry
+   open -W --stdout "$R/v51.txt" "$PROBE" --args --unlock
+   open -W --stdout "$R/v51-scrub0.txt" "$PROBE0" --args --unlock
    ```
-2. Opptaksikonet (1 min): `capture/human.sh indikator`. Se på menylinjen øverst til høyre i fase A, B og C. Noter: kom et opptaksikon (ja/nei)?
-3. Ekte tastatur (1,5 min): `input/human.sh skriv`. Gjør a til d som skriptet sier. Ikke skriv passord det minuttet. Noter: står det `abc æøå é` i begge boksene?
-4. Start fra Finder (1 min): `launch/user_steps.sh finder`. Dobbeltklikk `LaunchSpike.app`. Se etter `psn arg present=false` og `MallocScribble=1`. Står det `true`: si fra.
-5. Tastelogg med feilsøkingsbrytere (1 min): `launch/user_steps.sh typing`. Skriv `brev` i hvert av de to vinduene. Forventet: `release` viser `chars=: 0`, og kontrollen viser mer enn 0.
-6. Rydd: `capture/human.sh rydd; input/human.sh rydd`.
-7. Lim utskriftene fra 2 til 5 inn i en fil, for eksempel `~/Desktop/brev-steg-B.txt`.
+   Noter: `PASS` i alle tre, og om `v51-scrub0.txt` sier `NEGATIVE CONTROL: residue` eller `NEGATIVE CONTROL EMPTY`. Står det `FAIL` i `v51.txt`: si fra.
+5. **Første onboarding og opplåsing (5 min).** `open "$APP"`
+   - V36: fem regler på bokmål. «Opprett nøkler» er grå til du krysser av «Jeg forstår …».
+   - V29: mens onboarding vises, `open -n "$APP"`, så `pgrep -x Brev`. Én PID.
+   - V37: trykk «Opprett nøkler», så `pkill -9 -x Brev` og `open "$APP"`. Onboarding skal komme tilbake.
+   - Gå gjennom til slutt. «Lås opp med Touch ID»: én dialog, ingen passordknapp, navnet «Brev» (V27).
+   - Havner du på låseskjermen rett etter Touch ID, noter det (beslutning 2). Kjør så `/usr/bin/log show --last 5m --predicate 'subsystem == "no.brev.app" AND category == "touchid"'` og noter linjen `resign active during Touch ID (unlock)`, eller «ingen linje».
+   - `grep -E 'open failed|unlockExpired' "$R/stream.log"` skal ikke gi noe. Et treff er en feil å melde, ikke skadede filer.
+6. **Registrer adressen (2 min).** Skriv `brev-secret-me`, trykk «Registrer» (V55). Én dialog: «Brev» … «registrere adressen din», ingen passordknapp. Kjør `log show`-linjen fra steg 5 igjen. Står det `resign active during Touch ID (sign)`: si fra. Da må en bryter slås på og Brev bygges på nytt.
+7. **Bygg og start Brev B (4 min).** `scripts/build.sh --help`. Står ikke `--instance` der, er WP6 ikke gjort (slik er det i `cc7dbd6`). Stopp runden her og si fra, så lager jeg det. Ellers:
+   - `scripts/build.sh --instance b`. Første gang registreres App ID `no.brev.app.b`.
+   - `open "$APPB"`. Onboarding, så «Lås opp med Touch ID»: dialogen skal si «Brev B». Registrer `brev-secret-peer`.
+8. **Legg til hverandre (2 min).** I Brev: «Legg til kontakt», skriv `brev-secret-peer`, «Legg til». I Brev B det samme med `brev-secret-me`. Ingen Touch ID her (V26).
+9. **Ett brev hver vei (5 min).** Skriv `BREV-SECRET-BODY æøå` i emne og tekst. «Send»: én dialog per brev, «… sende brevet», ingen passordknapp, riktig navn (V56, V57).
+   - Mens brevet venter, i vindu 1: `waiting; hits "$M" "$RD"`. Et tall på 1 eller mer, og ingen treff (V58).
+   - Bytt til mottakeren og lås opp. Brevet kommer ved første synk, i alle tre rutene.
+   - Etter begge: `waiting` skal gi `0` (V59).
 
-**C. Første ekte Brev (ca. 15 min)**
-1. Bygg (3 min): `cd ~/BREV && scripts/build.sh && tools/verify/build.sh`.
-2. Åpne to Terminal-vinduer i `~/BREV`. Lim inn blokken under «Setup» i `docs/VERIFY.md` i begge.
-3. Start loggen i vindu 2: `/usr/bin/log stream --level debug --predicate 'process == "Brev"' > "$R/stream.log"`
-4. Steg 1 i «Order of a run» ble kjørt i natt (D-0053). Du kan hoppe over det.
-5. V51 før Brev er installert (3 min). Bruk kommandoene under «V51» i `docs/VERIFY.md`. `--dry` gir ingen dialog. Hver `--unlock` gir én Touch ID-dialog uten passordknapp. Se etter `PASS`.
-6. Første onboarding (5 min): `open "$APP"`.
-   - V36: fem regler på norsk. «Opprett nøkler» er grå til du krysser av.
-   - V29: `open -n "$APP"` mens onboarding vises. Den nye starten skal lukke seg.
-   - V37: trykk «Opprett nøkler», kjør `pkill -9 -x Brev`, og start igjen. Onboarding skal komme tilbake.
-   - Gå gjennom til slutt. «Lås opp med Touch ID» gir én dialog uten passordknapp (V27).
-7. V40 og V41 leser Brevs mappe. Da trenger Terminal tilgang til data fra andre apper. Gi den bare mens du tester, og ta den bort etterpå. Eller hopp over radene og noter det. Det samme gjelder V17, V18, V29 og V52 senere.
+Se etter hele tiden: én dialog per trykk, aldri en passordknapp, riktig navn («Brev» eller «Brev B»), og aldri en dialog du ikke selv utløste (V26).
 
-**D. Resten av sjekklisten (60 til 90 min)**
-Følg steg 3 til 6 i «Order of a run». Kommandoene står under «Commands». Skriv inn et brev med `BREV-SECRET-BODY æøå` i emne og tekst.
-1. Oppstarter (steg 3): V28 (slett `defaults`-innstillingen med en gang), V49 fra Finder og Dock, V26, V3. På låseskjermen: V27 «Avbryt», V43, første del av V54, sperre-delen av V48.
-2. Ulåst (steg 4): V42 først. Gi Terminal Tilgjengelighet før opptaksradene. Så V4 til V17, V19, V22 til V25, V30 til V35 (V32 og V33 etter beslutning 5), V46, V47, andre del av V54, og V44 til slutt. V8 trenger en annen Mac eller iPad.
-3. Etter avslutning (steg 5): V17, V18 og V41, så V39 med Verify-bygget (`open "$VAPP"`).
-4. Til slutt (steg 6): V20, V17 og V41 igjen, kopi av mappen, V38, V52. Aller sist V48 med et nytt fingeravtrykk. Det gjør testinstallasjonen ulesbar, og nøkler i andre apper som bruker Touch ID slik, slutter å virke.
-5. Noter pass eller feil for hver rad i `$R/resultater.txt`. Så fører jeg dem inn.
+## Runde 2 (resten av sjekklisten, ca. 2 timer)
 
-**E. Rydd opp (3 min)**
-1. Finder: ⇧⌘G, skriv `~/Library/Containers/`. Dra alle mapper som heter `no.brev.spike.…` til papirkurven. Ikke rør `no.brev.app`. Bruk Finder, ikke Terminal: Terminal ville spurt om tillatelse.
-2. La du `LaunchSpike.app` i Dock: høyreklikk, Valg, Fjern fra Dock.
-3. Ga du Terminal tillatelser bare for testen (C7, D2): ta dem bort igjen.
+Kommandoene står under «Commands» i `docs/VERIFY.md`, merket med radnummer. De som trenger Brev ulåst, starter med `sleep 30;`: kjør, bytt til Brev, lås opp og gjør klart. Gi Terminal en tillatelse bare når en gruppe trenger den. Et markørbrev betyr et brev med `BREV-SECRET-BODY æøå`.
 
-## Neste steg
+**A. Oppstarter (10 min).** Avslutt Brev før hver.
+- V28: kjør linjene. Kjør `defaults delete -g …` med en gang etter hver `defaults write -g`.
+- V49: start med `open "$APP"`, fra Finder og fra Dock. Lagre `ps -wwE -p "$(pgrep -x Brev)"` for Finder og Dock i `$R/v49-finder.txt` og `$R/v49-dock.txt` (til beslutning 4).
+- V26: `osascript -e 'activate application "Brev"'`. Ingen Touch ID-dialog.
+- V3: `osascript -e 'tell application "Brev" to get name of every window'` (gi Automatisering). Noter feilkoden. -1708 er forventet.
+- På låseskjermen: V27 «Avbryt», V43, første del av V70, og V48s sperre: feil finger til «Touch ID er sperret …». Aldri en passordknapp. Etterpå trenger Macen passordet ditt én gang.
 
-- Når sjekklisten er kjørt, fører jeg inn resultatene (D-0053) og lukker fase 2.
-- Fase 3 (ekte sending via en relé-server) er allerede i gang på grenen `claude/phase3`.
+**B. Kontakter og relé (20 min).** Gi Terminal Tilgjengelighet.
+- V67 for «Legg til kontakt»-arket og «Legg til» med `brev-secret-peer` skrevet.
+- V58 andre del, V61 (koden Brev viser for Brev B er lik Brev Bs egen kode), V56 («Avbryt» i dialogen beholder utkastet, `waiting` uendret).
+- V54, V64, V62 (⌘-Tab mens send-dialogen står), V63 (to deler, med den tidsstyrte linjen).
+
+**C. Opptak og tilgjengelighet (20 min).** Gi Terminal Skjermopptak. Et markørbrev åpent.
+- V4 (⇧⌘4 vindu og område, ⇧⌘5 opptak), V5 til V7 (`capture-probe`), V9 med skrivevinduet åpent, V10 (Accessibility Inspector), V11, V12 (gi Automatisering for System Events), V13 på «Send» og «Lås opp med Touch ID», V68.
+- V8 trenger en annen Mac eller iPad. Har du ingen: noter «ikke kjørt».
+- Synes et brev i et opptak: stopp og si fra.
+
+**D. Skriving og utklipp (20 min).** Skrivevinduet åpent.
+- V30, V31 (gi Inndataovervåking), V34, V35, andre del av V70, V14, V15, V16.
+- V32 og V33 bare etter beslutning 5.
+
+**E. Disk, logg og lås (20 min).** Gi Terminal tilgang til data fra andre apper.
+- V17, V40, V41, V21 (fra `~/BREV`).
+- V22, V23 (⌃⌘Q), V24 (dvale), V25 (5 min uten å røre noe, også med Brev-menyen åpen), V46, V47. V44 til slutt.
+
+**F. Etter avslutning (10 min).** Brev avsluttet: V17 og V41 igjen, og V18. Så V65: Brev B sender et nytt markørbrev. `open "$VAPP"`, send et markørbrev til Brev B, åpne brevet fra Brev B, og lås med det åpent (⌘L).
+
+**G. Til slutt, det som ødelegger (25 min).** I denne rekkefølgen:
+1. V20 (`kill -SEGV`), så V17 og V41 igjen.
+2. V60 på Brev B: nullstill som i V38, så `"$RELAY" release --db "$RDB" "$ADDR_B"`. Ta V67-delene for «Godta ny kode» og «Godta» før du trykker selv.
+3. Kopier Brev-mappen til side: `cp -Rp "$D" "$R/D-kopi"`
+4. V38, med V9s del for «Slett alt»-arket og V13-trykkene på «Slett alt og start på nytt» og «Slett alt» før du trykker selv.
+5. Ny onboarding. På adressesiden, uten å registrere: V46s del for siden og V67s del for siden og «Registrer» med `brev-secret-me` skrevet.
+6. V52: avslutt Brev, `cp -p "$R/D-kopi/brev.db" "$D/brev.db"`, start. Forventet: «Filene til Brev er skadet. Brevene kan ikke åpnes.»
+7. Aller sist V48: legg til et fingeravtrykk i Systeminnstillinger. Forventet: «Fingeravtrykkene på denne Macen ser ut til å være endret …». Både Brev og Brev B blir ulesbare, og andre apper som bruker Touch ID slik, mister nøklene sine.
+8. Stopp loggen (⌃C i vindu 2) og kjør V19s linjer.
+
+## Rydd opp (5 min)
+
+1. Stopp releet: ⌃C i vindu 3.
+2. `defaults read -g NSTraceEvents; defaults read -g TSMEventTracing`. Begge skal si `does not exist`. Står en der: `defaults delete -g` og navnet.
+3. Systeminnstillinger → Personvern og sikkerhet: ta Terminal bort fra Tilgjengelighet, Skjermopptak, Inndataovervåking, Automatisering og tilgang til andre apps data.
+4. Fingeravtrykket fra V48 kan du slette igjen.
+5. `echo "$R"` og send meg stien. Jeg fører resultatene inn i D-0053 og lukker fase 2 og fase 3.
