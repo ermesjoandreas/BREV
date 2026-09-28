@@ -16,7 +16,7 @@
 // compose sheet is cancelled (it may have found a changed key),
 // the contacts are read again. `sync()` fetches the
 // letters waiting at the relay: once at `start()`, every 5 seconds from a
-// timer in the common run-loop modes (D-0052 in the shifted numbering), and
+// timer in the common run-loop modes (docs/DECISIONS.md D-0050), and
 // once after a letter is sent. It runs on `Session.net`, never on main; a
 // sync still running makes the next tick skip, and its result returns to
 // main, where a result from before `wipeAll()` is dropped. When letters

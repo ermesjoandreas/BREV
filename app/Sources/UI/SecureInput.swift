@@ -5,7 +5,7 @@
 // turns it on while it has focus in the key window of the active app, and
 // off when it loses focus, its window resigns key or Brev resigns active.
 // The compose sheet turns it off when it closes, and the lock sequence in
-// step 1. The input spike (macOS 26.2; D-0060 in the shifted numbering)
+// step 1. The input spike (macOS 26.2; docs/DECISIONS.md D-0052)
 // found that it stays on for the whole session while Brev is hidden or
 // inactive, until Brev turns it off, so every way out calls `disable()`.
 // The Carbon calls are counted per process, so this keeps its own Bool and

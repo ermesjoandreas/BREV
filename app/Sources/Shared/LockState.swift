@@ -1,11 +1,11 @@
 // LockState.swift — the state behind locking, without AppKit.
 //
 // Upholds CLAUDE.md §3.2 (auto-lock) and §1.10 (docs/PHASE2_DESIGN.md §4.3,
-// §5.4, §8.3; D-0052 in the shifted numbering): every lock starts a new
+// §5.4, §8.3; docs/DECISIONS.md D-0050): every lock starts a new
 // generation, so an unlock that finishes after a lock is discarded instead
 // of showing mail. While a Touch ID unlock is in flight, resigning active
 // does not lock, because the Touch ID panel itself may take activation
-// (not yet measured; lock spike, D-0060 in the shifted numbering).
+// (not yet measured; lock spike, D-0052).
 // Every other trigger still locks then, and an unlock that ends while Brev
 // is not the active app is discarded.
 // The Touch ID prompt of a signature (Send, Registrer; docs/PHASE3_DESIGN.md

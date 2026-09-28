@@ -1368,9 +1368,966 @@ the new numbers.
 - **Numbering:** the entries planned in `docs/PHASE2_DESIGN.md` §13 now
   shift by three (D-0036 to D-0061).
 
-D-0036 to D-0061 stay reserved for the entries `docs/PHASE2_DESIGN.md` §13
-plans (WP12 writes them, D-0035's numbering). Entries made before WP12
-take the numbers after them, so those numbers do not shift again.
+WP12 wrote the entries `docs/PHASE2_DESIGN.md` §13 plans as D-0036 to
+D-0053, on 2026-09-28. Where one entry holds several planned topics they
+were merged, the key topics follow D-0035 (keychain, not key files), and the
+anchor (design A, WP9) is dropped. D-0054 to D-0061 are not used. D-0062 to
+D-0064 were written before WP12 and keep their numbers. Comments,
+`docs/VERIFY.md` and `docs/VERIFY-RESULTS.md` now cite the entries below.
+Older text (D-0064, and the design itself) cites the design's numbers or the
+shifted ones; this table maps both:
+
+| Design §13 | Shifted (cited before WP12) | Topic | Now |
+|---|---|---|---|
+| D-0033, D-0034, D-0051 | D-0036, D-0037, D-0054 | UniFFI surface, `OpenText` registry, limits | D-0038 |
+| D-0035 | D-0038 | `unlock` drop guard, deep scrub, poison | D-0039 |
+| D-0036, D-0037 | D-0039, D-0040 | install marker, container, instance lock | D-0036 |
+| D-0038 | D-0041 | `biometry.state`, unlock errors, reset | D-0037 |
+| D-0039 | D-0042 | stored padding, schema v2 | D-0041 |
+| D-0040 | D-0043 | binding patches (and the zeroing allocator) | D-0040 |
+| D-0041 | D-0044 | echo peers | D-0042 |
+| D-0042, D-0050 | D-0045, D-0053 | AppKit shell, menus | D-0043 |
+| D-0043 | D-0046 | Swift secret memory | D-0044 |
+| D-0044 | D-0047 | rendering | D-0045 |
+| D-0045 | D-0048 | launch hygiene | D-0047 |
+| D-0046 | D-0049 | compose input | D-0049 |
+| D-0047 | D-0050 | synthetic input, `HumanButton` | D-0048 |
+| D-0048 | D-0051 | window hardening, capture defence | D-0046 |
+| D-0049 | D-0052 | lock triggers, lock sequence | D-0050 |
+| D-0052, D-0053, D-0054 | D-0055, D-0056, D-0057 | tests, Verify build, `tools/verify/` | D-0051 |
+| D-0055, D-0056 | D-0058, D-0059 | file substitution, new residual risks | D-0033 items 2 and 3 |
+| D-0057 | D-0060 | GUI-spike facts | D-0052 |
+| D-0058 | D-0061 | VERIFY results, phase summary | D-0053 and "Phase 2 summary" |
+
+### D-0036 — Keys, install marker, container and instance lock (D-0035 as built)
+
+- **Date:** 2026-09-28
+- **Decision:** Design §5.1 to §5.3 and §2.10, adapted to D-0035 (WP5,
+  `app/Sources/Keys/KeyStore.swift`, `UnlockService.swift`):
+  1. **Keychain names.** The identity key (tag `no.brev.app.identity`) and
+     the KEK (tag `no.brev.app.kek`) are permanent Secure Enclave keys with
+     `[.privateKeyUsage, .biometryCurrentSet]` and
+     `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`; the wrapped DEK is a
+     generic-password item (service `no.brev.app`, account `wrapped-dek`).
+     All three are in the data protection keychain, access group
+     `AV26DNQ5SC.no.brev.app`, never synchronizable. Every query that does
+     not unwrap carries an `LAContext` with `interactionNotAllowed`, so it
+     fails instead of showing UI; only the unwrap prompts.
+  2. **Install marker.** Brev counts as installed when the wrapped-DEK item
+     exists. It is written last, inside the first unlock closure, right
+     after `brev.unlock` succeeds and before the post-unlock rule (D-0037),
+     so a successful first unlock always completes the install, and a crash
+     or quit before it leaves Brev uninstalled. This replaces design §2.10's
+     `dek.hpke` and closes Phase 1's "`create` is not crash-atomic". A
+     second store of the item is refused (-25299).
+  3. **Known-name cleanup.** Before every onboarding attempt, and on reset,
+     Brev deletes the three keychain items and only the files it writes:
+     `brev.db`, `peer-1.db`, `peer-2.db`, their `-journal` files,
+     `biometry.state` and `biometry.state.tmp`. Nothing else is ever
+     deleted.
+  4. **Folder.** `~/Library/Containers/no.brev.app/Data/Library/Application
+     Support/Brev`, mode 0700, excluded from backups
+     (`isExcludedFromBackup`) when the folder is created, so it never exists
+     without the exclusion (D-0033 item 4). The stores are 0600 (D-0041);
+     `biometry.state` is written 0600 with `O_EXCL` and `F_FULLFSYNC` to a
+     `.tmp` name, renamed, and the folder synced.
+  5. **Instance lock.** `.lock` in that folder, opened with `O_EXLOCK |
+     O_NONBLOCK` and held for the process lifetime. A second instance logs
+     `second instance`, activates the running Brev through
+     `NSRunningApplication` and quits. If the folder or `.lock` cannot be
+     prepared for any other reason, or the keychain cannot be read at launch
+     (an ad-hoc build), Brev fails closed: the `unlock.error.damaged` notice
+     with no reset button.
+- **Reasoning:** CLAUDE.md §1.9 and §3.2/§3.3 as changed by D-0035: no key
+  material in files, so the design's key-file list, `dek.hpke` and the
+  anchor are gone, and file substitution only affects the stores (§2). The
+  binding to Brev's signing identity holds only on a Mac without the team
+  signing key (D-0062; accepted by the owner for test letters, CLAUDE.md
+  §2). A marker written after the first real unlock is the simplest way to
+  make onboarding restartable.
+- **Verified:**
+  - WP5, macOS 26.2: a windowless team-signed probe (bundle id
+    `no.brev.app`, same group) compiled the repo's `KeyStore.swift`,
+    `Enclave.swift` and `SecretBytes.swift` and never unwrapped. `makeKeys`
+    made both keys with no prompt (token `com.apple.setoken`, ACL `akpu`
+    with biometry, group `AV26DNQ5SC.no.brev.app`, `sync=0`); the ECIES wrap
+    gave 113 bytes; `storeWrapped` made the state "installed" (item
+    `pdmn=akpu`, `sync=0`) and read back equal; a second store gave -25299;
+    the KEK was found with a no-interaction context; `biometry.state` was
+    0600 with no `.tmp` left; the folder was 0700 and excluded from backup;
+    `deleteKnownNames` returned it to "fresh" (-25300 for key and item) with
+    no files left.
+  - WP4 run of the Release build (`docs/VERIFY-RESULTS.md`): `open -n`
+    during onboarding logged `second instance` and exited, one PID before
+    and after (V29, process part); `security find-generic-password -s
+    no.brev.app` found nothing (V40, keychain part). Every launch showed
+    onboarding (`route onboarding`), since nothing was installed.
+  - Not yet run (Touch ID, and reads of the container that would prompt):
+    V37, V38, the file parts of V29, V40 and V41, and V52.
+
+### D-0037 — Unlock, error mapping, `biometry.state` and reset
+
+- **Date:** 2026-09-28
+- **Decision:** Design §5.3 to §5.5, adapted to D-0035 (WP5):
+  1. **The unlock closure** (`UnlockService`, serial queue
+     `no.brev.unlock`): an `LAContext` with `localizedFallbackTitle = ""`,
+     cancel title *Avbryt* and reason «låse opp brevene dine»; the KEK
+     lookup; `SecKeyCreateDecryptedData` with
+     `.eciesEncryptionCofactorVariableIVX963SHA256AESGCM` (the one Touch ID
+     prompt); `brev.unlock(dek:)` on the same thread, zero-copy; the
+     returned `CFData` zeroed in place on every path, also when a later step
+     throws. Any error after `Brev.unlock` locks the session again. Brev
+     never prompts on its own: only a human click (`HumanButton`, D-0048) on
+     the lock screen or on onboarding's first-unlock page starts it.
+  2. **Post-unlock rule** (design §5.4 step 3, the simple rule): back on
+     main, if the lock generation changed, or Brev is not the active app,
+     the session is locked and the lock screen shown. The activation wait
+     and `LAAuthenticationView` from the lock spike are not built; they wait
+     for V27/V47 and the owner.
+  3. **Error mapping** (`Shared/UnlockFailure.swift`, so the harness tests
+     it): `LAError` user/system/app cancel and `TKError` -4 → the lock
+     screen with no text; lockout → `unlock.error.lockout`; biometry not
+     available or not enrolled → `unlock.error.unavailable`;
+     `errSecItemNotFound`, malformed lengths, `TKError` -3 and Rust
+     `WrongKey`/`Corrupt` → `unlock.error.damaged`; any other keychain or
+     Enclave failure → `unlock.error.fingers` only if the saved
+     `biometry.state` exists and differs from the current hash, else
+     `unlock.error.retry`; everything else → retry. The log line `unlock
+     failed class=<x> errors=[domain code, …]` gives V48 the codes. The
+     error codes of design §14.2 U4.3 were not measured (the lock spike's
+     option (a), skip them).
+  4. **`biometry.state`** is a hint: the enrolled-fingers hash, written at
+     onboarding and rewritten after every successful unwrap, inside the
+     closure (even if the post-unlock rule then locks). A hash change alone
+     never counts as "fingers".
+  5. **Reset.** Only the reset button followed by *Slett alt* in
+     `ConfirmSheet` (Brev's own hardened sheet with two `HumanButton`s;
+     Escape is *Avbryt*) deletes anything, and then only the known names
+     (D-0036). While an unlock is in flight every button on the page is
+     disabled, and `AppDelegate.reset()` refuses (`reset refused: unlock in
+     flight`). After a damaged or fingers failure the unlock button stays
+     beside the reset button, so a wrong guess never forces a reset; when
+     `Brev.open` fails, only the reset is offered. The first-unlock page is
+     `UnlockViewController` in a first-unlock mode, which offers the reset
+     on any failure but a cancel.
+- **Reasoning:** CLAUDE.md §1.8 (no password path), §1.9 (a fingerprint
+  change loses the keys, and Brev says so) and §1.10. The lock spike and the
+  enclave skeptic: a hash change is not evidence on its own (it can change
+  across OS versions), and collecting the invalidated-key code would
+  invalidate every `.biometryCurrentSet` key on the Mac.
+- **Verified:**
+  - `scripts/test.sh` at `fb6f140` (macOS 26.2): harness case 2 (the
+    `UnlockFailure` table) 5 of 5; case 1 (the unwrap zeroes the same
+    `CFData`, also when the body throws) and case 3 (`Brev.unlock` got the
+    same address; all zero after the unwrap) 5 of 5 each. WP5 review: with
+    the wipe removed, `harness units` and `harness dek` fail; with a wipe
+    only on success, `harness units` fails.
+  - The lock probe (`app/Tests/Lock`, in test.sh, 12 checks pass): a
+    discarded unlock leaves Rust locked, and `UnlockService` locks Rust when
+    its closure fails after `Brev.unlock` (D-0063 item 4).
+  - WP5 review, the reset race: an AppKit check in the scratchpad built the
+    real `UnlockViewController` and `PageView`; against `33fa863` the reset
+    button stayed enabled while an unlock was working (`[false, true]`),
+    with the fix both buttons were disabled.
+  - Not yet run (Touch ID): V26, V27, V47, V48, V38 and V51.
+
+### D-0038 — The Phase 2 UniFFI surface: `Brev`, `OpenText`, limits and the lock registry
+
+- **Date:** 2026-09-28
+- **Decision:** Design §2.2 to §2.4 as built (WP1,
+  `core/brev-core/src/ffi.rs`):
+  1. Two objects, `Brev` and `OpenText`; `ping()` and `limits()`;
+     `Brev.create`, `open`, `unlock`, `lock`, `is_locked`, `contacts`,
+     `threads`, `messages`, `open_body`, `send_new`, `sync`;
+     `OpenText.byte_len`, `chunk`, `close`. With the clone and free
+     functions that is 20 exported symbols, listed in
+     `scripts/ffi-surface.txt`.
+  2. `BrevError` has unit variants only. Records carry ids and metadata;
+     every name, subject and body is an `OpenText` handle.
+  3. Content goes in only as `&[u8]` plus a used length, from a fixed
+     `SecretBytes` of at least 64 bytes; content comes out only through
+     `OpenText.chunk`, always exactly `CHUNK` = 960 bytes. No `String`
+     carries content: the only ones are `ping()` and `dir`.
+  4. Limits (`limits()`): subject 256 bytes, body 64 KiB of UTF-8.
+  5. Lock registry: the session keeps a `Weak` to every `OpenText`; `lock()`
+     and `Drop` for `Brev` close them all, after which `chunk` returns
+     `Locked` and `byte_len` 0. Swift reads a text completely and closes it
+     at once (`TextReader`).
+  6. Not in Phase 2 (design §1.3): replies (every letter starts a thread),
+     read state, deletion, search, attachments, drafts that survive a lock.
+  The whole surface is pinned by test.sh against `scripts/ffi-surface.txt`
+  (D-0064 item 1).
+- **Reasoning:** The Phase 1 summary's deferred FFI copies (`RustBuffer`s
+  freed unzeroed, `read_body` and `unlock` not exportable as they were);
+  CLAUDE.md §1.10 and §6 ("keep the UniFFI surface minimal and opaque").
+  Small fixed chunks keep every buffer on both sides at or under 1 KiB, on
+  top of the allocator and the patches (D-0040).
+- **Verified:**
+  - `scripts/test.sh` at `fb6f140`: `locked_session_refuses_every_export`,
+    `lock_closes_every_open_text`, `drop_closes_every_open_text`,
+    `chunk_is_exactly_960_zero_padded` and
+    `send_uses_only_the_length_prefix` pass, and both FFI surface checks
+    pass.
+  - WP1 mutations: `lock_all` not closing the open texts, and `send_new`
+    ignoring the used length, each fail their test. Review round 2: bindings
+    from three Rust mutants (`OpenText::units() -> Vec<u16>`,
+    `ContactRow.name_units: Vec<u16>`, `OpenText::byte_at(i) -> u32`) fail
+    the surface check (D-0064).
+
+### D-0039 — The `unlock` drop guard, the 64 KiB scrub and poison handling
+
+- **Date:** 2026-09-28
+- **Decision:** Design §2.3 and §2.5 as built (WP1, review round 1):
+  1. `Brev::unlock` builds a `Finish` drop guard before it takes the session
+     mutex. It runs on every exit, including a panic unwind and a poisoned
+     mutex: it locks all three cores unless the unlock succeeded, then runs
+     `scrub_stack_deep()` (64 KiB). A DEK that is not 32 bytes gives
+     `WrongKey`.
+  2. A poisoned mutex: `session()` recovers the guard, locks everything,
+     clears the poison and returns `Locked`; `lock()` clears the poison
+     while it still holds the guard; `Drop` recovers and locks.
+  3. `unlock_all` and `create_in` are `#[inline(never)]`, so the deep scrub
+     reaches the copies of the two peer DEKs (D-0063 item 1), and
+     `Brev::create` scrubs after `create_in`.
+  4. Swift calls `brev.lock()` after any error from `unlock` (D-0037). The
+     depth stays 64 KiB, as CLAUDE.md §2 says, until V51 measures it with
+     the real Enclave unwrap; a change of depth goes to the owner.
+- **Reasoning:** CLAUDE.md §2 (Security framework copies during the unwrap,
+  mitigated by the 64 KiB scrub in `unlock`) and §1.10. The scrub is for
+  residue on the calling thread whether or not Rust used the DEK, so it also
+  runs on the poisoned path.
+- **Verified:**
+  - `scripts/test.sh` at `fb6f140`:
+    `panic_in_unlock_locks_all_scrubs_and_poison_returns_locked`,
+    `unlock_scrubs_deep_on_every_path`,
+    `poison_while_unlocked_locks_all_on_next_call` and
+    `create_scrubs_the_stack_after_create_in` pass; the release run of
+    `scrub_stack_deep_wipes_its_buffer` passes.
+  - WP1 mutations: a `Finish` that does not lock on failure, and one built
+    after the mutex is taken (no scrub on the poisoned path), each fail.
+    Review round 1: harness case 3 with the archive from before
+    `#[inline(never)]` failed 6 of 6 (two copies of each peer DEK on a stack
+    after the lock), and passed 8 of 8 with it.
+  - WP4: the disassembly of `scrub_stack_deep` in the three `TouchIDProbe`
+    builds reserves 64 KiB, nothing and 128 KiB; each passes `--dry` with no
+    prompt. V51 (`--unlock`, one Touch ID prompt) is not yet run.
+
+### D-0040 — The zeroing allocator and the patched bindings (implements D-0032 items 4 and 5)
+
+- **Date:** 2026-09-28
+- **Decision:** (WP1, WP2)
+  1. `brev-core`'s global allocator is
+     `zeroizing_alloc::ZeroAlloc<std::alloc::System>` (`zeroizing-alloc`
+     0.1.1, safe code; `#![forbid(unsafe_code)]` stays). test.sh checks
+     `cargo tree` and that the release test binary contains
+     `zeroizing_alloc5WIPER`, which is linked only when the allocator is in
+     use.
+  2. `scripts/patch-bindings.py` applies design §3's patches A to D to the
+     generated Swift. bindgen writes into `core/target/bindings-staging`;
+     the files are patched there and moved to `app/Generated` only after the
+     patch succeeds, so no build can ever compile unpatched bindings.
+     `gen-bindings.sh` reads the `uniffi` and `uniffi_bindgen` versions from
+     `Cargo.lock` after `cargo build` and refuses anything but
+     `PATCHED_FOR_UNIFFI=0.32.2`. A marker line refuses a second run, and
+     test.sh checks the marker.
+- **Reasoning:** CLAUDE.md §3.1: every freed Rust buffer, including
+  UniFFI's, is wiped, and byte buffers are wiped before Swift frees them. A
+  patch that no longer applies must fail the build, not pass silently.
+- **Verified:**
+  - `scripts/test.sh` at `fb6f140`: the allocator and patch-marker steps
+    pass.
+  - WP1 review: with `#[global_allocator]` deleted, fmt, clippy and every
+    test stayed green and test.sh stopped with "brev-core's global allocator
+    is not zeroizing_alloc::ZeroAlloc". The crates.io source of 0.1.1 is
+    byte-identical to the copy the design proved (`diff -r`).
+  - WP2, each mutation put between bindgen and the patch step: a changed
+    stock `deallocate()` exits 1 ("expected exactly 1 match, found 0"), a
+    second copy of the stock `Data.read` exits 1 ("found 2"),
+    `PATCHED_FOR_UNIFFI=0.32.3` exits 1 ("uniffi changed …"), and a second
+    patch run exits 1. WP2 review: with pattern D made to miss, the old
+    script left stock bindings in `app/Generated`; the new one left none,
+    and xcodebuild then failed ("Build input file cannot be found"). A
+    `Cargo.lock` bumped to 0.32.3 by `cargo build` is now refused.
+
+### D-0041 — Padding of every stored column, schema v2 (implements D-0032 item 7)
+
+- **Date:** 2026-09-28
+- **Decision:** Design §2.8 and §2.9 as built (WP1). `brev-proto` has
+  `MAX_PADDED` (1 MiB), `padded_len`, `pad_into` (a u32 big-endian length,
+  the content, zeros), `unpad` (refuses anything `pad_into` could not have
+  written) and `PadError`. Every sealed column (names, subjects, bodies,
+  identity keys, bundles) is padded to 256 B, 1 KiB, 4 KiB or 16 KiB, and
+  above that to the next multiple of 16 KiB, before it is encrypted; a bad
+  pad is `Crypto`. `SCHEMA_VERSION` is 2 and the `SCHEMA` text is unchanged;
+  a v1 store opens as `Corrupt`. New store files are created with mode 0600.
+- **Reasoning:** D-0032 item 7: padding after real stores exist would mean
+  re-encrypting every row. One code path for every column, so key rows leak
+  no lengths either. Phase 3's envelope reuses the same functions.
+- **Verified:**
+  - `scripts/test.sh` at `fb6f140`: `padding_boundaries`,
+    `padding_is_strict`, `column_padding_is_enforced`,
+    `column_lengths_are_bucketed`, `v1_store_is_refused`,
+    `store_files_are_0600` and `no_plaintext_in_any_file` (Phase 2, all
+    three stores) pass.
+  - WP4: `padcheck` passed on the view host's three stores (14, 9 and 6
+    sealed values) and failed on a copy with one body set to 300 bytes (`NOT
+    PADDED: rowid 1 length 300`). V18 on Brev's own stores waits for the
+    human run.
+
+### D-0042 — The echo contacts Ekko and Speil (removed in Phase 3)
+
+- **Date:** 2026-09-28
+- **Decision:** Design §9 as built (WP1, `core/brev-core/src/echo.rs`). Two
+  real in-process `Core`s with their own stores (`peer-1.db`, `peer-2.db`),
+  each under DEK = HKDF-SHA256(the user's DEK, `"brev/v0/demo-peer/" ‖
+  index`), scrubbed also on its error path. Each peer is a contact of the
+  user ("Ekko", "Speil") and has the user as "Deg", over its own
+  `MockTransport` pair, and echoes every letter into the same thread.
+  `send_new` routes the envelope to the peer whose bundle id equals the
+  recipient (errors are returned, not skipped). `sync()` runs every 3 s in
+  the common run-loop modes while unlocked; the pump drops each plaintext
+  before the envelope is queued. Envelopes in flight are lost on quit.
+  Envelopes are unsigned (`Unsigned`, D-0019).
+- **Reasoning:** CLAUDE.md §5 Phase 2 ("two contacts hard-coded through
+  `MockTransport` so you can send a message to yourself"); Phase 1 forbids a
+  self-contact. The copies in two more stores are an accepted Phase 2
+  residual risk (D-0033 item 3, CLAUDE.md §2).
+- **Verified:**
+  - `scripts/test.sh` at `fb6f140`:
+    `sync_echoes_each_letter_once_into_the_same_thread`,
+    `echo_pump_holds_no_plaintext_after_sync` (the live plaintext count is 0
+    at every send), `create_returns_locked_session_with_two_contacts` and
+    `no_plaintext_in_any_file` (which also looks for "Ekko" and "Speil" in
+    all three stores) pass.
+  - WP7, 10 view host runs: the sync timer showed the new thread and kept
+    the selection by id. V42 in the real app waits for the human run.
+
+### D-0043 — The app shell: AppKit only, `BrevApplication`, `RootViewController`, menus Brev and Arkiv
+
+- **Date:** 2026-09-28
+- **Decision:** (WP3, WP5, WP7)
+  1. AppKit only, no SwiftUI, also for onboarding: interface text on the
+     onboarding pages, the lock screen and `ConfirmSheet` is drawn by a
+     small `InterfaceText` view (readable by VoiceOver, never content),
+     because the forbidden-API grep keeps `NSTextField` out of
+     `app/Sources`.
+  2. `NSPrincipalClass` is `BrevApplication` (D-0048). `RootViewController`
+     swaps onboarding, the lock screen and the mail screen inside one fixed
+     root, so the window never resizes; the lock screen replaces the current
+     screen only if Brev was unlocked, so a lock never hides onboarding or
+     an error.
+  3. Menus are built in code: **Brev** (*Lås Brev* ⌘L, *Avslutt Brev* ⌘Q)
+     and **Arkiv** (*Nytt brev* ⌘N, enabled only while unlocked, a contact
+     is selected and no sheet is open). No Edit, View, Window, Help,
+     Services or Share menu; `servicesMenu` is never set; no Dock menu or
+     badge.
+  4. `AppDelegate` ignores open-documents events (D-0063 item 6).
+  5. The mail screen is an `NSSplitView` with minimum pane widths 150, 200
+     and 300 pt; threads are listed newest first, letters oldest first. The
+     48 strings are in `nb.lproj/Localizable.strings`.
+- **Reasoning:** CLAUDE.md §3.2 and §1.4. The input spike: without an Edit
+  menu macOS 26.2 adds no Writing Tools, AutoFill, Start Dictation or Emoji
+  & Symbols items; with a standard Edit menu it adds all four.
+- **Verified:**
+  - WP3: `OBJC_CLASS_$_BrevApplication` is in the Release, Verify and Debug
+    binaries; the 48 keys in `Localizable.strings` match the 48 that `L10n`
+    uses.
+  - WP4, `axdump` on Brev's onboarding window: 32 elements, only interface
+    text, the menus Brev and Arkiv; the minimise button has `AXEnabled = 0`.
+  - WP7 review: the view host's pane-minimum checks fail with the old split
+    code (a pane dragged to 0) and pass with the constraints. V15 and V43
+    wait for the human run.
+
+### D-0044 — Secret memory in Swift
+
+- **Date:** 2026-09-28
+- **Decision:** Design §6 as built (WP2, WP5, WP6): `SecretBytes` (a fixed
+  allocation of at least 64 bytes, wiped with `memset_s`), `SecretText`
+  (UTF-16 in a fixed buffer, edited in place; `composedRange` shows Core
+  Text at most 446 units), `Transcode` and `TextReader`. The only `Data`
+  that holds a secret is a 960-byte chunk from `OpenText.chunk` and the
+  unwrapped DEK's `CFData` (ECIES now, D-0035; CryptoKit is no longer used
+  by app code). One keystroke lives in a stack tuple inside
+  `KeyTranslator.translate` and is wiped before it returns. The rules of
+  design §6.3 hold; the forbidden-API grep enforces the checkable ones,
+  widened in WP2's review with `String(data`, `String(bytes`,
+  `String(cString`, `String(utf16CodeUnits`, `NSMutableString`,
+  `CFStringCreateWithCharacters(`, `NSLog(`, `debugPrint(`, `dump(`,
+  `os_log(` and others.
+- **Reasoning:** CLAUDE.md §6 ("no `String` for message content in views")
+  and §1.10.
+- **Verified:**
+  - `scripts/test.sh` at `fb6f140`: harness case 1 (units), case 4 at 64,
+    200, 4 096 and 65 000 units (live hits while open; 0 UTF-8, 0 UTF-16 and
+    0 glyph hits after the wipe, `GlyphFlush` and the lock), case 5 (a kept
+    `OpenText` after the lock) and case 6 (a live `String` of a letter is
+    seen, so the scanner works): 5 of 5 each.
+  - WP2 review: a probe file with one line per new grep pattern passed the
+    old grep and failed the new one on all 14 lines.
+
+### D-0045 — Rendering: one `CTLine` at a time into the protected layer's pixel buffers
+
+- **Date:** 2026-09-28
+- **Decision:** Design §6.4 and §7.2 as built, with D-0034 (WP2, WP7, WP11):
+  1. Layout is `CTLine` only (no `CTTypesetter`, `CTFramesetter` or
+     `NSLayoutManager`): windows of at most 448 units, broken at a space,
+     never splitting a surrogate pair. One content font app-wide
+     (`NSFont.systemFont(ofSize: 13)`; metadata 11 pt).
+  2. Content views (`ContentView` in `UI/OpaqueView.swift`) draw each line
+     straight into IOSurface-backed `CVPixelBuffer`s shown through the
+     protected layer (D-0046); `draw(_:)` draws nothing. A view holds three
+     buffers, sized from its bounds within its clip view, rounded up to 256
+     px. They are zeroed in place when its text is wiped and on lock, and
+     zeroed and dropped when the view scrolls out of sight or leaves its
+     window.
+  3. `LSEnvironment` sets `MallocScribble=1`, and LaunchGuard refuses a
+     launch without it (D-0047). `GlyphFlush` lays out and draws filler
+     lines of every length 1 to 448 once in the lock sequence and after
+     every compose close.
+  4. The Verify build's `SelfScan` logs `selfscan u8 u16 glyph scribble
+     probe` after the lock and a control line with `needle` at its start;
+     see `docs/VERIFY.md` "Changes from the design" for why `glyph` is 0
+     even while a letter is shown.
+- **Reasoning:** CLAUDE.md §2 (framework copies: one line at a time from a
+  wipeable buffer), §1.10, and D-0034. On macOS 26.2, drawing in `draw(_:)`
+  made AppKit's display list (`CG::DisplayListEntryGlyphs`) keep the glyph
+  ids of every drawn line until the lock's run-loop turn ended; drawing into
+  Brev's own buffers leaves nothing there.
+- **Verified:**
+  - WP7: with lines drawn straight into AppKit's context, the view host left
+    `glyph=3` after the lock (the 3 subjects in the thread list;
+    `malloc_logger` backtraces end in
+    `CG::DisplayListEntryGlyphs::setGlyphsAndPositions` under
+    `SecureListView.drawContent`); drawn into Brev's own bitmap, 0 in 3 of 3
+    and 10 of 10 runs.
+  - `scripts/test.sh` at `fb6f140`: harness case 4 (above), case 6 without
+    scribbling (glyph ids left after the lock at 4 096 and 65 000 units, so
+    the needle and scribbling matter), case 7 (the scribble probe: a freed
+    32 KiB block keeps no copy with scribbling, and keeps it without): 5 of
+    5 each. The lock probe: the lock sequence zeroes every content view's
+    pixel buffers and `draw(_:)` draws nothing (a `draw(_:)` that draws
+    content fails it).
+  - WP11 review: the view host's checks "scrolled out of sight: a content
+    view holds no pixel buffers, and its old ones are zero" and "scrolling
+    in: a letter keeps one pool" fail on `32a9682` and pass on the fix (3 of
+    3); 30 letters scrolled in 10 pt steps held 27 MiB of buffers instead of
+    189 MiB. V39 on the Verify build waits for the human run.
+
+### D-0046 — Window hardening and the capture defence as built (D-0034)
+
+- **Date:** 2026-09-28
+- **Decision:** Design §8.1 and §8.2 with D-0034 (WP3, WP11, review round
+  1):
+  1. `Hardening.apply` sets `sharingType = .none`,
+     `isExcludedFromWindowsMenu`, `isRestorable = false` and `tabbingMode =
+     .disallowed`, and recurses into child windows and sheets.
+     `HardenedWindow` (the main window and `ConfirmSheet`; the compose sheet
+     is presented on the main window) applies it in `beginSheet`,
+     `beginCriticalSheet` and `addChildWindow`.
+     `NSWindow.allowsAutomaticWindowTabbing = false`. The main window has no
+     `.miniaturizable` (AppKit shows the button, disabled). There is no
+     `NSAlert`; the open-documents event is ignored so AppKit shows none
+     (D-0063).
+  2. Every view that can show content, the compose sheet's recipient,
+     subject and body and the letter headers included, draws through an
+     `AVSampleBufferDisplayLayer` with `preventsCapture = true` (D-0045).
+     `sharingType = .none` stays the first defence.
+  3. Only `UI/OpaqueView.swift` may name an `AV…`, `CM…` or `CV…` symbol
+     (test.sh), so AVFoundation, CoreMedia and CoreVideo stay in the
+     protected layer (CLAUDE.md §4).
+  4. Not used: detecting capture, window levels and collection behaviours
+     (the capture spike found no protection or signal in them).
+- **Reasoning:** CLAUDE.md §2 (screenshot, recording and screen-reading
+  agents), §3.2 ("sheets and child windows get the same settings as their
+  parent") and D-0034. The capture spike captured a default sheet and a
+  default child window of a `.none` window through every path.
+- **Verified:**
+  - The capture re-run and the view host matrix: D-0052 (the protected layer
+    leaves every pane empty on every path, including the two that capture
+    `.none` windows).
+  - WP11: the view host check "a default-sharing sheet and child window on
+    `MainWindow` get `.none`, not restorable, excluded from the Windows
+    menu" passes. WP11 review: `CVPixelBufferCreate` with only `import
+    AppKit`, `import AVKit` and `import class
+    AVFoundation.AVSampleBufferDisplayLayer` each passed the old import grep
+    and fail the symbol check; test.sh at `fb6f140` passes it.
+  - WP4, `capture-probe` on Brev's onboarding window (Release): excluded
+    from all 8 ScreenCaptureKit paths, from
+    `CGWindowListCreateImage`/`CGDisplayCreateImage` and from `screencapture
+    -x/-R/-V`; `-l` fails; `CGDisplayStream`, `AVCaptureScreenInput` and the
+    `dlsym` build show the window with interface text only (it has no
+    content pane yet).
+  - V9 fails as written: `windows` finds 4 off-screen menu-bar-sized windows
+    with sharing state 1 that every app owns (D-0052, D-0053). V4 to V8 with
+    a letter open wait for the human run.
+
+### D-0047 — Launch hygiene
+
+- **Date:** 2026-09-28
+- **Decision:** Design §8.6 as built (WP3, review round 2),
+  `Shared/LaunchGuard.swift`, the first thing `main.swift` runs:
+  1. Release and Verify refuse any argument besides `argv[0]` (`launch
+     refused: arguments`, `exit(64)`). No `-psn_` exception: `open` passes
+     none, and a Finder or Dock launch is not yet measured.
+  2. The argument domain is emptied with `removeVolatileDomain` followed by
+     `setVolatileDomain([:])`, because on macOS 26.2 `removeVolatileDomain`
+     alone does nothing.
+  3. A launch is unsafe if an environment variable starts with `NSZombie`,
+     `CFZombie`, `NSDebug`, `NSTrace`, `NSDeallocateZombies`,
+     `NSObjCMessageLogging`, `OBJC_`, `MallocStackLogging`, `CFLOG` or
+     `OS_ACTIVITY_DT_MODE`, or `MallocScribble` is not `1`: Brev then
+     re-executes itself once with those variables removed and
+     `MallocScribble=1` (marker `BREV_LAUNCH_CLEANED=1`). It is also unsafe,
+     with no re-exec, if `NSTraceEvents`, `NSZombieEnabled`,
+     `NSDebugEnabled`, `NSDeallocateZombies`, `TSMEventTracing` or one of
+     its 13 `TSMTrace…` siblings is true in `UserDefaults.standard` (global
+     domain included). A launch that stays unsafe shows only
+     `launch.error.unsafe`, and nothing is decrypted in that process.
+  4. The environment is cleaned by a prefix denylist. The launch spike's
+     alternative, an allowlist of what LaunchServices sets, is not built: it
+     waits for the Finder and Dock environments and the owner.
+- **Reasoning:** CLAUDE.md §1.1 and §2 (keyloggers). `NSTraceEvents` only
+  traces with get-task-allow, but that gate is undocumented, so the check
+  stays as the second defence §6 asks for. `TSMEventTracing` traces key
+  events in Release (D-0052, D-0064). An argument-domain override cannot
+  neutralise a `defaults write -g`, because HIToolbox reads the global
+  domain first.
+- **Verified:**
+  - `scripts/test.sh` at `fb6f140`: harness case 2 (LaunchGuard on injected
+    environments and defaults, `TSMEventTracing` asserted by name, and a
+    helper run started with `-NSTraceEvents YES -NSZombieEnabled YES` whose
+    domain is empty afterwards) 5 of 5. WP3 mutations: a remove-only
+    argument domain and a list without `OBJC_` each fail it; the helper run
+    shows removal alone leaves 2 of 2 defaults set.
+  - WP4, the Release build: `open "$APP" --args -NSTraceEvents YES` left no
+    Brev process after 4 s and logged `launch refused: arguments`; `open
+    --env NSZombieEnabled=YES` logged `launch unsafe: environment;
+    re-executing`, then `route onboarding` in the same PID, and `ps -wwE`
+    showed `MallocScribble=1` and no `NSZombieEnabled`; `open --env
+    MallocScribble=0` re-executed with `MallocScribble=1`.
+  - Not yet run: the `defaults write -g` parts of V28, and V49 from the
+    Finder and the Dock.
+
+### D-0048 — Synthetic input: the PID rule and `HumanButton`
+
+- **Date:** 2026-09-28
+- **Decision:** Design §7.1 and §8.5 as built (WP3, WP5, WP8):
+  1. `InputFilter` keeps CLAUDE.md §3.2's rule unchanged: an input event
+     with no `CGEvent`, or with `.eventSourceUnixProcessID != 0`, is
+     dropped, with no exception for Brev's own PID. `BrevApplication`
+     applies it in `sendEvent` and in `nextEvent` to every input type (keys,
+     modifier flags, all mouse buttons, moves and drags, scrolling, gestures
+     including `.quickLook`, `.directTouch` and `.changeMode`, tablets), and
+     logs `dropped synthetic <type> pid=<n>`. Other events (the window
+     server's with PID 0, AppKit's own with Brev's PID) are never filtered.
+     `SecureComposeView` checks again.
+  2. Only accepted input stamps the idle clock (D-0050) and marks
+     `inHumanDispatch`.
+  3. `HumanButton` (every button that unlocks, creates keys, confirms,
+     resets or sends, and the onboarding checkbox): `sendAction` runs only
+     inside human dispatch with a mouse-up or key event that passes the
+     filter; `accessibilityPerformPress` returns false on the button and its
+     cell. Opprett nøkler is enabled only by the checkbox's own human
+     action. An AX press returns success and does nothing, so V13 judges the
+     effect.
+  4. Open: that hardware events carry PID 0 is believed, not measured. If
+     the real keyboard types nothing in the compose sheet, the rule rejects
+     hardware too, and the work stops for the owner. `CGEventPost` at the
+     HID and session taps, System Events, Accessibility Keyboard and Screen
+     Sharing are not yet tested (V32, V33 under the owner's supervision).
+- **Reasoning:** CLAUDE.md §2 (synthetic input is rejected in the app) and
+  §3.2. The input spike measured that the window server does not deliver a
+  posted event with the PID its poster wrote (D-0052), so the rule holds for
+  the paths tested. Widening the rule would need that evidence and a new
+  entry.
+- **Verified:**
+  - `scripts/test.sh` at `fb6f140`: harness case 2 (`InputFilter` on
+    in-memory `CGEvent`s: PID 0 kept; own PID, another PID and none dropped)
+    5 of 5; an own-PID exception fails it (WP3). The lock probe: a synthetic
+    key dropped in `sendEvent`, and one posted to the probe's own PID and
+    dropped in `nextEvent`, do not move the idle clock (the review's B-U32
+    mutant fails it).
+  - WP4 at Brev on onboarding: `poster key --via topid` and `--via ax`, and
+    `poster click` on *Fortsett*: 18 `dropped synthetic` lines, all with the
+    poster's PID (6 key-downs, 6 key-ups, 3 mouse-downs, 3 mouse-ups); the 4
+    keys sent with `AXUIElementPostKeyboardEvent` did not arrive; the page
+    did not change. `axdump --press Fortsett` returned `AXError=0` and the
+    page did not change.
+  - WP8, view host compose mode: `a`, ⌘↩ and Escape posted to its own PID
+    changed nothing (`dropped synthetic 10` ×4, `11` ×3); an AX press on
+    *Send* did nothing.
+
+### D-0049 — Compose input and secure event input
+
+- **Date:** 2026-09-28
+- **Decision:** Design §7.3 as built (WP6, WP8); the §7.4 fallback stays
+  shelved:
+  1. `SecureComposeView` takes keys in `keyDown` only: `ComposeKey` maps key
+     code and flags to an action (⌘↩ sends, ⌘-arrows move, every other ⌘ and
+     ⌃ combination does nothing), and every other key goes to
+     `UCKeyTranslate` on `TISCopyCurrentKeyboardLayoutInputSource()`. It is
+     not an `NSTextInputClient`, `inputContext` is nil, `insertText` is
+     ignored, every `NSTextInputTraits` trait is `.no`,
+     `writingToolsBehavior = .none`, `writingToolsCoordinator = nil`, no
+     Touch Bar. `NSEvent.characters` is never read.
+  2. Dead keys: pending means 0 units and a state that is not 0 (the state
+     keeps upper bits after a composition). The state is reset on focus
+     loss, on a keyboard-layout switch (compared by input source id) and by
+     any named key; Delete removes only a waiting accent. A key repeat is
+     translated with `kUCKeyActionAutoKey`, so a held ´ stays one waiting
+     accent.
+  3. `EditModel` over a `SecretText` (subject 256 units on one line, body 65
+     536): caret moves by composed character, visual line and document;
+     control characters (Home, End, page and function keys) are refused
+     silently; a newline comes only from Return; only an insert over the
+     byte limit beeps. The sheet is a fixed 600 × 460 pt.
+  4. `SecureInput` enables secure event input only while a field is first
+     responder, its window is key and Brev is active, and disables it on
+     blur, resign key, resign active, sheet close and lock, keeping its own
+     Bool so the counted calls balance.
+- **Reasoning:** CLAUDE.md §1.6 and §2 (keyloggers, system AI features). The
+  input spike: the key-only view produced the whole Norwegian table in a
+  sandboxed hardened app, with secure input on and off; it has no input
+  context, so dictation, pickers, press-and-hold, autocorrect and inline
+  predictions have nothing to deliver text to; secure input stays registered
+  while the app is hidden or inactive, so disabling it is required (D-0052).
+- **Verified:**
+  - `scripts/test.sh` at `fb6f140`: harness case 2 (EditModel, ComposeKey,
+    KeyTranslator: the V35 table and the dead keys on
+    `com.apple.keylayout.Norwegian`, ¨ then e on the U.S. layout gives e, a
+    held ´ stays one accent, every ⌘ and ⌃ key that must do nothing does
+    nothing, a typed marker leaves 0 hits after the wipe) 5 of 5. WP6: eight
+    mutations (for example no control-character filter, or the modifiers not
+    passed to `UCKeyTranslate`) each fail it; WP6 review: without the
+    layout-switch reset, ¨ then e on the U.S. layout gave è.
+  - WP8, view host compose mode: secure input on exactly while a field has
+    focus in the key sheet of the active app (`kCGSSessionSecureInputPID` =
+    the host), off after a send, Escape and the lock sequence, and none
+    after quit; 50 AX elements with no marker; `NSTextInputContext.current`
+    nil with a field focused; the pasteboard's `changeCount` unchanged; 0.00
+    % ink in the three fields on every capture path (negative control 2.5 to
+    9.0 %).
+  - Not yet run (real keyboard): V30, V31, V34, V35.
+
+### D-0050 — Lock triggers and the lock sequence
+
+- **Date:** 2026-09-28
+- **Decision:** Design §8.3 and §8.4 as built (WP3, WP10):
+  1. **Triggers**, all of which only lock: `didResignActive` (except while
+     an unlock is in flight); the distributed `com.apple.screenIsLocked`,
+     observed through the selector API with `.deliverImmediately`;
+     `NSWorkspace` `willSleep`, `screensDidSleep` and
+     `sessionDidResignActive`; ⌘L, *Lås* and *Lås Brev*; quit
+     (`applicationWillTerminate`). `screenIsUnlocked` and `didWake` are only
+     logged, and Brev never calls `activate(ignoringOtherApps:)`.
+  2. **Idle:** 300 s without accepted input on Brev's own `CLOCK_MONOTONIC`
+     clock (D-0048), checked every 15 s. Every lock and sync timer runs in
+     the common run-loop modes, so it fires while a menu is open.
+  3. **Not built:** the `CGSessionCopyCurrentDictionary` poll (its
+     `CGSSessionScreenIsLocked` key is undocumented and its value while
+     locked was never seen; added only if V23 fails), a `didHide` trigger (a
+     hide was always followed by resign active), and the activation wait
+     after an unlock (D-0037).
+  4. **Lock sequence** (idempotent, main thread): new generation, timers
+     stopped, `SecureInput` off, tracking cancelled on the main menu and on
+     every submenu (the main menu's own call did not close a popped-up
+     submenu); sheets wiped and ended (the draft is discarded); the current
+     screen wiped; `ContentView.blankAll()` zeroes every pixel buffer in
+     place; `GlyphFlush`; `brev.lock()`; the lock screen (if Brev was
+     unlocked); `window.display()` and `CATransaction.flush()`, so the
+     window server holds the blank frame in the same run-loop turn; `lock
+     reason=<…>`; in the Verify build, `SelfScan`.
+  5. **Known gap (deferred, for the owner):** while the compose sheet or
+     `ConfirmSheet` is attached, AppKit drops a quit (the menu item and the
+     quit Apple Event) without asking the delegate, so quit does not run the
+     lock. Every other trigger still locks.
+- **Reasoning:** CLAUDE.md §3.2 (auto-lock, blank-on-lock) and §1.10. The
+  lock spike and WP10 probes (D-0052): posted events reset the system's HID
+  idle counter, so idle must be Brev's own clock; distributed notifications
+  can be held back while an app is inactive; `display()` alone left the new
+  layer tree uncommitted until the turn ended.
+- **Verified:**
+  - WP10: `tools/viewhost --triggers switch` passed 4 of 4 (with an unlock
+    in flight the Finder becoming active did not lock; once unlocked it ran
+    the whole sequence and logged exactly `lock reason=resignActive`).
+    `--triggers idle --post` locked 301 s after the last input with `lock
+    reason=idle`; 13 ↓ keys posted to the host were dropped and did not
+    reset the clock; the Brev menu, popped up at 290 s, was closed by the
+    lock. The team-signed Release build, frontmost on onboarding: after
+    `open -b com.apple.finder` it logged `lock reason=resignActive`.
+  - WP10 probes: after `display()` alone the old view was still on the
+    window server in 3 of 3 rounds, with `CATransaction.flush()` the lock
+    screen in 3 of 3; a zeroed pixel buffer showed blank at once.
+  - `scripts/test.sh` at `fb6f140`: the lock probe's 12 checks (the lock
+    sequence locks Rust, zeroes every pixel buffer, wipes lists and letters
+    and shows the lock screen; dropped input does not move the idle clock)
+    pass.
+  - Review round 1: with a titled sheet attached, `terminate` and a quit
+    Apple Event returned and the process was alive 3 to 4 s later, in three
+    separate builds; without a sheet it quit. Not yet run: V22 to V25, V46,
+    V47.
+
+### D-0051 — Tests and verification tools
+
+- **Date:** 2026-09-28
+- **Decision:** Design §4.1 (Verify), §10 and §11 as built (WP2 to WP4, WP7,
+  review rounds):
+  1. No XCTest. The Swift CLI harness (`app/Tests`) runs cases 1 to 7, each
+     5 times under `MallocScribble=1`, plus the negative controls without
+     scribbling (case 6 at 4 096 and 65 000 units, case 7). The lock probe
+     (`app/Tests/Lock`) runs `LockController` and `UnlockService` with a
+     software KEK and no window on screen. Both run in test.sh.
+  2. The view host (`tools/viewhost`) runs Brev's real mail window, compose
+     sheet, lock sequence and triggers with fake letters and a software KEK;
+     test.sh only compiles it, VERIFY V53 runs it.
+  3. The Verify configuration is Release plus `BREV_SELFSCAN`
+     (`SelfScan.swift`, `scan.c`); `scripts/build.sh` never builds it, and
+     V50 checks that Release holds no self-scan symbol.
+  4. `tools/verify/` holds the verification tools (`capture-probe`,
+     `capture-probe-26`, `windows`, `axdump`, `poster`, `keylisten`,
+     `padcheck`, `TouchIDProbe.app` and its scrub-0 and scrub-128 variants,
+     `InputLab.app`), built into `core/target/verify` and never linked into
+     Brev.app, and `tools/verify/spikes/` the spikes' sources. The
+     rogue-Brev app and the anchor probe are not built (D-0035).
+  5. test.sh on macOS: `gen-bindings.sh`, `xcodegen generate`, fmt, clippy,
+     the tests, the release scrub tests, the allocator check, the FFI
+     surface checks, the patch marker, the forbidden-API grep (allow-list
+     `scripts/allowed-apis.txt` with reasons), the AV/CM/CV symbol check,
+     the Xcode-minimum check, `cargo audit`, the harness, the lock probe,
+     the view host compile, the tools' type-check and `capture-probe
+     --selftest`, and a team-signed Xcode Debug build. This closes D-0028
+     item 2 (a stale archive).
+- **Reasoning:** CLAUDE.md §1 "ALWAYS" (tests that prove the invariants, and
+  can fail). A hosted XCTest bundle would put a window on screen; nothing in
+  test.sh opens a window or asks for Touch ID.
+- **Verified:**
+  - `scripts/test.sh` at `fb6f140`, macOS 26.2, 2026-09-28: exit 0 in 2 min
+    45 s. Rust: 59 tests (brev-core 31 unit, 11 Phase 1, 10 Phase 2, 3
+    doctests; brev-proto 4) and the 2 release scrub tests; `cargo audit`
+    clean over 123 crates and 1 273 advisories; 14 harness lines, each 5 of
+    5; the lock probe's 12 checks; `capture-probe --selftest` 21 checks; `**
+    BUILD SUCCEEDED **` for the Debug build.
+  - WP4 review: with the old verdict rules put back, 15 of the self-test's
+    checks fail.
+
+### D-0052 — Facts from the GUI spikes and the capture re-run (macOS 26.2, 25C56)
+
+- **Date:** 2026-09-28
+- **Decision:** Facts only; the decisions that use them are D-0034, D-0035
+  and D-0045 to D-0050. The spikes ran on 2026-09-27/28 with small
+  sandboxed, hardened, ad-hoc-signed test apps (bundle ids
+  `no.brev.spike.*`), each checked by a second agent; where the checker
+  disputed a claim, the corrected wording is what is recorded here. Sources
+  are in `tools/verify/spikes/`.
+  1. **Capture (U1) and the re-run.** `sharingType = .none` keeps a window
+     out of every ScreenCaptureKit path tested (display filter, display
+     excluding applications, including filters, `captureImage(in:)`,
+     `captureScreenshot(contentFilter:)` and `(rect:)`, window filter with
+     `includeChildWindows`, `SCStream` frames), out of `screencapture
+     -x/-R/-V` (`-l` fails on a lone `.none` window) and out of
+     `CGWindowListCreateImage`/`CGDisplayCreateImage` from a 14.0 build. It
+     does not keep it out of `CGDisplayStream` (also through `dlsym` from a
+     26.0 build) or `AVCaptureScreenInput`. A default sheet or child window
+     of a `.none` window has sharing state 1 and is captured by every path.
+     WP11 re-ran the two runs whose logs had been lost, with logs kept: a
+     `.none` window at level 0 was captured with its marker readable through
+     `CGDisplayStream` (M = 83.8 %), the `dlsym` build (83.8 %) and
+     `AVCaptureScreenInput` (83.7 %), and excluded everywhere else; the
+     control window was visible on every path (C = 85.3 to 85.4 %). The
+     negative control: with `preventsCapture = false` the protected content
+     was captured (P = 92.4 %/91.3 % through `CGDisplayStream` and `dlsym`,
+     92.2 %/91.1 % through `AVCaptureScreenInput`, 92.4 % through SCK and
+     `screencapture` for the default-sharing window); with `true` only the
+     window background showed (100 %) on every path, at level 0 and at
+     levels 3/4. Against the view host's real views: `--capturable
+     --unprotected` showed the letters on every path (ink 13.9 % letters,
+     8.4 % contacts, 3.1 % threads); the layer alone (`--capturable`) gave
+     0.00 % ink in all three panes on every path; Brev's default gave 0.00 %
+     on the three paths that capture the window and was excluded from the
+     others. Detecting capture and window levels or collection behaviours
+     were not shown to help. Not tested: whether the two leaking paths need
+     the Screen Recording permission, and whether the menu-bar recording
+     indicator shows for them (a window-list watcher saw a Control Center
+     indicator only for SCK and `screencapture`).
+  2. **Input: the PID rewrite (U2).** 20 variants of `CGEventPostToPid`
+     (source nil, private, combined state or HID state, with field 41 left,
+     set to 0, to the target's PID, to 1, or to 0 with state 1) all arrived
+     with a distinct non-zero PID, very likely the poster's, never 0, 1 or
+     the target's; across all runs none of 536 posted key and click events
+     had PID 0 and none reached `sendEvent` without a `CGEvent`.
+     `eventSourceStateID` and `eventSourceUserData` arrive as the poster set
+     them, so neither tells a human from a script; every posted event had
+     uid 503, and whether a poster can change the uid, or what hardware
+     events carry, was not tried. The posted clicks tried arrived with
+     window number 0 and did not press the button.
+     Posted keys reach the first responder of a hidden, inactive app.
+     `AXUIElementPostKeyboardEvent` returns success and delivered nothing to
+     InputLab or to Brev; to the view host its keys arrived with the view
+     host's own PID and were dropped (WP4). Autorepeat key-downs sent with
+     `CGEventPostToPid` never arrived. Not measured: hardware events' PID,
+     state and uid, and `CGEventPost` at the session and HID taps, System
+     Events, Accessibility Keyboard, Voice Control, Screen Sharing and
+     Universal Control.
+  3. **Input: text, secure input, accessibility (U2, U3).** The key-only
+     view produced every V35 entry from posted key codes except Caps Lock
+     and key repeat, identically with secure input on and off;
+     `TISCopyCurrentKeyboardLayoutInputSource` still returns the Norwegian
+     layout under secure input. `UCKeyTranslate` leaves upper bits in the
+     dead-key state after a composition (0x10000 to 0x50000). Secure input
+     works in the sandboxed hardened app, and stays registered session-wide
+     while the app is hidden or inactive until it calls Disable. A
+     listen-only tap for the app's PID saw posted keys with their values
+     while secure input was off and nothing while it was on. With no Edit
+     menu macOS adds no Writing Tools, AutoFill, Dictation or Emoji items.
+     Custom views with the overrides, and even a plain `NSView` or a naive
+     `NSTextInputClient`, expose no text to Accessibility; AX hit tests over
+     views whose `accessibilityHitTest` returns nil give -25208; an AX press
+     on a `HumanButton` returns 0 and does nothing; menu items are
+     AX-pressable with no current event. Every element lists the
+     undocumented `AXReplaceRangeWithText`; four guessed parameter shapes
+     changed nothing.
+  4. **Lock triggers (U4).** Resign active arrived 2 to 10 ms after another
+     app's activation notification (launch, reopen,
+     `NSRunningApplication.activate` from a CLI, another app's
+     self-activation), and 2 to 16 ms after each of 5 hides. Named
+     distributed notifications, also `com.apple.*` names, reach the
+     sandboxed app; in 2 of 2 spike runs a default (block) observer got
+     nothing while the app was inactive until a deliver-immediately post
+     came, while WP10's probe saw no hold-back for an accessory app.
+     `CGSessionCopyCurrentDictionary` works in the sandbox (11 keys;
+     `CGSSessionScreenIsLocked` absent while unlocked).
+     `CGEventSource.secondsSinceLastEventType(.combinedSessionState, …)`
+     works in the sandbox and matches an unsandboxed reading; `postToPid`
+     events reset the `.hidSystemState` counter (6 of 6) and not
+     `.combinedSessionState`. A timer in the common modes fired during menu
+     tracking (12 ticks, 0 for the default mode).
+     `NSApp.activate(ignoringOtherApps:)` activated an app from the
+     background; `NSApp.currentEvent` still held the last posted event
+     inside a notification handler. Not measured: real ⌘-Tab, ⌃⌘Q, sleep,
+     display sleep, and whether the Touch ID panel takes activation (U4.1);
+     the lock spike's own Touch ID step tested the CryptoKit + HPKE path
+     D-0035 replaced.
+  5. **Launch (L, M).** AppKit reads `NSTraceEvents` in `-[NSApplication
+     init]`, and `_DPSSetEventsTraced` turns tracing on only with the
+     get-task-allow entitlement or on internal OS builds (disassembly),
+     which matched the runs: in a build without get-task-allow, `--args
+     -NSTraceEvents YES` logged nothing, while the get-task-allow control
+     printed every key event with its characters on stderr.
+     `removeVolatileDomain` alone left the argument domain in place (the
+     control traced); followed by `setVolatileDomain([:])` it cleared it;
+     WP3 saw the same in Brev's harness. `NSTraceEvents` and 154 debug keys
+     as environment variables had no effect. With 126 and then 28 debug keys
+     of AppKit, Foundation, CoreFoundation and HIToolbox set as arguments,
+     the only key-event output without get-task-allow came from
+     `TSMEventTracing` (TSM queue traces with dead-key state); by static
+     analysis the same flag gates `TSMProcessRawKeyEvent: …
+     virtualKeyCode=%x, modifiers=%x`, and HIToolbox reads it from the
+     global domain first. `open` passes no `-psn_` argument and passes the
+     caller's whole environment; `--env` overrides `LSEnvironment`.
+     `LSEnvironment`'s `MallocScribble=1` is in effect after `open` (a scan
+     after free found 0 marker hits in 79 of 79 runs with it, and 18 686 in
+     each of 6 controls without it); libmalloc scribbles whenever the
+     variable is present, whatever its value; freed blocks of 1 KiB or less
+     were zeroed even without it. `execve` of its own binary works in the
+     sandbox and keeps the PID, the sandbox and the hardened flags; running
+     the binary directly skips `LSEnvironment`. Review round 2: the view
+     host started with `-TSMEventTracing YES` (no LaunchGuard) traced every
+     key-down and key-up of 3 posted keys to stderr (28 lines) with a
+     compose field focused and secure input on. Not measured: Finder and
+     Dock launches, and real typing with all debug keys on.
+  6. **Keys and signing (the anchor spike A, and the keychain spike).** A
+     login-keychain item made by an ad-hoc sandboxed app was created and
+     read back in a later launch with no prompt, but a rebuild could not
+     read it (-25293); any same-user process could overwrite its value
+     silently (`SecItemUpdate`), and an unsandboxed one could delete such an
+     item silently with `SecKeychainItemDelete` (checked on an item an
+     unsandboxed program made; `SecItemDelete` gave -25244); none of 5
+     variants planted a value its creator then read silently. So the anchor
+     would be tamper-evident at best, and it was dropped with D-0035. The
+     owner's Apple Development keys of team `AV26DNQ5SC` let
+     `/usr/bin/codesign` sign without a prompt (partition list includes
+     `apple:`), and a wildcard "Mac Team Provisioning Profile: *"
+     (`AV26DNQ5SC.*`) is installed, which Brev itself is signed with.
+     Verified: an agent session got a profile with `xcodebuild
+     -allowProvisioningUpdates -allowProvisioningDeviceRegistration`, signed
+     a program that is not Brev (the keychain probe) with Brev's App ID and
+     keychain group `AV26DNQ5SC.no.brev.app`, and created, found and deleted
+     a Secure Enclave key in that group, with no prompt (no SecurityAgent
+     log entry). WP5's probe and WP4's `TouchIDProbe` did the same with
+     Brev's own key names. Not tested: a second program reading or replacing
+     items that the real Brev made. This is the risk D-0062 raised and
+     CLAUDE.md §2 now accepts for test letters only.
+  7. **Found while building.** Secure Enclave key items in the keychain
+     report `pdmn=dk` while their ACL says `akpu` (the Enclave enforces the
+     ACL; `sync=0`). Security's software ECIES returns `errSecParam` (-50)
+     for a tampered wrapped DEK. Every regular app, Brev included, owns 4
+     off-screen windows of the menu bar's size with sharing state 1, which
+     show only the menu bar (WP4). `open -a Brev <file>` made AppKit show an
+     unhardened alert with sharing state 1 until Brev ignored the event
+     (D-0063). A quit is dropped while a sheet is attached (D-0050).
+- **Reasoning:** CLAUDE.md §6: where macOS behaves differently from its
+  documentation (`sharingType`, `removeVolatileDomain`), record it and add a
+  second defence. Design §14.2 sends these results here.
+- **Verified:**
+  - The spike and checker results, with their logs, are in the session
+    scratchpad (`p2/{capture,input,lock,launch,anchor}` and the `*-skeptic`
+    folders; volatile) and in the workflow journals. The WP11 re-run logs
+    are `p2impl2/wp11/capture/out/log-check1-level0.txt` and
+    `log-check2-level{0,4}-{nocp,cp}.txt`, with crops.
+  - Human steps still pending: see `docs/USER_SESSION.md` (the capture
+    indicator, typing with the real keyboard, the Finder launch and typing
+    with all debug keys on); the rest is covered by VERIFY rows on the real
+    Brev.
+
+### D-0053 — Phase 2 verification: the machine-run rows, the human rows pending
+
+- **Date:** 2026-09-28
+- **Decision:** Phase 2 is code-complete and its automated checks pass; its
+  definition of done (CLAUDE.md §5: the checklist passes, the build is
+  sandboxed and hardened) is not yet met, because most of `docs/VERIFY.md`
+  needs a human with Touch ID. The machine-run part is recorded below and in
+  `docs/VERIFY-RESULTS.md`. What still needs the owner: the human run
+  (`docs/USER_SESSION.md`); V9, which fails as written because of the 4
+  system menu-bar windows (count only the windows Brev makes, or accept);
+  and the open items in the Phase 2 summary. The open item that was not a
+  row, the signing key on this Mac (D-0062), was accepted by the owner on
+  2026-09-28 for test letters only (CLAUDE.md §2, commit `1aeccc5`); real
+  letters go only on a Mac without that key.
+- **Reasoning:** CLAUDE.md §5 and `docs/VERIFY.md` "Failures and results": a
+  row passes only as written, and a failure is never reworded as residual
+  risk without the owner.
+- **Verified:**
+  - At `fb6f140`, macOS 26.2 (25C56), Xcode 26.2 (17C52), 2026-09-28, nobody
+    at the Mac, on a Release build from `scripts/build.sh` and a Verify
+    build from `tools/verify/build.sh` (both exit 0): V1 passes on both
+    (`flags=0x10000(runtime)`, `TeamIdentifier=AV26DNQ5SC`; entitlements
+    exactly `app-sandbox`, `keychain-access-groups` =
+    [`AV26DNQ5SC.no.brev.app`], `com.apple.application-identifier` and
+    `com.apple.developer.team-identifier`; no `get-task-allow`; `codesign
+    --verify --strict` ok). V2 passes on both (0 forbidden plist keys,
+    `BrevApplication`, `MallocScribble` 1, no nested bundle, `Contents` =
+    `_CodeSignature embedded.provisionprofile Info.plist MacOS PkgInfo
+    Resources`). The `sdef` half of V3 passes (error -192, exit 1). V21
+    passes (indexing enabled; nothing found outside the checkout;
+    `docs/VERIFY.md` found once; no CoreSpotlight, 0
+    `CSSearchable…`/`NSUserActivity` symbols). V50 passes (Release 0
+    self-scan symbols, Verify 10). V45 passes (`scripts/test.sh` exit 0,
+    D-0051). V53 passes: the view host's mail run (37 checks), compose run
+    (46) and `--triggers switch` run (21) each printed PASS and exited 0,
+    and no view host process was left.
+  - WP4 run at `b6f2e3c` (`docs/VERIFY-RESULTS.md`): V1, V2, V21, V45 and
+    V50 pass; partial passes for V3 (`sdef` half), V5 to V7, V11, V13 and
+    V26 (onboarding window only), V19 (no letter written), V22 (resign
+    active, not ⌘-Tab), V28 (arguments and environment), V29 (process part),
+    V40 (keychain part) and V49 (`open` launches); V9 fails as written.
+  - Review round 1: the view host's mail and `--triggers switch` runs passed
+    and its compose run passed 6 of 6 (V53); `open -a <Brev.app> <file>` to
+    a running Debug build added no window and logged `open event ignored
+    count=1` (V54's first part, not yet on Release).
+  - Every other row, and the human half of each partial row, waits for the
+    owner: V3 (`osascript`), V4, V5 to V8 with a letter open, V9 (compose
+    sheet and `ConfirmSheet`), V10, V12 to V20, V22 to V27, V28 (`defaults
+    write -g`), V29 (files), V30 to V44, V46 to V49, V51, V52 and V54.
 
 ### D-0062 — Spec change: the keychain binding does not hold on a Mac with Brev's signing key (records 39e1858; open for the owner)
 
@@ -1484,3 +2441,214 @@ take the numbers after them, so those numbers do not shift again.
   Debug build with the handler added no window and logged `open event
   ignored count=1`; the same event to the Release build of 1873eed added a
   layer-8 window with sharing state 1 (the alert).
+
+### D-0064 — Phase 2 review round 2: the whole FFI surface pinned, TSMEventTracing refused, the idle clock tested, the Xcode minimum
+
+- **Date:** 2026-09-28
+- **Decision:** The confirmed findings of review round 2 are fixed:
+  1. **The whole FFI surface.** D-0063 item 5 held only for `String` and
+     bytes. Any other element type crosses through a converter that neither
+     pin named: a `Vec<u16>` export or record field becomes a Swift
+     `[UInt16]` (`FfiConverterSequenceUInt16`) that nothing wipes, so a
+     whole letter could leave Rust in one call and test.sh stayed green.
+     test.sh now compares the bindings with `scripts/ffi-surface.txt`: every
+     function Rust exports (`uniffi_brev_core_fn_…`) and every line that
+     names a `FfiConverter` type, exactly as often as it occurs. Every value
+     that crosses the FFI goes through a converter, so a new export,
+     argument, result, record field, enum payload or type fails the check
+     until the list is reviewed and updated. The list replaces test.sh's
+     String and Data lists (their lines and reasons are in it); the
+     declaration checks for `String` stay. This narrows D-0063 item 5,
+     which said a body or a name cannot cross unnoticed.
+  2. **TSMEventTracing.** `LaunchGuard.unsafeDefaultKeys` adds HIToolbox's
+     key-event trace `TSMEventTracing` and its thirteen `TSMTrace…`
+     siblings from the launch spike's scan (`tools/verify/spikes/launch/
+     keys-batch.txt`), as the spike recommended; design §8.6 and §14.2 L
+     left the list to the spike. Harness case 2 asserts `TSMEventTracing`
+     by name. VERIFY V28 sets it with `defaults write -g`, as it does
+     `NSTraceEvents`.
+  3. **The idle clock.** The lock probe checks that a synthetic key that
+     `BrevApplication` drops does not stamp `lastHumanInput`: one made in
+     the process and sent through `sendEvent`, and a ↓ key posted to the
+     probe's own PID and pumped through `nextEvent`. The drop log
+     (`dropped synthetic 10/11 pid=…`, read with `OSLogStore`) is the
+     control that the events arrived. The posted part is skipped, and says
+     so, when `CGPreflightPostEventAccess()` is false; it never asks.
+  4. **The Xcode minimum.** `scripts/build.sh`'s install hint and
+     `app/project.yml`'s `xcodeVersion` say Xcode 16.2, as the README has
+     since round 1 (the app uses macOS 15.2 SDK symbols; XcodeGen writes
+     `xcodeVersion` only as `LastUpgradeCheck`). test.sh checks that the
+     three agree.
+- **Reasoning:** CLAUDE.md §1.10 and §3.1 (content crosses the FFI only in
+  960-byte chunks, and the Swift side leaves no buffer unwiped). §2's
+  keylogger threat: secure event input hides keystrokes from event taps,
+  and a trace on stderr would give their count and timing, and by the
+  checker's static analysis their key codes. Design §8.3: only accepted
+  input stamps the idle clock, so posted events cannot keep Brev from
+  idle-locking; before, only the view host's `--triggers idle --post` run
+  checked it, and no VERIFY row requires that run. §1 "ALWAYS": each fix
+  has a check that fails without it. No fix needs the owner or adds a
+  dependency. D-0063 stays as written (entries are append-only).
+- **Spike facts for WP12:** The launch spike (facts 6 and 7) and its
+  checker found: with 126 debug keys of AppKit, Foundation, CoreFoundation
+  and HIToolbox set at once, in a build without get-task-allow, the only
+  key-event output came from `TSMEventTracing` (TSM queue traces with
+  dead-key state, on stderr). By static analysis of HIToolbox, the same
+  flag gates `TSMProcessRawKeyEvent: Processing …, virtualKeyCode=%x,
+  modifiers=%x`, with no get-task-allow check. HIToolbox reads its keys
+  from the global domain (`kCFPreferencesAnyApplication`) before the app's
+  search list, so an argument-domain override cannot neutralise a
+  `defaults write -g`; the spike's option to set the keys false in the
+  argument domain was not taken for that reason. LaunchGuard reads through
+  `UserDefaults.standard`, whose search list holds the global domain; V28
+  checks that in the real app. WP12's entries on launch hygiene and on the
+  GUI-spike results (design D-0045 and D-0057; D-0048 and D-0060 after the
+  renumbering) take these facts over.
+- **Verified:** macOS 26.2, 2026-09-28, each check against its fix
+  reverted or against a mutant. The surface check fails on bindings
+  generated from three Rust mutants: `OpenText::units() -> Vec<u16>` and
+  `ContactRow.name_units: Vec<u16>` (the review's B-F04 and B-F05; round
+  1's checks pass the first) and `OpenText::byte_at(i) -> u32`, which needs
+  no new converter type. Harness case 2 fails with LaunchGuard's old key
+  list. The lock probe fails with the idle stamp moved above the synthetic
+  check in `nextEvent` (the review's B-U32) and in `sendEvent`. The Xcode
+  check fails with build.sh's old hint and with project.yml's old version.
+  The review measured the trace: the view host in compose mode, started
+  with `-TSMEventTracing YES` (no LaunchGuard), traced every key-down and
+  key-up of 3 posted keys to stderr (28 lines) with the body focused and
+  secure input on.
+  `scripts/test.sh` passes.
+
+---
+
+## Phase 2 summary
+
+**Built (2026-09-27 to 2026-09-28, after the design `8dd9b2b`, commits
+`4fda538` to `fb6f140`):**
+
+- WP0: `docs/VERIFY.md`, now 54 rows with commands, tools, coverage and a
+  run order (`4fda538`, `2fc4530`, revised by later packages).
+- WP1: `brev-core`'s UniFFI surface (`ffi.rs`), the echo peers (`echo.rs`),
+  padded columns and schema v2, the zeroing allocator (`08a5670`,
+  `de3e6bb`): D-0038 to D-0042.
+- WP2: the binding patches and the uniffi pin, Swift secret memory, the CLI
+  heap-scan harness (`0fec87d`, `dc2a9ca`): D-0040, D-0044, D-0051.
+- WP3: the app shell: LaunchGuard, the input filter, `BrevApplication`,
+  menus, hardening, the lock sequence, the Verify configuration (`f1c2d30`):
+  D-0043, D-0047, D-0048, D-0050.
+- WP6: the headless compose core, `EditModel` and `KeyTranslator`
+  (`7be0029`, `d27899c`): D-0049.
+- WP5: keychain keys, onboarding, unlock, errors and reset (`33fa863`,
+  `fa2862f`): D-0036, D-0037.
+- WP7: the content views, the mail window, the sync timer and the view host
+  (`7844525`, `a29572f`): D-0043, D-0045.
+- WP11: the protected content layer, hardened sheets and child windows
+  (`32a9682`, `29522b9`): D-0045, D-0046.
+- WP8: the compose sheet, secure input and key-only text entry (`388e71c`):
+  D-0049.
+- WP10: the lock triggers and the blank-on-lock order (`b6f2e3c`): D-0050.
+- WP4: the verification tools, the spike sources and the machine-run VERIFY
+  results (`1a9b723`, `1873eed`): D-0051, D-0053.
+- The review rounds (`3e87bef`, `fb6f140`): D-0063, D-0064.
+- The owner's spec changes during the phase: D-0033 (`db2654a`), D-0034
+  (`e5fd002`), D-0035 (`9398f2c`), the signing-key item (`39e1858`, D-0062;
+  accepted for test letters in `1aeccc5`) and the Phase 3 relay item
+  (`e4f8e1a`).
+- WP9 (the anchor) was dropped with D-0035. WP12 is D-0036 to D-0053 and
+  this summary, without the human run.
+- Automated checks at `fb6f140`: 59 Rust tests and 2 release scrub tests, 14
+  harness lines of 5 runs each, the lock probe's 12 checks, `capture-probe
+  --selftest`'s 21 checks, and the FFI surface, grep and build checks
+  (D-0051).
+
+**Definition of done status (CLAUDE.md §5, Phase 2): not met. Phase 2 is
+code-complete; the human verification is pending.**
+
+| §5 line | Entries | Status |
+|---|---|---|
+| Onboarding explains the trade-offs in Norwegian, creates Enclave keys, wraps a fresh DEK | D-0036, D-0037 | built; V36, V37, V40, V41 pending |
+| Unlock screen → Touch ID → `core.unlock(dek)` | D-0037, D-0039 | built; the lock probe passes; V26, V27, V47, V48, V51 pending |
+| Three-pane window, content panes use `SecureTextView` | D-0043, D-0045 | built; the view host passes (V53); V10, V42 pending |
+| Compose sheet: secure input, synthetic rejection, no pasteboard, no autocorrect, `writingToolsBehavior = .none` | D-0048, D-0049 | built; the view host passes; V13, V14, V30 to V35 pending |
+| Capture exclusion with the protected layer, auto-lock, blank-on-lock | D-0045, D-0046, D-0050 | built; the view host passes; V4 to V8, V22 to V25, V46 pending; V9 fails as written |
+| Two hard-coded contacts through `MockTransport` | D-0042 | built; the Rust tests pass; V42 pending |
+| Stored content padded, schema v2 | D-0041 | built; the Rust tests pass; V18 pending |
+| `docs/VERIFY.md` written and run | D-0053 | written; the machine part run |
+| Checklist passes; build sandboxed and hardened | D-0053 | V1 and V2 pass; the checklist is pending |
+
+Machine-run rows (D-0053, `docs/VERIFY-RESULTS.md`): at `fb6f140`, V1, V2,
+the `sdef` half of V3, V21, V45, V50 and V53 pass. WP4's run at `b6f2e3c`
+passed the parts of V5 to V7, V11, V13, V19, V22, V26, V28, V29, V40 and V49
+that need no Touch ID. V9 fails as written. The first part of V54 passed on
+a Debug build in review round 1.
+
+Pending, because they need a human with Touch ID or a permission prompt: V3
+(`osascript`), V4 to V8 with a letter open, the sheet parts of V9, V10, V12
+to V20, V22 to V27, V28 (`defaults write -g`), V29 (files), V30 to V44, V46
+to V49, V51, V52 and V54. The owner's list, in order, is
+`docs/USER_SESSION.md`.
+
+**Residual risks and limits**
+
+Accepted in CLAUDE.md §2: transient key copies in audited crates and in
+Apple's frameworks; file substitution of the stores; on a Mac that holds
+Brev's team signing key, any same-user program can sign itself into Brev's
+keychain group (accepted on 2026-09-28 while Brev holds only test letters;
+real letters go only on a Mac without the key); keystrokes in event objects
+and the window server; letter pixels in backing stores and the protected
+layer's buffers until blank-on-lock; the echo stores (Phase 2 only); the
+reliance on `MallocScribble=1`.
+
+Not proven, or open until the human run or the owner decides:
+
+- Hardware input is believed to carry source PID 0 but is not measured. If
+  the real keyboard types nothing in the compose sheet, the work stops for
+  the owner (D-0048).
+- `CGEventPost` at the HID and session taps, System Events, Accessibility
+  Keyboard and Screen Sharing are not tested (V32 and V33, under the owner's
+  supervision). Accessibility Keyboard, Voice Control and Switch Control are
+  expected to be rejected, and VoiceOver cannot read letters.
+- Whether the Touch ID panel takes activation. If it does, every unlock ends
+  on the lock screen, and the owner chooses the fix (D-0037, V27, V47).
+- The unlock's stack residue with the real Enclave (V51), and the heap
+  residue in the real app (V39).
+- Whether `com.apple.screenIsLocked` reaches the sandboxed Brev (V23), and
+  sleep and display sleep (V24).
+- Whether `CGDisplayStream` and `AVCaptureScreenInput` need the Screen
+  Recording permission. The protected layer hides content from them either
+  way.
+- LaunchGuard cleans the environment with a denylist; an allowlist waits for
+  the Finder and Dock environments (D-0047).
+- V9: every app has 4 system menu-bar windows with sharing state 1; the
+  owner decides how V9 counts them.
+- The error codes for a lockout and a changed fingerprint are not measured:
+  unknown errors show «Prøv igjen», and "fingers" also needs a changed hash
+  (D-0037).
+- A quit is dropped while a sheet is open (below).
+- Accepted by the design for Phase 2: drafts are discarded on every lock;
+  envelopes are unsigned; bucketed sizes, counts and times are visible on
+  disk.
+
+**Review results**
+
+- Every package had a security and a correctness reviewer, and every finding
+  a skeptic: 67 findings over the eleven packages. 43 were confirmed and
+  fixed in the package's review commit, 20 were judged not real, and 4 were
+  deferred and closed later (WP3's file-based install marker in WP5, WP5's
+  signing-key finding in D-0062, WP7's V39 control in WP7's review).
+- Review round 1 over the whole phase (five finders, three skeptics per
+  finding): 22 findings; 15 confirmed and fixed (`3e87bef`, D-0063), 6 not
+  real, 1 deferred.
+- Review round 2: 10 findings; 6 confirmed and fixed as 4 changes
+  (`fb6f140`, D-0064), 4 not real.
+- Deferred, for the owner: "Quit is silently dropped while the compose sheet
+  or ConfirmSheet is open, so quit never runs the lock". While a sheet is
+  attached, AppKit drops ⌘Q, *Avslutt Brev* and a quit Apple Event (Dock,
+  logout, restart) without asking Brev. Nothing leaks, and every other lock
+  trigger still fires. The skeptics split one each way (fix, defer, not
+  real): the fix (lock, then quit) would also discard a half-written letter
+  on ⌘Q, which is a product choice.
+
+**Next:** Phase 3 (real transport) has started on its own branch. Phase 2
+closes when the human run passes, or each failure has an entry the owner
+accepts.

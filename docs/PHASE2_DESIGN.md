@@ -1,6 +1,6 @@
 # Brev Phase 2: "The locked UI" (final design)
 
-Superseded in part (2026-09-28): the key files and HPKE (§5, and every mention of `identity.se`, `kek.se`, `dek.hpke`, the rogue-Brev test R and the anchor A) by keychain keys and ECIES (D-0035), and drawing in `draw(_:)` or into a bitmap by the protected content layer (D-0034); planned decision numbers shift by three. See the notes at the top of §13, and docs/VERIFY.md "Changes from the design".
+Superseded in part (2026-09-28): the key files and HPKE (§5, and every mention of `identity.se`, `kek.se`, `dek.hpke`, the rogue-Brev test R and the anchor A) by keychain keys and ECIES (D-0035), and drawing in `draw(_:)` or into a bitmap by the protected content layer (D-0034); the decision entries §13 plans are D-0036 to D-0053 in docs/DECISIONS.md, which maps the design's decision numbers to them. See the notes at the top of §13, and docs/VERIFY.md "Changes from the design".
 
 Status: final after review, 2026-09-27. Based on branch `claude/laughing-knuth-yhp8ji` at `d1c800d`. Inputs: CLAUDE.md as of `d1c800d`, docs/DECISIONS.md D-0001 to D-0032, `core/`, `app/`, `scripts/`, the enclave and ffi spikes (the skeptics' corrections override the original claims), the lead's rulings R1 to R6, and 34 review findings (dispositions are returned separately).
 
@@ -615,6 +615,7 @@ Starting points (copy them now; `/private/tmp` is volatile): WP1 `R/core/brev-co
 
 > Keys note (2026-09-28, D-0035): §5's key files + HPKE are replaced by permanent Secure Enclave `SecKey`s in the data protection keychain (access group `AV26DNQ5SC.no.brev.app`), the wrapped DEK as a generic-password item in the same group, `SecKeyCreateDecryptedData` (ECIES) for unwrap, and team signing with automatic provisioning. Anything below about `kek.se`, `identity.se`, `dek.hpke`, HPKE, the rogue-Brev test (R) or the login-keychain anchor (A, WP9) is superseded.
 > Numbering note (2026-09-28): D-0033, D-0034 and D-0035 were used for owner decisions (answers to this design's questions; the capture defence; keychain keys). Every number below shifts by three (D-0033 → D-0036 … D-0058 → D-0061). The topics of D-0055 and D-0056 are already recorded in D-0033. WP11 is no longer conditional: it is part of Phase 2's definition of done (D-0034).
+> Entries note (2026-09-28, WP12): the topics below were written as D-0036 to D-0053, merged where one entry holds several; the key topics follow D-0035, and D-0055/D-0056 are D-0033 items 2 and 3. docs/DECISIONS.md has the table (right after D-0035) that maps each number below, and each shifted number, to its entry. D-0054 to D-0061 are not used.
 
 - D-0033: Phase 2 UniFFI surface: `Brev` + `OpenText`, unit-variant `BrevError`, content in only as `&[u8]` + length, out only as 960-byte chunks, no content `String`; no replies or read state in Phase 2.
 - D-0034: `OpenText` registry; `lock()` closes every open text; Swift reads a text completely and closes it.

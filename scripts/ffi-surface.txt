@@ -1,0 +1,242 @@
+# The whole UniFFI surface of app/Generated/BrevCore.swift (docs/PHASE2_DESIGN.md
+# §2.2; docs/PHASE3_DESIGN.md §5.6), which scripts/test.sh compares with the
+# bindings it just generated (docs/DECISIONS.md D-0064). Content leaves Rust
+# only as OpenText.chunk's 960-byte results; records carry ids, metadata and
+# identity codes (docs/PHASE3_DESIGN.md §6.4), and addresses only as OpenText
+# handles.
+#
+# Two kinds of lines: the name of every function Rust exports
+# (uniffi_brev_core_fn_…), and every line of the bindings that names a
+# FfiConverter type, with its leading and trailing blanks cut (comment lines
+# left out). Every value that crosses the FFI goes through a converter, so a
+# new export, argument, result, record field, enum payload or type changes a
+# line here: a Vec<u16>, for example, brings a FfiConverterSequenceUInt16.
+# The comparison is of sorted lists: the order and the comments here are
+# free, but a line counts as often as it is listed. When the FFI changes,
+# review what crosses, then update this file.
+
+# Exported functions: constructors, methods, top-level functions, and the
+# handle clone and free of the two objects.
+uniffi_brev_core_fn_clone_brev
+uniffi_brev_core_fn_clone_opentext
+uniffi_brev_core_fn_constructor_brev_create
+uniffi_brev_core_fn_constructor_brev_open
+uniffi_brev_core_fn_free_brev
+uniffi_brev_core_fn_free_opentext
+uniffi_brev_core_fn_func_limits
+uniffi_brev_core_fn_func_ping
+uniffi_brev_core_fn_method_brev_accept_new_key
+uniffi_brev_core_fn_method_brev_add_contact
+uniffi_brev_core_fn_method_brev_attach_signature
+uniffi_brev_core_fn_method_brev_cancel_send
+uniffi_brev_core_fn_method_brev_contact_info
+uniffi_brev_core_fn_method_brev_contacts
+uniffi_brev_core_fn_method_brev_is_locked
+uniffi_brev_core_fn_method_brev_lock
+uniffi_brev_core_fn_method_brev_me
+uniffi_brev_core_fn_method_brev_messages
+uniffi_brev_core_fn_method_brev_open_body
+uniffi_brev_core_fn_method_brev_prepare_send
+uniffi_brev_core_fn_method_brev_register
+uniffi_brev_core_fn_method_brev_register_request
+uniffi_brev_core_fn_method_brev_sign_request
+uniffi_brev_core_fn_method_brev_submit
+uniffi_brev_core_fn_method_brev_sync
+uniffi_brev_core_fn_method_brev_threads
+uniffi_brev_core_fn_method_brev_unlock
+uniffi_brev_core_fn_method_opentext_byte_len
+uniffi_brev_core_fn_method_opentext_chunk
+uniffi_brev_core_fn_method_opentext_close
+
+# The converter types and uniffi's protocols for them. No sequence, option or
+# map but the three row lists.
+fileprivate protocol FfiConverter {
+fileprivate protocol FfiConverterPrimitive: FfiConverter where FfiType == SwiftType { }
+fileprivate protocol FfiConverterRustBuffer: FfiConverter where FfiType == RustBuffer {}
+extension FfiConverterPrimitive {
+extension FfiConverterRustBuffer {
+fileprivate enum FfiConverterByRefBytes: FfiConverter {
+fileprivate struct FfiConverterBool : FfiConverter {
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+fileprivate struct FfiConverterString: FfiConverter {
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+fileprivate struct FfiConverterSequenceTypeContactRow: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceTypeMessageRow: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceTypeThreadRow: FfiConverterRustBuffer {
+public struct FfiConverterTypeBrev: FfiConverter {
+public struct FfiConverterTypeBrevError: FfiConverterRustBuffer {
+public struct FfiConverterTypeContactInfo: FfiConverterRustBuffer {
+public struct FfiConverterTypeContactRow: FfiConverterRustBuffer {
+public struct FfiConverterTypeLimits: FfiConverterRustBuffer {
+public struct FfiConverterTypeMeInfo: FfiConverterRustBuffer {
+public struct FfiConverterTypeMessageRow: FfiConverterRustBuffer {
+public struct FfiConverterTypeOpenText: FfiConverter {
+public struct FfiConverterTypeThreadRow: FfiConverterRustBuffer {
+public func FfiConverterTypeBrev_lift(_ handle: UInt64) throws -> Brev {
+public func FfiConverterTypeBrev_lower(_ value: Brev) -> UInt64 {
+public func FfiConverterTypeBrevError_lift(_ buf: RustBuffer) throws -> BrevError {
+public func FfiConverterTypeBrevError_lower(_ value: BrevError) -> RustBuffer {
+public func FfiConverterTypeContactInfo_lift(_ buf: RustBuffer) throws -> ContactInfo {
+public func FfiConverterTypeContactInfo_lower(_ value: ContactInfo) -> RustBuffer {
+public func FfiConverterTypeContactRow_lift(_ buf: RustBuffer) throws -> ContactRow {
+public func FfiConverterTypeContactRow_lower(_ value: ContactRow) -> RustBuffer {
+public func FfiConverterTypeLimits_lift(_ buf: RustBuffer) throws -> Limits {
+public func FfiConverterTypeLimits_lower(_ value: Limits) -> RustBuffer {
+public func FfiConverterTypeMeInfo_lift(_ buf: RustBuffer) throws -> MeInfo {
+public func FfiConverterTypeMeInfo_lower(_ value: MeInfo) -> RustBuffer {
+public func FfiConverterTypeMessageRow_lift(_ buf: RustBuffer) throws -> MessageRow {
+public func FfiConverterTypeMessageRow_lower(_ value: MessageRow) -> RustBuffer {
+public func FfiConverterTypeOpenText_lift(_ handle: UInt64) throws -> OpenText {
+public func FfiConverterTypeOpenText_lower(_ value: OpenText) -> UInt64 {
+public func FfiConverterTypeThreadRow_lift(_ buf: RustBuffer) throws -> ThreadRow {
+public func FfiConverterTypeThreadRow_lower(_ value: ThreadRow) -> RustBuffer {
+return try FfiConverterTypeBrev.lift(handle)
+return FfiConverterTypeBrev.lower(value)
+return try FfiConverterTypeBrevError.lift(buf)
+return FfiConverterTypeBrevError.lower(value)
+return try FfiConverterTypeContactInfo.lift(buf)
+return FfiConverterTypeContactInfo.lower(value)
+return try FfiConverterTypeContactRow.lift(buf)
+return FfiConverterTypeContactRow.lower(value)
+return try FfiConverterTypeLimits.lift(buf)
+return FfiConverterTypeLimits.lower(value)
+return try FfiConverterTypeMeInfo.lift(buf)
+return FfiConverterTypeMeInfo.lower(value)
+return try FfiConverterTypeMessageRow.lift(buf)
+return FfiConverterTypeMessageRow.lower(value)
+return try FfiConverterTypeOpenText.lift(handle)
+return FfiConverterTypeOpenText.lower(value)
+return try FfiConverterTypeThreadRow.lift(buf)
+return FfiConverterTypeThreadRow.lower(value)
+
+# String: no content (design §2.2). A Rust panic's message (content-free,
+# design §14.1), uniffi's two callback error helpers (always emitted; there
+# is no callback), the `dir` and `relay` URL of create and open, and ping's
+# reply.
+throw UniffiInternalError.rustPanic(try FfiConverterString.lift(callStatus.errorBuf))
+callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
+callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
+FfiConverterString.lower(dir),
+FfiConverterString.lower(dir),
+FfiConverterString.lower(relay),
+FfiConverterString.lower(relay),uniffiCallStatus
+return try!  FfiConverterString.lift(try! rustCall() {
+
+# Data (Vec<u8>): ids, identity codes, digests and signatures. The ids passed
+# to acceptNewKey and signRequest (followed by more arguments) and to
+# contactInfo, prepareSend, threads, messages and openBody; acceptNewKey's
+# code; the DER signatures of attachSignature and register; five results:
+# chunk's 960 bytes, the digests of registerRequest and signRequest,
+# addContact's contact id and submit's thread id; and ContactRow.id,
+# MessageRow.id, ThreadRow.id, ThreadRow.contact, ContactInfo.code and
+# .newCode, and MeInfo.code.
+FfiConverterData.lower(contact),
+FfiConverterData.lower(contact),
+FfiConverterData.lower(contact),uniffiCallStatus
+FfiConverterData.lower(contact),uniffiCallStatus
+FfiConverterData.lower(contact),uniffiCallStatus
+FfiConverterData.lower(thread),uniffiCallStatus
+FfiConverterData.lower(message),uniffiCallStatus
+FfiConverterData.lower(newCode),uniffiCallStatus
+FfiConverterData.lower(signature),uniffiCallStatus
+FfiConverterData.lower(signature),uniffiCallStatus
+return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+id: FfiConverterData.read(from: &buf),
+id: FfiConverterData.read(from: &buf),
+id: FfiConverterData.read(from: &buf),
+contact: FfiConverterData.read(from: &buf),
+code: FfiConverterData.read(from: &buf),
+code: FfiConverterData.read(from: &buf)
+newCode: FfiConverterData.read(from: &buf)
+FfiConverterData.write(value.id, into: &buf)
+FfiConverterData.write(value.id, into: &buf)
+FfiConverterData.write(value.id, into: &buf)
+FfiConverterData.write(value.contact, into: &buf)
+FfiConverterData.write(value.code, into: &buf)
+FfiConverterData.write(value.code, into: &buf)
+FfiConverterData.write(value.newCode, into: &buf)
+
+# &[u8] into Rust without a copy: create's DEK and signing key, unlock's DEK,
+# the typed addresses of addContact and registerRequest, signRequest's
+# subject and body.
+FfiConverterByRefBytes.lower(dek) { dekFb in
+FfiConverterByRefBytes.lower(dek) { dekFb in
+FfiConverterByRefBytes.lower(signingKey) { signingKeyFb in
+FfiConverterByRefBytes.lower(address) { addressFb in
+FfiConverterByRefBytes.lower(address) { addressFb in
+FfiConverterByRefBytes.lower(subject) { subjectFb in
+FfiConverterByRefBytes.lower(body) { bodyFb in
+
+# The other arguments and results: signRequest's two lengths, the address
+# lengths of addContact and registerRequest, chunk's index; sync's count and
+# byteLen; isLocked; limits(); the Brev of create and open; openBody's
+# OpenText; contactInfo's ContactInfo and me's MeInfo; the row lists of
+# contacts, threads and messages; the error of the throwing methods that
+# return nothing (acceptNewKey, attachSignature, prepareSend, register,
+# unlock).
+FfiConverterUInt32.lower(subjectLen),
+FfiConverterUInt32.lower(bodyLen),uniffiCallStatus
+FfiConverterUInt32.lower(addressLen),uniffiCallStatus
+FfiConverterUInt32.lower(addressLen),uniffiCallStatus
+FfiConverterUInt32.lower(index),uniffiCallStatus
+return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try!  FfiConverterUInt32.lift(try! rustCall() {
+return try!  FfiConverterBool.lift(try! rustCall() {
+return try!  FfiConverterTypeLimits_lift(try! rustCall() {
+return try  FfiConverterTypeBrev_lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try  FfiConverterTypeBrev_lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try  FfiConverterTypeOpenText_lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try  FfiConverterTypeContactInfo_lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try  FfiConverterTypeMeInfo_lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try  FfiConverterSequenceTypeContactRow.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try  FfiConverterSequenceTypeMessageRow.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+return try  FfiConverterSequenceTypeThreadRow.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
+open func acceptNewKey(contact: Data, newCode: Data)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
+open func attachSignature(signature: Data)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
+open func prepareSend(contact: Data)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
+open func register(signature: Data)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
+open func unlock(dek: Data)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
+
+# Record fields other than the Data above: Limits' four numbers;
+# ContactRow.name, ContactInfo.address and MeInfo.address (OpenText handles:
+# an address is drawn only in the protected layer, docs/PHASE3_DESIGN.md
+# §6.4) and ThreadRow.subject; ContactRow.keyChanged and MeInfo.registered;
+# createdAt of ThreadRow and MessageRow, MessageRow.outgoing; and the rows in
+# the lists.
+maxSubject: FfiConverterUInt32.read(from: &buf),
+maxBody: FfiConverterUInt32.read(from: &buf),
+chunk: FfiConverterUInt32.read(from: &buf),
+maxAddress: FfiConverterUInt32.read(from: &buf)
+FfiConverterUInt32.write(value.maxSubject, into: &buf)
+FfiConverterUInt32.write(value.maxBody, into: &buf)
+FfiConverterUInt32.write(value.chunk, into: &buf)
+FfiConverterUInt32.write(value.maxAddress, into: &buf)
+name: FfiConverterTypeOpenText.read(from: &buf),
+FfiConverterTypeOpenText.write(value.name, into: &buf)
+address: FfiConverterTypeOpenText.read(from: &buf),
+address: FfiConverterTypeOpenText.read(from: &buf),
+FfiConverterTypeOpenText.write(value.address, into: &buf)
+FfiConverterTypeOpenText.write(value.address, into: &buf)
+subject: FfiConverterTypeOpenText.read(from: &buf)
+FfiConverterTypeOpenText.write(value.subject, into: &buf)
+keyChanged: FfiConverterBool.read(from: &buf)
+FfiConverterBool.write(value.keyChanged, into: &buf)
+registered: FfiConverterBool.read(from: &buf),
+FfiConverterBool.write(value.registered, into: &buf)
+createdAt: FfiConverterInt64.read(from: &buf),
+createdAt: FfiConverterInt64.read(from: &buf),
+FfiConverterInt64.write(value.createdAt, into: &buf)
+FfiConverterInt64.write(value.createdAt, into: &buf)
+outgoing: FfiConverterBool.read(from: &buf)
+FfiConverterBool.write(value.outgoing, into: &buf)
+seq.append(try FfiConverterTypeContactRow.read(from: &buf))
+FfiConverterTypeContactRow.write(item, into: &buf)
+seq.append(try FfiConverterTypeMessageRow.read(from: &buf))
+FfiConverterTypeMessageRow.write(item, into: &buf)
+seq.append(try FfiConverterTypeThreadRow.read(from: &buf))
+FfiConverterTypeThreadRow.write(item, into: &buf)

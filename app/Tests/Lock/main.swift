@@ -2,15 +2,20 @@
 // zeroes the pixels (review round 1).
 //
 // A CLI process that scripts/test.sh builds and runs: no window on screen, no
-// prompt, no keychain, no posted event. It is built from
-// app/Sources/{Shared,App,UI,Keys}, the patched bindings and the release
-// archive, never linked into Brev.app. The DEK is wrapped to a software P-256
-// key and the identity key is a software key too, as in the heap-scan
-// harness (app/Tests/main.swift). The letters on the mail screen come from a
-// second user through the relay scripts/test.sh starts (BREV_RELAY_URL). It
-// runs the real LockController and UnlockService, and checks what the
-// harness (Shared/ only) and the view host (a window, never run by test.sh)
-// cannot:
+// prompt, no keychain, and no event posted anywhere but to itself. It is
+// built from app/Sources/{Shared,App,UI,Keys}, the patched bindings and the
+// release archive, never linked into Brev.app. The DEK is wrapped to a
+// software P-256 key and the identity key is a software key too, as in the
+// heap-scan harness (app/Tests/main.swift). The letters on the mail screen
+// come from a second user through the relay scripts/test.sh starts
+// (BREV_RELAY_URL). It runs the real BrevApplication, LockController and
+// UnlockService, and checks what the harness (Shared/ only) and the view
+// host (a window, never run by test.sh) cannot:
+// - a synthetic key that BrevApplication drops, in sendEvent and in
+//   nextEvent (a ↓ key posted to this process), does not move the idle
+//   clock, so posted input cannot keep Brev from idle-locking (design
+//   §8.3); the drop log is the control that the events arrived. The posted
+//   part is skipped, and says so, if this process may not post events;
 // - a successful unlock that LockController discards (Brev not the active
 //   app, or a lock meanwhile) leaves Rust locked (design §5.4 step 3);
 // - the lock sequence on the mail screen wipes it, the contact header's
@@ -39,6 +44,7 @@
 
 import AppKit
 import LocalAuthentication
+import OSLog
 import Security
 
 setvbuf(stdout, nil, _IOLBF, 0)
@@ -105,6 +111,52 @@ guard let relay = getenv("BREV_RELAY_URL").map({ String(cString: $0) }), !relay.
     print("FAIL the lock probe needs BREV_RELAY_URL (the relay scripts/test.sh starts)")
     exit(2)
 }
+
+// MARK: - Dropped input does not move the idle clock (BrevApplication)
+
+/// What this process logged in `category` of Brev's subsystem since `since`.
+func logged(_ category: String, since: Date) -> [String] {
+    guard let store = try? OSLogStore(scope: .currentProcessIdentifier),
+          let entries = try? store.getEntries(at: store.position(date: since),
+                                              matching: NSPredicate(format: "subsystem == %@ AND category == %@",
+                                                                    "no.brev.app", category))
+    else { return ["(this process's log could not be read)"] }
+    return entries.compactMap { ($0 as? OSLogEntryLog)?.composedMessage }
+}
+
+let idleClock = BrevApplication.lastHumanInput
+let since = Date()
+let drop10 = "dropped synthetic 10 pid=\(getpid())", drop11 = "dropped synthetic 11 pid=\(getpid())"
+// sendEvent: a key event made in this process carries its PID.
+if let e = CGEvent(keyboardEventSource: nil, virtualKey: 125, keyDown: true).flatMap(NSEvent.init(cgEvent:)) {
+    NSApp.sendEvent(e)
+}
+check("sendEvent: a dropped key does not move the idle clock (control: it was dropped)",
+      BrevApplication.lastHumanInput == idleClock
+          && logged("input", since: since) == [drop10],
+      "\(logged("input", since: since))")
+// nextEvent: a ↓ key posted to this process (never to another).
+if CGPreflightPostEventAccess() {
+    for down in [true, false] {
+        CGEvent(keyboardEventSource: nil, virtualKey: 125, keyDown: down)?.postToPid(getpid())
+    }
+    var returned = 0
+    let end = Date(timeIntervalSinceNow: 1)
+    while Date() < end {
+        guard let e = NSApp.nextEvent(matching: .any, until: Date(timeIntervalSinceNow: 0.05), inMode: .default, dequeue: true)
+        else { continue }
+        if e.type == .keyDown || e.type == .keyUp { returned += 1 }
+        NSApp.sendEvent(e)
+    }
+    let dropped = logged("input", since: since)
+    check("nextEvent: a posted key is not returned and does not move the idle clock (control: both events dropped)",
+          returned == 0 && BrevApplication.lastHumanInput == idleClock
+              && dropped == [drop10, drop10, drop11],
+          "returned \(returned), clock moved \(BrevApplication.lastHumanInput != idleClock), log \(dropped)")
+} else {
+    print("skip nextEvent's idle-clock check: this process may not post events")
+}
+
 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("brev-lock-probe-\(getpid())")
 try? FileManager.default.removeItem(at: dir)
 try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

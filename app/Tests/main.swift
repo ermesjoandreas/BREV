@@ -650,6 +650,13 @@ func caseShell() {
         check("LaunchGuard: the default \(key) makes a launch unsafe, and re-executing cannot help",
               on == .unsafe && onDirty == .unsafe && LaunchGuard.verdict(environment: safe, defaults: defaults) == .safe)
     }
+    // The loop above only tests the keys that are listed. HIToolbox's
+    // key-event trace works in Release (launch spike, D-0064), so it must be.
+    defaults.register(defaults: ["TSMEventTracing": true])
+    let tsm = LaunchGuard.verdict(environment: safe, defaults: defaults)
+    defaults.register(defaults: ["TSMEventTracing": false])
+    check("LaunchGuard: the default TSMEventTracing (HIToolbox's key-event trace) makes a launch unsafe",
+          tsm == .unsafe && LaunchGuard.verdict(environment: safe, defaults: defaults) == .safe)
     // Arguments reach the argument domain: a helper run started with two.
     let helper = Process()
     helper.executableURL = Bundle.main.executableURL

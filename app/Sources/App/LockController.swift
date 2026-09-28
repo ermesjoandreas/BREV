@@ -1,8 +1,8 @@
 // LockController.swift — when Brev locks, and the lock sequence.
 //
 // Upholds CLAUDE.md §3.2 (auto-lock, blank-on-lock) and §1.10 (plaintext is
-// wiped on lock; docs/PHASE2_DESIGN.md §8.3, §8.4; D-0052 in the shifted
-// numbering). Brev locks when it resigns active (not while a Touch ID unlock
+// wiped on lock; docs/PHASE2_DESIGN.md §8.3, §8.4; docs/DECISIONS.md
+// D-0050). Brev locks when it resigns active (not while a Touch ID unlock
 // is in flight, whose panel may take activation, nor during a signature's
 // prompt if LockState's U4 switch says that its panel does;
 // docs/PHASE3_DESIGN.md §3.2), when the screen locks,
@@ -12,8 +12,8 @@
 // LockState; this file observes the triggers and runs the sequence. Main
 // thread only.
 //
-// Facts from the lock spike and WP10 (macOS 26.2; D-0060 in the shifted
-// numbering): resign active arrived within 16 ms of another app's
+// Facts from the lock spike and WP10 (macOS 26.2; docs/DECISIONS.md
+// D-0052): resign active arrived within 16 ms of another app's
 // activation or a hide (real ⌘-Tab not yet measured). AppKit suspends
 // distributed notifications while an app is inactive, and in the spike an
 // observer with the default behaviour did not get one until later, so the
