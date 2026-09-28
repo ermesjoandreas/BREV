@@ -1,4 +1,5 @@
-// SecureComposeView.swift — one compose field: the subject or the body.
+// SecureComposeView.swift — one compose field: the subject, the body or an
+// address.
 //
 // Upholds CLAUDE.md §1.2, §1.3, §1.6, §1.10, §2 and §3.2
 // (docs/PHASE2_DESIGN.md §6.2, §7.3, §8.5). The text is an EditModel's
@@ -23,7 +24,9 @@
 // (ContentView, D-0034). The view is the document view of an NSScrollView:
 // the body wraps at the scroll view's width and grows down, the subject is
 // one line that grows sideways, and either scrolls to keep the caret in
-// sight.
+// sight. An address field (docs/PHASE3_DESIGN.md §6.2, §6.5) is the same
+// view with EditModel's address charset: a typed address is contact data,
+// so it is handled like content.
 
 import AppKit
 
@@ -42,6 +45,9 @@ final class SecureComposeView: ContentView, NSTextInputTraits {
     var onCancel: () -> Void = {}
     /// Tab, ⇧Tab, and Return in the subject.
     var onOtherField: () -> Void = {}
+    /// Return in a single-line field that is alone on its screen (an
+    /// address): when set, Return does this instead of `onOtherField`.
+    var onReturn: (() -> Void)?
     /// False while the compose sheet sends a letter it has already sealed:
     /// keys that would change the text do nothing (the caret still moves).
     var isEditable = true
@@ -55,9 +61,9 @@ final class SecureComposeView: ContentView, NSTextInputTraits {
     private var focusObservers: [NSObjectProtocol] = []
 
     /// A field of at most `maxBytes` UTF-8 bytes (Rust's limits()); the
-    /// body is `multiline`, the subject is not.
-    init(maxBytes: Int, multiline: Bool) {
-        model = EditModel(maxBytes: maxBytes, multiline: multiline)
+    /// body is `multiline`, the subject and an address are not.
+    init(maxBytes: Int, multiline: Bool, charset: EditModel.Charset = .text) {
+        model = EditModel(maxBytes: maxBytes, multiline: multiline, charset: charset)
         keys = KeyTranslator(.current)!   // only a named layout can be missing
         super.init(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
         if #available(macOS 15.2, *) { writingToolsCoordinator = nil }
@@ -185,7 +191,7 @@ final class SecureComposeView: ContentView, NSTextInputTraits {
         case .cancel: onCancel()
         case .otherField: onOtherField()
         case .newline:
-            guard model.multiline else { return onOtherField() }
+            guard model.multiline else { return (onReturn ?? onOtherField)() }
             if model.insertNewline() { edited() } else { NSSound.beep() }
         case .deleteBackward: if model.deleteBackward() { edited() }
         case .deleteForward: if model.deleteForward() { edited() }

@@ -139,8 +139,21 @@ waiting() {  # the number of letters the relay holds (Phase 3; read-only)
   design's fallback, a second macOS user account. U4 (WP5) is Phase 3 WP5's
   measurement of whether the Touch ID panel makes Brev resign active (the
   part of the GUI-spike item U4 that is still unmeasured; design §3.2), and
-  the send-prompt rule WP5 applies from it. Update the row from the answer
-  before the run. Under Q4's fallback, Brev B is the same Brev.app run by
+  the send-prompt rule WP5 applies from it. WP5 built the rule for both
+  outcomes behind one switch, `LockState.signPanelTakesActivation`, which is
+  false (the prompt keeps auto-lock, the safe side) until the owner measures
+  U4: the first Send or Registrer on the Release build, then
+  `/usr/bin/log show --last 5m --predicate 'subsystem == "no.brev.app" AND category == "touchid"'`.
+  No line: the panel does not take activation, and false stays. The line
+  `resign active during Touch ID (sign)` (Brev also locked at once, and the
+  lock log says `lock reason=resignActive`): the panel takes activation; set
+  the switch to true and rebuild, and Brev then blanks every content view
+  for the prompt, ignores resigning active during it only, and locks when it
+  ends unless Brev is the active app again (V62 still locks, at the prompt's
+  end). Every unlock already logs `resign active during Touch ID (unlock)`
+  when its panel takes activation (without locking), so the unlock rows
+  measure the same thing with no extra prompt. Update the row from the
+  answer before the run. Under Q4's fallback, Brev B is the same Brev.app run by
   the second user: its container and processes are that user's, so
   `pgrep -x Brev` also matches it (use `pgrep -x -u "$USER" Brev`) and V54's
   `lsof` needs `sudo` to see its sockets. Q1 (B) changes where the relay's
@@ -222,7 +235,7 @@ waiting() {  # the number of letters the relay holds (Phase 3; read-only)
 | V66 | No ATS, no URLSession, no pasteboard | `plutil -p Info.plist` has no `NSAppTransportSecurity`; `nm -u Brev` has no `NSURLSession`; the forbidden-API grep passes with `allowed-apis.txt`'s pasteboard lines unchanged (only OpaqueView's Services override) | A | – |
 | V67 | New controls | V9 (window exclusion) on the address page, `AddContactSheet` and the accept `ConfirmSheet`; V13 (AX press refused) on *Registrer* with `$ADDR_A` typed, *Legg til* with `$ADDR_B` typed (a valid address, so that a press that gets through shows a dialog, a request or a new contact, not an address error), *Godta ny kode* and the accept `ConfirmSheet`'s *Godta*: no Touch ID dialog, no `/v1/register` or `/v1/lookup` in the relay trace, no new sheet, `$D` unchanged; record the `AXError` | A (H opens and looks, as in V9 and V13) | per D-0060 (U3) |
 | V68 | No contact data in AX or capture | with a contact whose address is a marker (`$ADDR_B`, selected, so the header shows both addresses and codes): V11's AX dump has neither address marker nor any identity code (6 groups of 5 of A–Z and 2–7); V5–V7's capture (`capture-probe` with the header's protected view as a `--pane`) shows the header blank, while a control `--pane` over one of the header's labels shows ink in every path that captures the window, and Brev does not lock during the run (`--pane` turns off the probe's own check for that); controls as in V11 and V6 | A | per D-0060 (U1, U3) |
-| V69 | The view host's checks | no Brev needed; on the Release commit, nobody using the Mac: the view host (`tools/viewhost`: Brev's mail window, compose sheet, lock sequence and triggers with fake letters and a software KEK) prints PASS in mail mode (`--hold 1 --scan --post`: the protected layer, `draw(_:)` empty, pixel buffers zeroed on scroll-out and on lock, the Rust session locked, hardened sheets and child windows, a posted key dropped, the scribble probe), compose mode (`--compose --hold 1 --scan --post`: key-only typing, the ways in that must fail, secure input, the sheet wiped and freed after a send, Escape and a lock) and `--triggers switch` (switching app locks, not while an unlock is in flight). The compose and switch runs make the view host active, and the switch run brings the Finder to the front | A | – |
+| V69 | The view host's checks | no Brev needed; on the Release commit, nobody using the Mac: the view host (`tools/viewhost`: Brev's mail window, compose sheet, lock sequence and triggers with fake letters and a software KEK) prints PASS in mail mode (`--hold 1 --scan --post`: the protected layer, `draw(_:)` empty, pixel buffers zeroed on scroll-out and on lock, the Rust session locked, hardened sheets and child windows, a posted key dropped, the scribble probe), compose mode (`--compose --hold 1 --scan --post`: key-only typing, the ways in that must fail, secure input, the sheet wiped and freed after a send, Escape and a lock) contacts mode (`--contacts --hold 1`, Phase 3: the address page, `AddContactSheet`, the contact header, a changed key and the accept `ConfirmSheet`, each hardened, with *Registrer*, *Legg til*, *Godta ny kode* and *Godta* refusing a click made in code and an AX press (no signature, no `/v1/register` or `/v1/lookup` in the relay's trace), no address marker or identity code in the accessibility tree, addresses and codes only in the protected layer, and the lock sequence wiping all of it: the machine half of V67 and V68, run in process; during its three holds a driver can also run `$T/windows`, `$T/axdump` and `$T/axdump --press` against it) and `--triggers switch` (switching app locks, not while an unlock is in flight, which logs U4's measurement line). The compose and switch runs make the view host active, and the switch run brings the Finder to the front | A | – |
 | V70 | Open-documents event | Brev running (onboarding or the lock screen), and again unlocked with the compose sheet open and a field focused (start with a delay): `open -a "$APP" <any file>` adds no window to `$T/windows Brev` (AppKit's "cannot open" alert would be an unhardened window with sharing state 1 that takes key from the sheet and turns secure input off); with the sheet open, `kCGSSessionSecureInputPID` is still Brev's PID; log `open event ignored count=1` | A (H opens) | – |
 
 ## Commands
@@ -450,6 +463,7 @@ grep -c 'window captured, ink in label$' "$R/v68-legacy.txt"   # > 0 (control: t
 VH="$(tools/viewhost/build.sh)"                            # needs the archive and bindings (scripts/test.sh or build.sh ran)
 env MallocScribble=1 "$VH" --hold 1 --scan --post > "$R/v69-mail.txt"; echo "exit=$?"              # exit=0
 env MallocScribble=1 "$VH" --compose --hold 1 --scan --post > "$R/v69-compose.txt"; echo "exit=$?"  # exit=0
+env MallocScribble=1 "$VH" --contacts --hold 1 > "$R/v69-contacts.txt"; echo "exit=$?"             # exit=0
 "$VH" --triggers switch > "$R/v69-switch.txt"; echo "exit=$?"                                       # exit=0
 tail -n 1 "$R"/v69-*.txt                                   # PASS in each; no FAIL line anywhere
 
@@ -571,11 +585,11 @@ New mechanisms in the Phase 3 design:
 | `network.client`, never `network.server`; no ATS key; `URLSession` forbidden (§5.5) | V1, V53, V66 |
 | `127.0.0.1` only: brev-core's URL rule and the relay's `--listen` rule (§4.5, §5.1) | V54, V45 |
 | No request while locked; no network under the session mutex (§5.2, §5.3) | V64, V62, V45 |
-| One Touch ID per letter, none to retry; the send prompt keeps auto-lock (§3.2, §3.5) | V56, V63, V62, V26 |
-| Address page and registration after the first unlock; address rules (§3.2, §6.5, Q3) | V55, V67 |
+| One Touch ID per letter, none to retry; the send prompt keeps auto-lock (§3.2, §3.5), or with U4's switch on blanks the content and locks at the prompt's end unless Brev is active | V56, V63, V62, V26, V45 (lock probe, both positions) |
+| Address page and registration after the first unlock; address rules (§3.2, §6.5, Q3) | V55, V67, V69 (contacts mode), V45 (harness: the address charset; lock probe: wiped on lock) |
 | Schema v3: one store, sealed addresses and `pending` (§6.1) | V17, V18, V40, V41 |
-| Contact data drawn only in the protected layer; addresses in no log or crash report and gone on lock (§6.4) | V68, V17, V19, V20, V46 |
-| New sheets and buttons: `AddContactSheet`, contact header, accept `ConfirmSheet` (§6.5) | V67, V60, V68 |
+| Contact data drawn only in the protected layer; addresses in no log or crash report and gone on lock (§6.4) | V68, V17, V19, V20, V46, V69 (contacts mode), V45 (lock probe) |
+| New sheets and buttons: `AddContactSheet`, contact header, accept `ConfirmSheet` (§6.5) | V67, V60, V68, V69 (contacts mode) |
 | Heap residue with letters to and from the network (the draft and `sign_request`'s UTF-8 copies, §3.2) | V65 |
 | Two instances by bundle id (§7) | V57 |
 | Echo peers removed (§1.2) | V17, V41 |

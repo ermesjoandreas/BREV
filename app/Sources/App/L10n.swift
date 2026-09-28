@@ -2,8 +2,9 @@
 //
 // Upholds CLAUDE.md §3.2 (UI in bokmål, strings in Localizable.strings) and
 // §1.5 (docs/PHASE2_DESIGN.md §5.6): every string here is fixed interface
-// text. None is ever built from content; the only argument is a date
-// (metadata).
+// text. None is ever built from content, and none takes an address, a
+// name or an identity code (docs/PHASE3_DESIGN.md §6.4, §6.6); the only
+// argument is a date (metadata).
 
 import Foundation
 
@@ -44,7 +45,16 @@ enum L10n {
     static let resetConfirmOK = tr("reset.confirm.ok")
     static let resetConfirmCancel = tr("reset.confirm.cancel")
 
+    static let addressTitle = tr("address.title")
+    static let addressBody = tr("address.body")
+    static let addressRegister = tr("address.register")
+    static let registerReason = tr("register.reason")
+    static let addressErrorTaken = tr("address.error.taken")
+    static let addressErrorInvalid = tr("address.error.invalid")
+    static let addressErrorFailed = tr("address.error.failed")
+
     static let mailNew = tr("mail.new")
+    static let mailAddContact = tr("mail.addcontact")
     static let mailLock = tr("mail.lock")
     static let mailNoThreads = tr("mail.nothreads")
     /// "Sendt <date>".
@@ -62,6 +72,27 @@ enum L10n {
     static let composeRetry = tr("compose.retry")
     static let sendReason = tr("send.reason")
     static let netError = tr("net.error")
+
+    static let contactTitle = tr("contact.title")
+    static let contactField = tr("contact.field")
+    static let contactAdd = tr("contact.add")
+    static let contactCancel = tr("contact.cancel")
+    static let contactErrorNotFound = tr("contact.error.notfound")
+    static let contactErrorDuplicate = tr("contact.error.duplicate")
+    static let contactErrorSelf = tr("contact.error.self")
+    static let contactErrorFailed = tr("contact.error.failed")
+
+    static let headerMe = tr("header.me")
+    static let headerCode = tr("header.code")
+    static let contactChanged = tr("contact.changed")
+    static let contactNewCode = tr("contact.newcode")
+    static let contactAccept = tr("contact.accept")
+
+    static let acceptConfirmTitle = tr("accept.confirm.title")
+    static let acceptConfirmBody = tr("accept.confirm.body")
+    static let acceptConfirmOK = tr("accept.confirm.ok")
+    static let acceptConfirmCancel = tr("accept.confirm.cancel")
+    static let acceptError = tr("accept.error")
 
     static let menuAppTitle = tr("menu.app.title")
     static let menuAppLock = tr("menu.app.lock")

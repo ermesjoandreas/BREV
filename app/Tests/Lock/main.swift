@@ -13,9 +13,17 @@
 // cannot:
 // - a successful unlock that LockController discards (Brev not the active
 //   app, or a lock meanwhile) leaves Rust locked (design §5.4 step 3);
-// - the lock sequence on the mail screen wipes it, zeroes every content
-//   view's pixel buffers in place, locks Rust and shows the lock screen
-//   (design §8.4; D-0034);
+// - the lock sequence on the mail screen wipes it, the contact header's
+//   addresses and codes included, zeroes every content view's pixel buffers
+//   in place, locks Rust and shows the lock screen (design §8.4; D-0034;
+//   docs/PHASE3_DESIGN.md §6.4);
+// - the lock sequence on the address page wipes the typed address and
+//   zeroes its pixels (docs/PHASE3_DESIGN.md §6.5);
+// - a signature's Touch ID prompt with LockState's U4 switch in both
+//   positions (docs/PHASE3_DESIGN.md §3.2): on, every content view is blank
+//   during the prompt, and as this process is never the active app, its end
+//   locks Brev and drops the signature; off, the content stays and the
+//   signature is used;
 // - AppKit's own drawing of a content view (draw(_:), for print and PDF
 //   output) draws nothing (design §7.1);
 // - UnlockService locks Rust again when its closure fails after
@@ -225,6 +233,12 @@ let drawn = inSight.filter { $0.pool.contains(where: hasPixels) }
 check("control: the contacts, threads and letters are pixels in their buffers",
       drawn.contains { $0 is SecureListView } && drawn.contains { $0 is SecureTextView },
       "\(drawn.count) of \(inSight.count) views in sight drew")
+let header = mail.header
+check("control: the header shows both addresses and codes, as pixels in their buffers",
+      [header.addresses, header.codes].allSatisfy { (v: ContactTextView) in
+          v.lines.allSatisfy { $0 != nil } && drawn.contains { $0 === v }
+      }
+          && header.codes.lines.allSatisfy { $0?.length == 35 } && !header.showsKeyChange)
 check("draw(_:) of every content view in sight draws nothing (print and PDF output)",
       !inSight.isEmpty && inSight.allSatisfy { !drawInks($0, $0.visibleRect.intersection($0.bounds)) })
 
@@ -235,8 +249,86 @@ check("lock: every pixel buffer of every content view is zero, also those of let
 check("lock: the lists and letters are wiped",
       all(SecureListView.self, in: mail.view).allSatisfy { $0.count == 0 }
           && all(LetterStackView.self, in: mail.view).allSatisfy { $0.isEmpty })
+check("lock: the header's addresses and codes are wiped",
+      all(ContactTextView.self, in: header).allSatisfy { $0.lines.allSatisfy { $0 == nil } } && header.newCode == nil)
 check("lock: Rust is locked", session.brev.isLocked())
 check("lock: the lock screen is shown", lockScreens == 1, "\(lockScreens)")
+
+// MARK: - The lock sequence on the address page
+
+guard unlockRust() else {
+    check("unlock for the address page", false)
+    finish()
+}
+_ = lock.state.endUnlock(lock.state.beginUnlock(), succeeded: true, appActive: true)
+let page = AddressViewController(session: session) { _, done in done(.failure(BrevError.Signing)) }
+window.root.show(page)
+page.view.layoutSubtreeIfNeeded()
+// Typed as a key-down with source PID 0 per unit, as the hardware's arrive,
+// with key codes KeyTranslator finds on this Mac's layout.
+var keyFor: [UInt16: (UInt16, CGEventFlags)] = [:]
+if let t = KeyTranslator(.current) {
+    for f in [CGEventFlags(), .maskShift] {
+        for k in UInt16(0)..<51 {
+            t.reset()
+            t.translate(keyCode: k, flags: f) { u in if u.count == 1, keyFor[u[0]] == nil { keyFor[u[0]] = (k, f) } }
+        }
+    }
+}
+for u in "brev-address".utf16 {
+    guard let (k, f) = keyFor[u], let cg = CGEvent(keyboardEventSource: nil, virtualKey: k, keyDown: true) else { continue }
+    cg.flags = f
+    cg.setIntegerValueField(.eventSourceUnixProcessID, value: 0)
+    NSEvent(cgEvent: cg).map(page.field.keyDown)
+}
+page.field.updateLayer()
+let fieldPool = page.field.pool
+check("control: the address typed on the address page is pixels in the field's buffers",
+      page.field.model.text.length == 12 && fieldPool.contains(where: hasPixels))
+lock.lock(.manual)
+check("lock: the address page's field is wiped, its pixels zero, Rust locked",
+      page.field.model.text.length == 0 && (0..<page.field.model.text.maxUnits).allSatisfy { page.field.model.text.units[$0] == 0 }
+          && !fieldPool.contains(where: hasPixels) && session.brev.isLocked() && lockScreens == 2,
+      "length \(page.field.model.text.length), lock screens \(lockScreens)")
+
+// MARK: - A signature's prompt, with the U4 switch on and off
+
+for takes in [true, false] {
+    let signLock = LockController(state: LockState(signPanelTakesActivation: takes))
+    signLock.window = window
+    signLock.session = session
+    var screens = 0
+    signLock.showLockScreen = { screens += 1 }
+    guard unlockRust() else {
+        check("unlock for the prompt (U4 \(takes ? "on" : "off"))", false)
+        finish()
+    }
+    _ = signLock.state.endUnlock(signLock.state.beginUnlock(), succeeded: true, appActive: true)
+    let shown = MailViewController(session: session)
+    window.root.show(shown)
+    shown.start()
+    shown.view.layoutSubtreeIfNeeded()
+    let seen = all(ContentView.self, in: shown.view).filter { !$0.visibleRect.intersection($0.bounds).isEmpty }
+    seen.forEach { $0.updateLayer() }
+    let before = seen.filter { $0.pool.contains(where: hasPixels) }.count
+    let started = signLock.beginSign()
+    seen.forEach { $0.updateLayer() }   // a display pass while the prompt is up
+    let during = seen.filter { $0.pool.contains(where: hasPixels) }.count
+    let used = signLock.endSign(started)
+    if takes {
+        check("U4 on: during the prompt every content view is blank, also after a display pass; it ends with Brev "
+                + "not active, which locks Brev and drops the signature",
+              before > 2 && during == 0 && !used && session.brev.isLocked() && screens == 1,
+              "before \(before), during \(during), used \(used), screens \(screens)")
+    } else {
+        seen.forEach { $0.updateLayer() }
+        let after = seen.filter { $0.pool.contains(where: hasPixels) }.count
+        check("U4 off: the content stays on screen during the prompt, and with no lock since, the signature is used",
+              before > 2 && during == before && used && after == before && !session.brev.isLocked() && screens == 0,
+              "before \(before), during \(during), after \(after), used \(used)")
+        signLock.lock(.manual)
+    }
+}
 
 // MARK: - UnlockService locks Rust when its closure fails
 

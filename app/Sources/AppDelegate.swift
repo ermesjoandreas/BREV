@@ -9,10 +9,13 @@
 // shows onboarding. Onboarding creates the keys and the store
 // (UnlockService), then asks for the first unlock, which also installs the
 // wrapped DEK. Every unlock starts from a human click, runs through
-// LockController's bookkeeping, and ends on the mail screen or the lock
-// screen. A letter is signed with the identity key through SignService: one
-// Touch ID prompt per Send (docs/PHASE3_DESIGN.md §3.2). A reset needs
-// ConfirmSheet. Quitting locks first. Nothing here
+// LockController's bookkeeping, and ends on the address page (until an
+// address is registered), the mail screen or the lock screen. A letter and
+// the registration are signed with the identity key through SignService:
+// one Touch ID prompt per Send and per Registrer, each inside
+// LockController's signature bookkeeping (docs/PHASE3_DESIGN.md §3.2, §3.5;
+// the U4 switch in LockState). A reset needs ConfirmSheet. Quitting locks
+// first. Nothing here
 // persists anything: no state restoration, no frame autosave, no user
 // defaults. Logs are content-free: the `ping()` reply, lock and routing
 // events, and error names and codes (§6).
@@ -220,25 +223,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// After an unlock: the address page until an address is registered
+    /// (docs/PHASE3_DESIGN.md §6.5), then the mail screen. If the own
+    /// registration cannot be read, Brev locks.
+    private func showMail() {
+        guard let session else { return }
+        let registered: Bool
+        do {
+            let me = try session.me()
+            registered = me.registered
+            me.address.wipe()
+            me.code.wipe()
+        } catch {
+            Self.appLog.error("me failed: \(Self.errorName(error), privacy: .public)")
+            return lock.lock(.manual)
+        }
+        registered ? showMailScreen() : showAddressPage()
+    }
+
+    /// Velg adressen din: Registrer signs through SignService with the
+    /// reason register.reason; a registered address leads to the mail screen.
+    private func showAddressPage() {
+        guard let session else { return }
+        Self.appLog.notice("route address page")
+        let page = AddressViewController(session: session, signer: touchIDSigner(reason: L10n.registerReason))
+        page.onRegistered = { [weak self] in self?.showMailScreen() }
+        present(page)
+        page.start()
+    }
+
     /// The unlocked screen: contacts, threads and letters, and the sync
     /// timer (docs/PHASE2_DESIGN.md §7.2). Nytt brev opens the compose sheet
     /// on the main window (§7.3), which signs through SignService with the
     /// reason send.reason; after a send the mail screen selects the new
-    /// thread.
-    private func showMail() {
+    /// thread, and after a close without sending it reads the contacts
+    /// again (the sheet may have found a changed key).
+    private func showMailScreen() {
         guard let session else { return }
         let mail = MailViewController(session: session)
         mail.onLock = { [weak self] in self?.lock.lockNow(nil) }
         mail.onNewLetter = { [weak self, weak mail] contact in
             guard let self, let window = self.mainWindow, let session = self.session else { return }
-            let id = contact.id, signer = self.signer
+            let id = contact.id
             ComposeSheet.present(on: window, to: contact, session: session,
-                                 signer: { signer.sign(digest: $0, reason: L10n.sendReason, $1) }) { thread in
-                if let thread { mail?.showSent(thread: thread, contact: id) }
+                                 signer: self.touchIDSigner(reason: L10n.sendReason)) { thread in
+                if let thread { mail?.showSent(thread: thread, contact: id) } else { mail?.reloadContacts(selecting: id) }
             }
         }
         present(mail)
         mail.start()
+    }
+
+    /// A signer for `reason` (send.reason or register.reason): the identity
+    /// key's one Touch ID prompt through SignService, inside LockController's
+    /// signature bookkeeping. A result after a lock, or (if the panel takes
+    /// activation, LockState's U4 switch) with Brev no longer the active app,
+    /// which locks, comes back as Locked.
+    private func touchIDSigner(reason: String) -> ComposeSheet.Signer {
+        { [weak self] digest, done in
+            guard let self else { return }
+            let started = self.lock.beginSign()
+            self.signer.sign(digest: digest, reason: reason) { [weak self] result in
+                guard let self, self.lock.endSign(started) else { return done(.failure(BrevError.Locked)) }
+                done(result)
+            }
+        }
     }
 
     // MARK: - Reset (§5.5)

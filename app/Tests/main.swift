@@ -565,6 +565,39 @@ func caseShell() {
     check("LockState: a failed unlock ends the auth; resign-active locks again",
           !s.endUnlock(token, succeeded: false, appActive: true) && !s.unlocked && !s.authInFlight
             && s.shouldLock(for: .resignActive))
+    // A signature's Touch ID prompt (Send, Registrer; docs/PHASE3_DESIGN.md
+    // §3.2), with the U4 switch in both positions.
+    check("LockState: the U4 switch is off (a signature's prompt keeps auto-lock), the safe side",
+          !LockState.signPanelTakesActivation && !LockState().panelTakesActivation)
+    let off = LockState()
+    var sign = off.beginSign()
+    check("LockState, U4 off: resign-active during a signature's prompt locks, like every other reason",
+          off.signInFlight && all.allSatisfy { off.shouldLock(for: $0) })
+    check("LockState, U4 off: a signature that ends with no lock since may be used, Brev active or not",
+          off.endSign(sign, appActive: false) && !off.signInFlight)
+    sign = off.beginSign()
+    off.lock()
+    check("LockState, U4 off: a lock during the prompt ends it and discards the signature",
+          !off.signInFlight && !off.endSign(sign, appActive: true))
+    let on = LockState(signPanelTakesActivation: true)
+    sign = on.beginSign()
+    check("LockState, U4 on: resign-active during a signature's prompt does not lock; every other reason does",
+          !on.shouldLock(for: .resignActive) && all.dropFirst().allSatisfy { on.shouldLock(for: $0) })
+    check("LockState, U4 on: a signature that ends while Brev is inactive is discarded, the generation unchanged"
+            + " (the caller locks); resign-active locks again",
+          !on.endSign(sign, appActive: false) && on.generation == sign && on.shouldLock(for: .resignActive))
+    sign = on.beginSign()
+    check("LockState, U4 on: a signature that ends while Brev is active may be used", on.endSign(sign, appActive: true))
+    sign = on.beginSign()
+    on.lock()
+    check("LockState, U4 on: a lock during the prompt ends it (resign-active locks again) and discards the signature",
+          on.shouldLock(for: .resignActive) && !on.endSign(sign, appActive: true))
+    let u4 = LockState(signPanelTakesActivation: true)
+    _ = u4.beginUnlock()
+    check("LockState, U4 on: an unlock's exemption is unchanged, and a signature is not an unlock",
+          !u4.shouldLock(for: .resignActive) && !u4.signInFlight
+            && u4.endUnlock(u4.generation, succeeded: true, appActive: true) && u4.shouldLock(for: .resignActive))
+
     let t0: UInt64 = 1_000_000_000_000, limit = LockState.idleLimitNanos
     check("LockState: idle at 300 s, not before, not with a clock behind the last input",
           limit == 300_000_000_000 && !LockState.isIdle(now: t0 + limit - 1, lastInput: t0)
@@ -764,6 +797,27 @@ func caseEditModel() {
     check("EditModel: an empty insert (a dead key) is no refusal", [UInt16]().withUnsafeBufferPointer { b.insert($0) })
     check("EditModel: a newline in a multi-line field",
           typeUnits(b, "a") && b.insertNewline() && unitsOf(b.text) == [0x61, 0x0A] && b.caret == 2)
+
+    // An address field (docs/PHASE3_DESIGN.md §6.5): a–z, 0–9 and "-";
+    // A–Z become a–z; every other keystroke is refused whole.
+    let a = EditModel(maxBytes: 32, multiline: false, charset: .address)
+    check("EditModel, address: a–z, 0–9 and - are taken, A–Z become a–z",
+          typeUnits(a, "Brev-2") && typeUnits(a, "X") && unitsOf(a.text) == Array("brev-2x".utf16) && a.caret == 7)
+    let kept = unitsOf(a.text)
+    check("EditModel, address: anything else is refused and changes nothing (æ Ø é space . _ @ + emoji)",
+          ["æ", "Ø", "é", "e\u{301}", " ", ".", "_", "@", "+", "\u{1F600}"].allSatisfy { !typeUnits(a, $0) }
+            && unitsOf(a.text) == kept && a.caret == 7)
+    check("EditModel, address: a keystroke with one refused unit is refused whole", !typeUnits(a, "a.") && unitsOf(a.text) == kept)
+    check("EditModel, address: no newline", !a.insertNewline() && unitsOf(a.text) == kept)
+    a.wipe()
+    check("EditModel, address: at most 32 characters",
+          typeUnits(a, String(repeating: "a", count: 32)) && !typeUnits(a, "b") && a.text.length == 32)
+    let map = (UInt16(0)...UInt16(0x7F)).allSatisfy { c in
+        let want: UInt16? = (0x41...0x5A).contains(c) ? c + 0x20
+            : ((0x61...0x7A).contains(c) || (0x30...0x39).contains(c) || c == 0x2D) ? c : nil
+        return EditModel.addressUnit(c) == want
+    } && (UInt16(0x80)...UInt16(0xFFFF)).allSatisfy { EditModel.addressUnit($0) == nil }
+    check("EditModel, address: the unit rule over every UTF-16 unit", map)
 
     // The UTF-8 count is Transcode's, also as surrogates pair up and split.
     let u = EditModel(maxBytes: 64, multiline: true)

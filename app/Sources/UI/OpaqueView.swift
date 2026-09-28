@@ -34,6 +34,8 @@
 // (`release()`, which also gives the pool up), when it is freed, and for
 // every view in the lock sequence (`ContentView.blankAll()`), which also
 // shows a blank frame (§2 accepts pixels in these buffers until then).
+// Between `hideAll()` and `showAll()` (a Touch ID prompt that takes
+// activation, docs/PHASE3_DESIGN.md §3.2) every view shows a blank frame.
 // AVFoundation, CoreMedia and CoreVideo are approved for this layer only
 // (§4); scripts/test.sh fails if another file in app/Sources names one of
 // their symbols. No tooltips, popovers or other AppKit-made windows over
@@ -92,6 +94,25 @@ class ContentView: OpaqueView {
         live.allObjects.forEach { $0.blank() }
     }
 
+    /// True between `hideAll` and `showAll`: every content view, also one
+    /// made meanwhile, shows a blank frame instead of drawing.
+    private(set) static var hidden = false
+
+    /// Blanks every content view until `showAll`: for a Touch ID prompt
+    /// that takes activation from Brev (docs/PHASE3_DESIGN.md §3.2; the U4
+    /// switch in LockState). The texts stay; only the pixels go.
+    static func hideAll() {
+        hidden = true
+        blankAll()
+    }
+
+    /// Ends `hideAll`: every content view draws again.
+    static func showAll() {
+        guard hidden else { return }
+        hidden = false
+        live.allObjects.forEach { $0.needsDisplay = true }
+    }
+
     /// Shows this view's pixels, and keeps them out of screen captures.
     let protectedLayer = AVSampleBufferDisplayLayer()
     /// The fixed pool, all buffers of one size; empty while the view is out
@@ -138,6 +159,7 @@ class ContentView: OpaqueView {
     override func draw(_ dirtyRect: NSRect) {}
 
     override func updateLayer() {
+        guard !Self.hidden else { return blank() }
         present()
     }
 

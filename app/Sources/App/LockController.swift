@@ -3,7 +3,9 @@
 // Upholds CLAUDE.md §3.2 (auto-lock, blank-on-lock) and §1.10 (plaintext is
 // wiped on lock; docs/PHASE2_DESIGN.md §8.3, §8.4; D-0052 in the shifted
 // numbering). Brev locks when it resigns active (not while a Touch ID unlock
-// is in flight, whose panel may take activation), when the screen locks,
+// is in flight, whose panel may take activation, nor during a signature's
+// prompt if LockState's U4 switch says that its panel does;
+// docs/PHASE3_DESIGN.md §3.2), when the screen locks,
 // before sleep, when the displays sleep, on a user switch, after 300 s
 // without input on Brev's own clock, on ⌘L or the Lås button, and on quit.
 // Triggers only ever lock; nothing here unlocks. The decisions are in
@@ -35,8 +37,11 @@ func commonModeTimer(every interval: TimeInterval, _ body: @escaping () -> Void)
 
 final class LockController: NSObject {
     private static let log = Logger(subsystem: "no.brev.app", category: "lock")
+    /// U4's measurement (docs/PHASE3_DESIGN.md §3.2): whether a Touch ID
+    /// panel made Brev resign active.
+    private static let touchIDLog = Logger(subsystem: "no.brev.app", category: "touchid")
 
-    let state = LockState()
+    let state: LockState
     weak var window: MainWindow?
     weak var session: Session?
     /// Shows the lock screen in the root (set by AppDelegate).
@@ -44,6 +49,13 @@ final class LockController: NSObject {
 
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var idleTimer: Timer?
+
+    /// Brev's is `LockState()`; the lock probe passes one with the U4 switch
+    /// in the other position.
+    init(state: LockState = LockState()) {
+        self.state = state
+        super.init()
+    }
 
     /// Starts observing every lock trigger except idle, which runs only
     /// while unlocked.
@@ -109,12 +121,38 @@ final class LockController: NSObject {
         return true
     }
 
+    // MARK: - A signature's Touch ID prompt (docs/PHASE3_DESIGN.md §3.2)
+
+    /// A human pressed Send or Registrer: the prompt starts. Returns the
+    /// generation for `endSign`. If the panel takes activation (the U4
+    /// switch in LockState), every content view is blanked until `endSign`.
+    func beginSign() -> UInt64 {
+        if state.panelTakesActivation { ContentView.hideAll() }
+        return state.beginSign()
+    }
+
+    /// The prompt ended (main). True: the signature may be used. False: a
+    /// lock came meanwhile, or the panel took activation and Brev is not
+    /// the active app again, which locks now.
+    func endSign(_ started: UInt64) -> Bool {
+        let ok = state.endSign(started, appActive: NSApp.isActive)
+        if !ok && started == state.generation { lock(.resignActive) }
+        ContentView.showAll()
+        return ok
+    }
+
     // MARK: - The lock sequence (§8.4)
 
     /// Idempotent. Every step runs on every lock; only the switch to the
     /// lock screen depends on whether Brev was unlocked.
     func lock(_ reason: LockReason) {
         dispatchPrecondition(condition: .onQueue(.main))
+        // U4: whether a Touch ID panel takes activation from Brev shows here,
+        // in the log, with no prompt of its own (docs/PHASE3_DESIGN.md §3.2).
+        if reason == .resignActive && (state.authInFlight || state.signInFlight) {
+            let during = state.authInFlight ? "unlock" : "sign"
+            Self.touchIDLog.notice("resign active during Touch ID (\(during, privacy: .public))")
+        }
         guard state.shouldLock(for: reason) else { return }
         #if BREV_SELFSCAN
         SelfScan.run(control: true)

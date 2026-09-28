@@ -1,13 +1,20 @@
 // MailViewController.swift — the unlocked screen: contacts, threads, letters.
 //
 // Upholds CLAUDE.md §1.2, §1.10 and §3.2 (docs/PHASE2_DESIGN.md §7.2, §9;
-// docs/PHASE3_DESIGN.md §5.3, §6.5). A bar with Nytt brev and Lås
-// (HumanButtons) above an NSSplitView with three panes: contacts
-// (SecureListView; a contact's name is its address), the contact's
-// threads, newest first (SecureListView), and the selected thread's
-// letters, oldest first (LetterStackView). `start()` reads the contacts and
-// selects the first, then its newest thread, then that thread's letters.
-// Nytt brev is off for a contact whose key changed. `sync()` fetches the
+// docs/PHASE3_DESIGN.md §5.3, §6.3, §6.5). A bar with Nytt brev, Legg til
+// kontakt and Lås (HumanButtons), the contact header (ContactHeaderView: the
+// own address and code, the selected contact's, and a changed key's warning
+// with Godta ny kode, all contact data in the protected layer), and an
+// NSSplitView with three panes: contacts (SecureListView; a contact's name
+// is its address), the contact's threads, newest first (SecureListView),
+// and the selected thread's letters, oldest first (LetterStackView).
+// `start()` reads the own address and the contacts and selects the first,
+// then its newest thread, then that thread's letters. Nytt brev is off for
+// a contact whose key changed. Legg til kontakt opens AddContactSheet; a
+// contact it adds is selected. Godta ny kode opens ConfirmSheet, and only
+// its Godta accepts the code the header shows (acceptNewKey). After a
+// compose sheet closes without sending (it may have found a changed key),
+// the contacts are read again. `sync()` fetches the
 // letters waiting at the relay: once at `start()`, every 5 seconds from a
 // timer in the common run-loop modes (D-0052 in the shifted numbering), and
 // once after a letter is sent. It runs on `Session.net`, never on main; a
@@ -61,7 +68,11 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     private let letterScroll = NSScrollView()
     private let split = NSSplitView()
     private let noLetters = InterfaceText(L10n.mailNoThreads, width: 260)
+    let header = ContactHeaderView()
     private var newButton: HumanButton?
+    private(set) var addButton: HumanButton?
+    /// The contact whose new code was not accepted (accept.error shows).
+    private var acceptFailed: Data?
     private var dividersPlaced = false
 
     private let dates: DateFormatter = {
@@ -91,12 +102,15 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
 
         let new = HumanButton(title: L10n.mailNew, target: self, action: #selector(newLetter(_:)))
+        let add = HumanButton(title: L10n.mailAddContact, target: self, action: #selector(addContact(_:)))
         let lock = HumanButton(title: L10n.mailLock, target: self, action: #selector(lockPressed(_:)))
         newButton = new
+        addButton = add
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let bar = NSStackView(views: [new, spacer, lock])
+        let bar = NSStackView(views: [new, add, spacer, lock])
         bar.orientation = .horizontal
+        header.onAccept = { [weak self] in self?.acceptNewKey() }
 
         split.isVertical = true
         split.dividerStyle = .thin
@@ -112,7 +126,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
             split.setHoldingPriority(NSLayoutConstraint.Priority(252 - Float(i)), forSubviewAt: i)
         }
 
-        for v in [bar, split] {
+        for v in [bar, header, split] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -120,13 +134,16 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
             bar.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
             bar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             bar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            split.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 8),
+            header.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 6),
+            header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            split.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 4),
             split.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             split.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             split.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
 
-        contactList.onSelect = { [weak self] _ in self?.showThreads(keeping: nil) }
+        contactList.onSelect = { [weak self] _ in self?.contactSelected() }
         threadList.onSelect = { [weak self] _ in self?.showLetters(scrolledTo: .zero) }
         contactList.nextKeyView = threadList
         threadList.nextKeyView = contactList
@@ -176,9 +193,27 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
 
     // MARK: - Reading and showing
 
-    /// After unlock: contacts, the first contact's newest thread and its
-    /// letters, then the sync timer.
+    /// After unlock: the own address and code, contacts, the first
+    /// contact's header line, newest thread and its letters, then the sync
+    /// timer.
     func start() {
+        do {
+            if let me = try session?.me() { header.showMe(address: me.address, code: me.code) }
+        } catch {
+            Self.log.error("me failed: \(Self.name(error), privacy: .public)")
+        }
+        readContacts(selecting: nil)
+        showContactHeader()
+        showThreads(keeping: nil)
+        syncTimer?.invalidate()
+        syncTimer = commonModeTimer(every: Self.syncInterval) { [weak self] in self?.syncNow() }
+        syncNow()
+        view.window?.makeFirstResponder(contactList)
+    }
+
+    /// Reads the contacts (the old names are wiped) and selects the one
+    /// with `id`, or else the first.
+    private func readContacts(selecting id: Data?) {
         let rows: [ContactItem]
         do {
             rows = try session?.contacts() ?? []
@@ -187,13 +222,38 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
             rows = []
         }
         contacts = rows
-        contactList.setRows(rows.map { SecureListView.Row(text: $0.name, meta: nil) },
-                            selected: rows.isEmpty ? nil : 0)
+        let chosen = id.flatMap { id in rows.firstIndex { $0.id == id } } ?? (rows.isEmpty ? nil : 0)
+        contactList.setRows(rows.map { SecureListView.Row(text: $0.name, meta: nil) }, selected: chosen)
+    }
+
+    /// Reads the contacts again with `id` selected (or the first), its
+    /// header line and its threads, keeping the selected thread if it is
+    /// the same contact's: after a contact is added, a key is accepted, or
+    /// a compose sheet closed without sending.
+    func reloadContacts(selecting id: Data?) {
+        let before = selectedContact?.id
+        let thread = threadList.selected.flatMap { threads.indices.contains($0) ? threads[$0].id : nil }
+        readContacts(selecting: id)
+        showContactHeader()
+        showThreads(keeping: selectedContact?.id == before ? thread : nil)
+    }
+
+    /// A human selected a contact: its header line and its threads.
+    private func contactSelected() {
+        acceptFailed = nil
+        showContactHeader()
         showThreads(keeping: nil)
-        syncTimer?.invalidate()
-        syncTimer = commonModeTimer(every: Self.syncInterval) { [weak self] in self?.syncNow() }
-        syncNow()
-        view.window?.makeFirstResponder(contactList)
+    }
+
+    /// The header's line 2 for the selected contact (the old one is wiped).
+    private func showContactHeader() {
+        guard let contact = selectedContact, let session else { return header.showContact(nil) }
+        do {
+            header.showContact(try session.contactInfo(contact: contact.id), acceptFailed: acceptFailed == contact.id)
+        } catch {
+            Self.log.error("contact info failed: \(Self.name(error), privacy: .public)")
+            header.showContact(nil)
+        }
     }
 
     /// Reads the selected contact's threads (the old subjects and letters
@@ -315,6 +375,8 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
 
     func wipeAll() {
         stopSync()
+        header.clear()
+        acceptFailed = nil
         contactList.clear()
         threadList.clear()
         letters.clear()
@@ -334,6 +396,42 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
 
     @objc private func lockPressed(_ sender: Any?) {
         onLock()
+    }
+
+    /// Legg til kontakt: the sheet on this window; a contact it adds is
+    /// selected. One sheet at a time.
+    @objc func addContact(_ sender: Any?) {
+        guard !composing, let window = view.window, let session else { return }
+        AddContactSheet.present(on: window, session: session) { [weak self] added in
+            guard let added else { return }
+            self?.reloadContacts(selecting: added)
+        }
+    }
+
+    /// Godta ny kode: ConfirmSheet, and on its Godta the code the header
+    /// shows is accepted for the contact selected when it was pressed.
+    func acceptNewKey() {
+        guard !composing, let window = view.window, let contact = selectedContact, header.newCode != nil else { return }
+        let id = contact.id
+        ConfirmSheet.present(on: window, .acceptKey) { [weak self] confirmed in
+            if confirmed { self?.accept(contact: id) }
+        }
+    }
+
+    /// Rust refuses unless `code` is still the pending key's (KeyChanged);
+    /// either way the contacts are read again, and a refusal shows
+    /// accept.error under the code now pending.
+    private func accept(contact id: Data) {
+        guard let session, selectedContact?.id == id, let code = header.newCode else { return }
+        do {
+            try session.acceptNewKey(contact: id, newCode: code)
+            acceptFailed = nil
+            Self.log.notice("new key accepted")
+        } catch {
+            acceptFailed = id
+            Self.log.error("accept failed: \(Self.name(error), privacy: .public)")
+        }
+        reloadContacts(selecting: id)
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {

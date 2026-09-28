@@ -4,7 +4,8 @@
   Every user-visible string in the app lives here (CLAUDE.md §3.2), read
   through App/L10n.swift. The texts are those of docs/PHASE2_DESIGN.md §5.6
   and docs/PHASE3_DESIGN.md §6.6.
-  None of these strings may ever be derived from message content (§1.5).
+  None of these strings may ever be derived from message content (§1.5),
+  and none takes an address, a name or an identity code (PHASE3 §6.4).
 */
 
 /* Onboarding, page 1. */
@@ -17,7 +18,8 @@
 "onboarding.rules.touchid" = "Brev låses bare opp med Touch ID. Det finnes ikke noe passord.";
 "onboarding.rules.nobackup" = "Det finnes ingen sikkerhetskopi. Nøklene finnes bare på denne Macen. Mister du Macen, eller blir den nullstilt, er brevene borte for alltid.";
 "onboarding.rules.fingers" = "Legger du til eller fjerner et fingeravtrykk i Touch ID, kan brevene aldri åpnes igjen. Da er både brevene og identiteten din borte.";
-"onboarding.rules.prompt" = "Lås bare opp når du selv har trykket «Lås opp» i Brev. Ber et annet program om Touch ID for Brev, trykk Avbryt.";
+/* The three Touch ID actions (docs/PHASE3_DESIGN.md §3.5, §6.6). */
+"onboarding.rules.prompt" = "Godkjenn Touch ID bare rett etter at du selv har trykket «Lås opp», «Send» eller «Registrer» i Brev. Ber noe annet om Touch ID for Brev, trykk Avbryt.";
 /* File substitution (CLAUDE.md §2, docs/DECISIONS.md D-0033 item 2). */
 "onboarding.rules.gone" = "Er brevene dine plutselig borte etter at du har låst opp, så ikke skriv nye brev. Da kan et annet program ha byttet ut filene til Brev.";
 "onboarding.rules.confirm" = "Jeg forstår at brevene ikke kan gjenopprettes";
@@ -56,8 +58,18 @@
 "reset.confirm.ok" = "Slett alt";
 "reset.confirm.cancel" = "Avbryt";
 
+/* The address page (docs/PHASE3_DESIGN.md §6.5, §6.6), after unlock until an address is registered. No string here takes an address, a name or a code: those are drawn only in the protected layer (§6.4). register.reason completes macOS's sentence «Brev» prøver å … in the Touch ID dialog. After net.error, Registrer sends the registration already signed again, without Touch ID. */
+"address.title" = "Velg adressen din";
+"address.body" = "Andre legger deg til med denne adressen. 3–32 tegn: a–z, 0–9 og bindestrek. Den kan ikke endres senere.";
+"address.register" = "Registrer";
+"register.reason" = "registrere adressen din";
+"address.error.taken" = "Adressen er tatt. Velg en annen.";
+"address.error.invalid" = "Adressen kan bare ha a–z, 0–9 og bindestrek, og må begynne med en bokstav.";
+"address.error.failed" = "Adressen ble ikke registrert. Prøv igjen.";
+
 /* The mail window. %@ is a date from DateFormatter (nb): metadata, never content. */
 "mail.new" = "Nytt brev";
+"mail.addcontact" = "Legg til kontakt";
 "mail.lock" = "Lås";
 "mail.nothreads" = "Ingen brev ennå";
 "mail.sent" = "Sendt %@";
@@ -75,6 +87,30 @@
 "compose.keychanged" = "Sikkerhetskoden til mottakeren er endret. Brevet ble ikke sendt.";
 "compose.retry" = "Prøv igjen";
 "net.error" = "Fikk ikke kontakt med Brev-tjenesten. Prøv igjen.";
+
+/* Adding a contact by address (docs/PHASE3_DESIGN.md §6.2, §6.5). */
+"contact.title" = "Legg til kontakt";
+"contact.field" = "Adresse:";
+"contact.add" = "Legg til";
+"contact.cancel" = "Avbryt";
+"contact.error.notfound" = "Fant ingen med denne adressen.";
+"contact.error.duplicate" = "Denne adressen er allerede en kontakt.";
+"contact.error.self" = "Dette er din egen adresse.";
+"contact.error.failed" = "Kontakten ble ikke lagt til. Prøv igjen.";
+
+/* The contact header (docs/PHASE3_DESIGN.md §6.3, §6.5): fixed labels beside the addresses and identity codes, which are drawn in the protected layer. */
+"header.me" = "Du:";
+"header.code" = "Sikkerhetskode:";
+"contact.changed" = "Sikkerhetskoden til denne kontakten er endret. Brev blir ikke sendt før du godtar den nye koden.";
+"contact.newcode" = "Ny kode:";
+"contact.accept" = "Godta ny kode";
+
+/* Accepting a contact's new code: the confirmation sheet, and its failure. */
+"accept.confirm.title" = "Godta ny sikkerhetskode?";
+"accept.confirm.body" = "Gjør dette bare hvis du vet hvorfor koden er endret, for eksempel at kontakten har satt opp Brev på nytt. Sammenlign gjerne den nye koden med kontakten først.";
+"accept.confirm.ok" = "Godta";
+"accept.confirm.cancel" = "Avbryt";
+"accept.error" = "Den nye koden ble ikke godtatt. Prøv igjen.";
 
 /* Title of the application menu. AppKit replaces it with the bundle name at runtime; this is the fallback. */
 "menu.app.title" = "Brev";

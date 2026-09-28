@@ -5,7 +5,9 @@
 // nothing is ever a String. There is no selection, so nothing can be copied,
 // even in principle. Text comes in one keystroke at a time (KeyTranslator)
 // or as a newline (Return in the body). An insert that would pass the
-// field's UTF-8 limit (Rust's limits()) is refused, and the view beeps.
+// field's UTF-8 limit (Rust's limits()) is refused, and the view beeps. An
+// address field (docs/PHASE3_DESIGN.md §6.5) takes only a–z, 0–9 and "-",
+// with A–Z folded to a–z; any other keystroke is refused the same way.
 // Delete and ←/→ go by composed character (SecretText.composedRange); ↑/↓,
 // line start and end, and clicks use the lines of the field's TextLayout.
 // No AppKit: compiled into the app and the CLI harness. Main thread only.
@@ -14,12 +16,23 @@ import CoreGraphics
 import Foundation
 
 final class EditModel {
+    /// What a field takes.
+    enum Charset {
+        /// Any text but control characters: the subject and the body.
+        case text
+        /// An address (docs/PHASE3_DESIGN.md §6.5, Q3): a–z, 0–9 and "-",
+        /// with A–Z taken as a–z; every other unit is refused. Rust checks
+        /// the rest (3 to 32 characters, a letter first).
+        case address
+    }
+
     /// The field's text. The compose sheet sends it; `wipe` clears it.
     let text: SecretText
     /// The most UTF-8 bytes the text may have.
     let maxBytes: Int
     /// False for the subject: no newline.
     let multiline: Bool
+    let charset: Charset
     /// A unit index in 0...text.length, at the start of a composed character.
     private(set) var caret = 0
     /// The text's UTF-8 length, as Transcode writes it.
@@ -29,10 +42,21 @@ final class EditModel {
 
     /// A field of at most `maxBytes` UTF-8 bytes. A unit is at least one
     /// byte, so the text never needs more than `maxBytes` units.
-    init(maxBytes: Int, multiline: Bool) {
+    init(maxBytes: Int, multiline: Bool, charset: Charset = .text) {
         self.maxBytes = maxBytes
         self.multiline = multiline
+        self.charset = charset
         text = SecretText(maxUnits: maxBytes)
+    }
+
+    /// An address field's unit for `u`: a–z, 0–9 and "-" as they are, A–Z
+    /// as a–z, nil for everything else.
+    static func addressUnit(_ u: UInt16) -> UInt16? {
+        switch u {
+        case 0x41...0x5A: return u + 0x20
+        case 0x61...0x7A, 0x30...0x39, 0x2D: return u
+        default: return nil
+        }
     }
 
     // MARK: Edits
@@ -46,7 +70,18 @@ final class EditModel {
     func insert(_ u: UnsafeBufferPointer<UInt16>) -> Bool {
         goalX = nil
         guard !u.contains(where: { $0 < 0x20 || $0 == 0x7F }) else { return false }
-        return put(u)
+        guard charset == .address, !u.isEmpty else { return put(u) }
+        // An address field refuses the keystroke if one unit is not allowed,
+        // and takes the others folded, from a stack buffer zeroed after.
+        return withUnsafeTemporaryAllocation(of: UInt16.self, capacity: u.count) { folded in
+            folded.initialize(repeating: 0)
+            defer { _ = memset_s(folded.baseAddress!, folded.count * 2, 0, folded.count * 2) }
+            for (i, unit) in u.enumerated() {
+                guard let a = Self.addressUnit(unit) else { return false }
+                folded[i] = a
+            }
+            return put(UnsafeBufferPointer(folded))
+        }
     }
 
     /// Return in the body. Refused in a single-line field.

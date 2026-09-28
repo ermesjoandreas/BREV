@@ -36,6 +36,24 @@
 // idle: no input, the Brev menu opened shortly before the limit, the lock
 // sequence runs after 300 s and closes it. The lock's log line is read back
 // from this process's log. Then exit.
+// With --contacts (docs/PHASE3_DESIGN.md §6; docs/VERIFY.md V67, V68): the
+// host starts unregistered, and its contact registers the contact address
+// marker ($ADDR_B). The address page (the real AddressViewController, signing
+// with this host's software key) → the address marker $ADDR_A typed by
+// key-downs → Registrer refuses a click made in code and an AX press → ready
+// → (hold) → Return registers → the mail screen and its header → Legg til
+// kontakt opens the real AddContactSheet → $ADDR_B typed → Legg til refuses
+// the same → ready → (hold) → Return adds the contact → the relay releases
+// $ADDR_B and a new identity registers it → Send in a compose sheet finds
+// the changed key → Escape → the header shows the warning, both codes and
+// Godta ny kode, which refuses the same → ConfirmSheet → its Godta refuses
+// the same → ready → (hold) → Godta accepts the shown code → an
+// AddContactSheet with $ADDR_B typed → the lock sequence → exit. At each
+// step: the windows' hardening, the relay's trace (the relay runs with
+// --trace: no request that a refused press would have made), the in-process
+// accessibility tree (no address marker, no identity code; control: the
+// fixed labels), and the protected layer (contact data in its buffers,
+// draw(_:) and cacheDisplay empty).
 // Output is check names and counts only; "ready pid=<n> window=<n>
 // frame=<x,y,w,h>" tells a driver when to run an AX dump, AX presses or a
 // capture against the window during the hold, and the "rect <name>
@@ -49,7 +67,7 @@
 //
 // usage: ViewHost [--hold <s>] [--frame <x,y,w,h>] [--control] [--snapshot <dir>]
 //                 [--capturable] [--unprotected] [--scan] [--post] [--compose]
-//                 [--triggers switch|idle]
+//                 [--triggers switch|idle] [--contacts]
 //   --hold <s>      seconds to wait after ready before the checks (default 3)
 //   --frame <r>     the window's frame (global points, origin top left)
 //                   instead of centred
@@ -60,10 +78,12 @@
 //   --snapshot <d>  write unlocked.png, after-sync.png and locked.png (drawn
 //                   offscreen with cacheDisplay; no screen capture)
 //   --capturable    sharingType .readOnly (the default keeps Hardening's
-//                   .none), for the compose sheet too: only the protected
+//                   .none), for the compose sheet too (with --contacts, and
+//                   --unprotected, for every sheet): only the protected
 //                   layer keeps content out
 //   --unprotected   preventsCapture = false on every content view's layer,
-//                   also those made later and the compose sheet's; with
+//                   also those made later, the compose sheet's and, with
+//                   --contacts, the address page's and the sheets'; with
 //                   --capturable, the negative control: a capture must see
 //                   the fake letters
 //   --scan          scan this process for the marker before and after the
@@ -74,6 +94,9 @@
 //                   input filter must drop it; with --compose, a, ⌘↩ and
 //                   Escape while the body has focus
 //   --compose       the compose sheet's timeline instead (above)
+//   --contacts      the address page's, the contact sheet's and the key
+//                   change's timeline instead (above); each "ready" line
+//                   names its stage (address, addcontact, accept)
 //   --triggers <t>  the lock triggers' timeline instead (above): switch
 //                   (about 5 s; the Finder comes to the front) or idle
 //                   (about 5.5 min; no input meanwhile). With --post, idle
@@ -116,6 +139,7 @@ let frameArg = value("--frame").flatMap(screenRect)
 let scanning = args.contains("--scan")
 let posting = args.contains("--post")
 let composing = args.contains("--compose")
+let contactsMode = args.contains("--contacts")
 let triggers = value("--triggers")
 if let triggers, !["switch", "idle"].contains(triggers) {
     print("usage: --triggers switch|idle")
@@ -158,16 +182,48 @@ func letterBody(_ n: Int) -> SecretText {
 
 // MARK: - The relay and the users, as the app makes them, with software keys
 
+/// The relay's --trace lines ("<path> <status>"), with --contacts.
+final class RelayTrace {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    private var partial = ""
+
+    func append(_ data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        partial += String(decoding: data, as: UTF8.self)
+        while let nl = partial.firstIndex(of: "\n") {
+            lines.append(String(partial[..<nl]))
+            partial = String(partial[partial.index(after: nl)...])
+        }
+    }
+
+    /// How many requests to `path` the relay answered, with `status` if given.
+    func count(_ path: String, _ status: Int? = nil) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return lines.filter { line in status.map { line == "\(path) \($0)" } ?? line.hasPrefix(path + " ") }.count
+    }
+}
+let relayTrace = RelayTrace()
+let relayBinary = Bundle.main.object(forInfoDictionaryKey: "BrevRelayBinary") as? String
+
 /// This run's relay: build.sh's brev-relay (Info.plist BrevRelayBinary) on
-/// 127.0.0.1:0 with a database in `dir`; nil if it did not start.
+/// 127.0.0.1:0 with a database in `dir`; nil if it did not start. With
+/// --contacts it traces every request into `relayTrace`.
 func startRelay(in dir: URL) -> (Process, String)? {
-    guard let path = Bundle.main.object(forInfoDictionaryKey: "BrevRelayBinary") as? String else { return nil }
+    guard let path = relayBinary else { return nil }
     let port = dir.appendingPathComponent("relay.port")
     let relay = Process()
     relay.executableURL = URL(fileURLWithPath: path)
     relay.arguments = ["serve", "--db", dir.appendingPathComponent("relay.db").path,
-                       "--listen", "127.0.0.1:0", "--port-file", port.path]
+                       "--listen", "127.0.0.1:0", "--port-file", port.path] + (contactsMode ? ["--trace"] : [])
     relay.standardError = FileHandle.nullDevice
+    if contactsMode {
+        let out = Pipe()
+        out.fileHandleForReading.readabilityHandler = { relayTrace.append($0.availableData) }
+        relay.standardOutput = out
+    }
     do { try relay.run() } catch { return nil }
     for _ in 0..<100 {
         if let text = try? String(contentsOf: port, encoding: .utf8), let n = Int(text.trimmingCharacters(in: .newlines)) {
@@ -234,15 +290,28 @@ final class User {
         _ = try session.submit()
     }
 
-    /// The compose sheet's signer: the software key, answered on main as
-    /// SignService answers.
+    /// Signatures asked for through `sign`.
+    private(set) var signatures = 0
+
+    /// The compose sheet's (and the address page's) signer: the software
+    /// key, answered on main as SignService answers.
     func sign(_ digest: Data, _ done: @escaping (Result<Data, Error>) -> Void) {
+        signatures += 1
         let result = Result { try Enclave.sign(digest: digest, key: identity) }
         DispatchQueue.main.async { done(result) }
     }
 }
 
 // MARK: - Looking at the views
+
+/// The contact address markers of docs/VERIFY.md ($ADDR_A, $ADDR_B): the
+/// host's own address and its contact's, with --contacts.
+let addrA = "brev-secret-me", addrB = "brev-secret-peer"
+
+/// Whether `v` draws through a layer with preventsCapture = true.
+func protected(_ v: ContentView) -> Bool {
+    v.protectedLayer.preventsCapture && v.protectedLayer.superlayer === v.layer && v.wantsUpdateLayer
+}
 
 func all<T: NSView>(_ type: T.Type, in view: NSView) -> [T] {
     var out: [T] = []
@@ -389,7 +458,8 @@ func finish() -> Never {
     exit(failures == 0 ? 0 : 1)
 }
 // A safety net: the host never outlives its run by much.
-DispatchQueue.main.asyncAfter(deadline: .now() + hold + 60 + (triggers == "idle" ? idleLimit + idleTick + 30 : 0)) {
+DispatchQueue.main.asyncAfter(deadline: .now() + hold * (contactsMode ? 3 : 1) + 60
+                              + (triggers == "idle" ? idleLimit + idleTick + 30 : 0)) {
     check("finished in time", false)
     finish()
 }
@@ -407,29 +477,37 @@ var ekko = Data(), meAtEkko = Data()
 do {
     me = try User(in: dir.appendingPathComponent("testvert"), relay: relayURL)
     ekkoUser = try User(in: dir.appendingPathComponent("ekko"), relay: relayURL)
-    let speilUser = try User(in: dir.appendingPathComponent("speil"), relay: relayURL)
     session = me.session
-    try me.register("testvert")
-    try ekkoUser.register("ekko")
-    try speilUser.register("speil")
-    ekko = try me.add("ekko")
-    let speil = try me.add("speil")
-    meAtEkko = try ekkoUser.add("testvert")
-    // Two threads with Ekko, one with Speil: a letter to each, and Ekko's
-    // long letter, which arrives on sync.
-    try me.send(to: ekko, subject: fake(["Det første brevet ", nil]), body: letterBody(3))
-    try me.send(to: speil, subject: fake(["Et brev til Speil ", nil]), body: letterBody(1))
-    try ekkoUser.send(to: meAtEkko, subject: fake(["Hei fra Ekko ", nil, "\nandre linje"]), body: letterBody(12))
-    speilUser.session.brev.lock()
-    let arrived = try session.sync()
-    check("Ekko's letter arrives through the relay", arrived == 1, "\(arrived)")
-    // Ekko takes the first letter now, so its sync after a compose send
-    // counts only the composed letter.
-    let atEkko = try ekkoUser.session.sync()
-    check("the first letter arrives at Ekko", atEkko == 1, "\(atEkko)")
+    if contactsMode { try ekkoUser.register(addrB) }
 } catch {
-    check("fake letters sent", false, "\((error as? BrevError).map { "\($0)" } ?? "other")")
+    check("the users are made", false, "\((error as? BrevError).map { "\($0)" } ?? "other")")
     finish()
+}
+if !contactsMode {
+    do {
+        let speilUser = try User(in: dir.appendingPathComponent("speil"), relay: relayURL)
+        try me.register("testvert")
+        try ekkoUser.register("ekko")
+        try speilUser.register("speil")
+        ekko = try me.add("ekko")
+        let speil = try me.add("speil")
+        meAtEkko = try ekkoUser.add("testvert")
+        // Two threads with Ekko, one with Speil: a letter to each, and Ekko's
+        // long letter, which arrives on sync.
+        try me.send(to: ekko, subject: fake(["Det første brevet ", nil]), body: letterBody(3))
+        try me.send(to: speil, subject: fake(["Et brev til Speil ", nil]), body: letterBody(1))
+        try ekkoUser.send(to: meAtEkko, subject: fake(["Hei fra Ekko ", nil, "\nandre linje"]), body: letterBody(12))
+        speilUser.session.brev.lock()
+        let arrived = try session.sync()
+        check("Ekko's letter arrives through the relay", arrived == 1, "\(arrived)")
+        // Ekko takes the first letter now, so its sync after a compose send
+        // counts only the composed letter.
+        let atEkko = try ekkoUser.session.sync()
+        check("the first letter arrives at Ekko", atEkko == 1, "\(atEkko)")
+    } catch {
+        check("fake letters sent", false, "\((error as? BrevError).map { "\($0)" } ?? "other")")
+        finish()
+    }
 }
 
 // In-process checks of every content view class.
@@ -448,7 +526,7 @@ let mail = MailViewController(session: session)
 var events: [String] = []
 mail.onLock = { events.append("lock") }
 mail.onNewLetter = { _ in events.append("new letter") }
-window.root.show(mail)
+if !contactsMode { window.root.show(mail) }
 if let frameArg { window.setFrame(frameArg, display: false) } else { window.center() }
 // Behind the window, a backdrop that shows where the window is excluded;
 // to its right, the control.
@@ -465,16 +543,21 @@ if control {
 }
 window.orderFrontRegardless()
 plainWindows.dropFirst().forEach { $0.orderFrontRegardless() }
-mail.start()
-// Every content view draws through a layer with preventsCapture = true.
-let contentViews = all(ContentView.self, in: mail.view)
-check("every content view has a protected layer", !contentViews.isEmpty && contentViews.allSatisfy {
-    $0.protectedLayer.preventsCapture && $0.protectedLayer.superlayer === $0.layer && $0.wantsUpdateLayer
-})
-// The negative control reaches the letter views a reload makes later, too.
+if !contactsMode {
+    mail.start()
+    // Every content view draws through a layer with preventsCapture = true.
+    let contentViews = all(ContentView.self, in: mail.view)
+    check("every content view has a protected layer", !contentViews.isEmpty && contentViews.allSatisfy(protected))
+}
+// The negative control reaches the letter views a reload makes later, too,
+// and with --contacts the address page and every sheet (with --capturable,
+// the sheets' sharing type too).
 func unprotect() {
-    let sheetViews = window.attachedSheet?.contentView.map { all(ContentView.self, in: $0) } ?? []
-    (all(ContentView.self, in: mail.view) + sheetViews).forEach { $0.protectedLayer.preventsCapture = false }
+    let sheet = window.attachedSheet
+    if capturable && contactsMode { sheet?.sharingType = .readOnly }
+    let sheetViews = sheet?.contentView.map { all(ContentView.self, in: $0) } ?? []
+    let screen = contactsMode ? window.contentView! : mail.view
+    (all(ContentView.self, in: screen) + sheetViews).forEach { $0.protectedLayer.preventsCapture = false }
 }
 if unprotected {
     unprotect()
@@ -610,19 +693,25 @@ func secureInputOff() -> Bool { !SecureInput.isOn && (secureInputBefore || !IsSe
 /// The first compose sheet, once it is sent: it must be freed.
 weak var sentSheet: ComposeSheet?
 
+/// Nytt brev opens the real compose sheet, wired as AppDelegate wires it
+/// (the signer is this host's software key instead of SignService).
+func wireCompose() {
+    mail.onNewLetter = { contact in
+        let id = contact.id
+        ComposeSheet.present(on: window, to: contact, session: session, signer: me.sign) { thread in
+            composeEvents.append(thread == nil ? "closed" : "sent")
+            if let thread { mail.showSent(thread: thread, contact: id) } else { mail.reloadContacts(selecting: id) }
+        }
+    }
+}
+
 /// --compose: Nytt brev opens the real compose sheet on Ekko, wired as
 /// AppDelegate wires it. Keys are key-downs made here with source PID 0,
 /// delivered as AppKit delivers a real key. This app asks to be active, so
 /// that the sheet is key and secure event input can go on.
 func composeStart() {
     print("layout \(layoutID)")
-    mail.onNewLetter = { contact in
-        let id = contact.id
-        ComposeSheet.present(on: window, to: contact, session: session, signer: me.sign) { thread in
-            composeEvents.append(thread == nil ? "closed" : "sent")
-            if let thread { mail.showSent(thread: thread, contact: id) }
-        }
-    }
+    wireCompose()
     NSApp.activate(ignoringOtherApps: true)
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
         guard let sheet = composeOpen() else { finish() }
@@ -868,6 +957,357 @@ func composeSecondAndThird() {
     }
 }
 
+// MARK: - Addresses and contacts (--contacts)
+
+/// An identity code as the header draws it: 6 groups of 5 of A–Z and 2–7.
+let codePattern = try! NSRegularExpression(pattern: "[A-Z2-7]{5}( [A-Z2-7]{5}){5}")
+
+/// Hardening.apply's settings (CLAUDE.md §3.2; V9, V67).
+func hardened(_ w: NSWindow) -> Bool {
+    w.sharingType == .none && !w.isRestorable && w.isExcludedFromWindowsMenu && w.tabbingMode == .disallowed
+}
+
+/// Every string the accessibility tree of `root` offers in this process, as
+/// V11's dump reads it from outside: each element's value, title, label,
+/// help, placeholder, role description and identifier, from `root` down its
+/// accessibility children, and down every subview and content view too (a
+/// superset of what AX reaches).
+func axStrings(_ root: NSObject) -> [String] {
+    let reads = ["accessibilityValue", "accessibilityTitle", "accessibilityLabel", "accessibilityHelp",
+                 "accessibilityPlaceholderValue", "accessibilityRoleDescription", "accessibilityIdentifier"]
+        .map(NSSelectorFromString)
+    var out: [String] = []
+    var seen = Set<ObjectIdentifier>()
+    func call(_ o: NSObject, _ sel: Selector) -> Any? {
+        o.responds(to: sel) ? o.perform(sel)?.takeUnretainedValue() : nil
+    }
+    func walk(_ o: NSObject, _ depth: Int) {
+        guard depth < 64, seen.insert(ObjectIdentifier(o)).inserted else { return }
+        out += reads.compactMap { call(o, $0).map { "\($0)" } }
+        var next = (call(o, NSSelectorFromString("accessibilityChildren")) as? [NSObject]) ?? []
+        if let v = o as? NSView { next += v.subviews }
+        if let w = o as? NSWindow, let c = w.contentView { next.append(c) }
+        next.forEach { walk($0, depth + 1) }
+    }
+    walk(root, 0)
+    return out
+}
+
+/// V68's rule in process: the accessibility trees of `windows` have no
+/// address marker and no identity code; `control`, a fixed label, is there.
+func checkAX(_ label: String, _ windows: [NSWindow], control: String) {
+    let strings = windows.flatMap { axStrings($0) }
+    let leaks = strings.filter { s in
+        s.contains(addrA) || s.contains(addrB) || codePattern.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
+    }
+    check("\(label): the accessibility tree has no address marker and no identity code (control: a fixed label)",
+          leaks.isEmpty && strings.contains(control), "\(leaks.count) leaking of \(strings.count)")
+}
+
+/// V13's rule in process: a click made in code and an AX press on `button`
+/// and on its cell do nothing (HumanButton). The effect is checked after.
+func pressRefused(_ button: NSButton?) -> Bool {
+    guard let button else { return false }
+    button.performClick(nil)
+    return !button.accessibilityPerformPress() && !(button.cell?.accessibilityPerformPress() ?? true)
+}
+
+/// Whether cacheDisplay of `v` inside `rect` (its layer tree) puts ink
+/// into the bitmap.
+func cachesInk(_ v: NSView, _ rect: NSRect) -> Bool {
+    guard !rect.isEmpty, let rep = v.bitmapImageRepForCachingDisplay(in: rect) else { return true }
+    v.cacheDisplay(in: rect, to: rep)
+    guard let data = rep.bitmapData else { return true }
+    return UnsafeBufferPointer(start: data, count: rep.bytesPerPlane).contains { $0 != 0 }
+}
+
+/// Contact data only in the protected layer (V68): each of `views` draws
+/// through a protected layer, holds pixels in its buffers and on its layer,
+/// and gives cacheDisplay and draw(_:) nothing.
+func checkProtected(_ label: String, _ views: [ContentView]) {
+    let ok = views.allSatisfy { v in
+        let shown = v.visibleRect.intersection(v.bounds)
+        return protected(v) && v.pool.contains(where: hasPixels) && showsPixels(v) && !drawInks(v, shown)
+            && !cachesInk(v, shown)
+    }
+    check("\(label): pixels only through the protected layer (its buffers and layer hold them; cacheDisplay and draw(_:) none)",
+          ok)
+}
+
+/// Whether the host's own address is registered.
+func registered() -> Bool {
+    guard let m = try? session.me() else { return false }
+    defer { m.address.wipe(); m.code.wipe() }
+    return m.registered
+}
+
+/// The contacts: how many, and whether one has a changed key.
+func contactState() -> (count: Int, changed: Bool) {
+    guard let items = try? session.contacts() else { return (-1, false) }
+    defer { items.forEach { $0.name.wipe() } }
+    return (items.count, items.contains { $0.keyChanged })
+}
+
+/// `s`'s own identity code (35 ASCII bytes), as its own header shows it.
+func ownCode(_ s: Session) -> [UInt8] {
+    guard let m = try? s.me() else { return [] }
+    defer { m.address.wipe(); m.code.wipe() }
+    return m.code.withBytes { Array($0) }
+}
+
+/// Whether the drawn `text` is the code `code`.
+func shows(_ text: SecretText?, _ code: [UInt8]) -> Bool {
+    guard let text, code.count == 35, text.length == 35 else { return false }
+    return (0..<35).allSatisfy { text.units[$0] == UInt16(code[$0]) }
+}
+
+/// Whether the drawn `text` is the address `address`.
+func shows(_ text: SecretText?, _ address: String) -> Bool {
+    let u = Array(address.utf16)
+    guard let text, text.length == u.count else { return false }
+    return (0..<u.count).allSatisfy { text.units[$0] == u[$0] }
+}
+
+/// Prints "ready <stage> …" and the rects of `views` for a driver (windows,
+/// axdump --press), then calls `next` after the hold.
+func announceStage(_ stage: String, _ views: [(String, NSView?)], then next: @escaping () -> Void) {
+    let screenTop = NSScreen.screens.first?.frame.maxY ?? 0
+    let f = window.frame
+    print("ready \(stage) pid=\(getpid()) window=\(window.windowNumber) frame=\(Int(f.minX)),\(Int(screenTop - f.maxY)),\(Int(f.width)),\(Int(f.height))")
+    for case let (name, v?) in views {
+        guard let w = v.window else { continue }
+        print("rect \(name) \(globalText(w.convertToScreen(v.convert(v.bounds, to: nil))))")
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + hold, execute: next)
+}
+
+/// --contacts: the address page first, as AppDelegate routes an unlocked
+/// Brev without an address; Registrer signs with this host's software key.
+func contactsStart() {
+    if scanning { print("skip --scan: --contacts shows no letters") }
+    wireCompose()
+    let page = AddressViewController(session: session, signer: me.sign)
+    page.onRegistered = {
+        window.root.show(mail)
+        mail.start()
+    }
+    window.root.show(page)
+    page.start()
+    later(0.3) { addressStage(page) }
+}
+
+func addressStage(_ page: AddressViewController) {
+    check("address page: in the main window, with Hardening's settings (V67)", hardened(window))
+    check("address page: the field has focus and a protected layer", window.firstResponder === page.field && protected(page.field))
+    checkOpaque("address field", page.field)
+    let probe = fake(["Q!"])
+    let typedProbe = typeKeys(probe, into: window)
+    probe.wipe()
+    let folded = page.field.model.text.length == 1 && page.field.model.text.units[0] == 0x71
+    deliver(hardwareKey(51), to: window)
+    check("address page: key-downs type; Q becomes q, ! is refused, Delete removes q",
+          typedProbe && folded && page.field.model.text.length == 0)
+    let a = fake([addrA])
+    let typed = typeKeys(a, into: window)
+    a.wipe()
+    check("address page: $ADDR_A typed by key-downs", typed && shows(page.field.model.text, addrA))
+    // The contact's own registration is the only one so far.
+    let signs = me.signatures, registers = relayTrace.count("/v1/register")
+    check("address page: Registrer refuses a click made in code and an AX press", pressRefused(page.registerButton))
+    later(0.5) {
+        check("address page: so no signature, no /v1/register, not registered, the page stays",
+              registers == 1 && me.signatures == signs && relayTrace.count("/v1/register") == registers && !registered()
+                  && window.root.child === page)
+        checkAX("address page", [window], control: L10n.addressTitle)
+        checkProtected("address page: the typed address", [page.field])
+        announceStage("address", [("field", page.field.enclosingScrollView), ("register", page.registerButton)]) {
+            check("address page: the hold changed nothing (a driver's AX presses): no signature, no /v1/register",
+                  me.signatures == signs && relayTrace.count("/v1/register") == registers && window.root.child === page)
+            deliver(hardwareKey(36), to: window)
+            waitFor(10, { window.root.child === mail }) { shown in
+                check("address page: Return registers: one signature, one /v1/register 201, the mail screen, the field wiped",
+                      shown && me.signatures == signs + 1 && relayTrace.count("/v1/register", 201) == registers + 1
+                          && relayTrace.count("/v1/register") == registers + 1 && registered()
+                          && zeroed(page.field.model.text),
+                      "shown=\(shown) signatures=\(me.signatures - signs) register=\(relayTrace.count("/v1/register"))")
+                later(0.5, headerStage)
+            }
+        }
+    }
+}
+
+func headerStage() {
+    let h = mail.header
+    check("header: line 1 is the own address and code; no contact, no line 2, no warning",
+          shows(h.addresses.lines[0], addrA) && shows(h.codes.lines[0], ownCode(session)) && h.addresses.lines[1] == nil
+              && h.codes.lines[1] == nil && !h.showsKeyChange)
+    for (name, v) in [("addresses", h.addresses), ("codes", h.codes), ("new code", h.newCodeView)] {
+        checkOpaque("header \(name) (ContactTextView)", v)
+    }
+    checkProtected("header: the own address and code", [h.addresses, h.codes])
+    mail.newLetter(nil)
+    check("header: Nytt brev does nothing without a contact", window.attachedSheet == nil)
+    checkAX("mail screen", [window], control: L10n.headerMe)
+    addContactStage()
+}
+
+func addContactStage() {
+    mail.addContact(nil)
+    guard let sheet = window.attachedSheet as? AddContactSheet else {
+        check("contact sheet: Legg til kontakt opens AddContactSheet", false)
+        finish()
+    }
+    check("contact sheet: Legg til kontakt opens it, the field focused, with a protected layer",
+          sheet.firstResponder === sheet.field && protected(sheet.field))
+    mail.addContact(nil)
+    check("contact sheet: Legg til kontakt does nothing while it is up", window.sheets.count == 1)
+    check("contact sheet: Hardening's settings (V67)", hardened(sheet))
+    checkOpaque("contact sheet field", sheet.field)
+    let b = fake([addrB])
+    let typed = typeKeys(b, into: sheet)
+    b.wipe()
+    check("contact sheet: $ADDR_B typed by key-downs", typed && shows(sheet.field.model.text, addrB))
+    let lookups = relayTrace.count("/v1/lookup")
+    check("contact sheet: Legg til refuses a click made in code and an AX press", pressRefused(sheet.addButton))
+    later(0.5) {
+        check("contact sheet: so no /v1/lookup, the sheet stays, no contact",
+              relayTrace.count("/v1/lookup") == lookups && window.attachedSheet === sheet && contactState().count == 0
+                  && !sheet.busy)
+        checkAX("contact sheet", [window, sheet], control: L10n.contactTitle)
+        checkProtected("contact sheet: the typed address", [sheet.field])
+        announceStage("addcontact", [("field", sheet.field.enclosingScrollView), ("add", sheet.addButton)]) {
+            check("contact sheet: the hold changed nothing (a driver's AX presses): no /v1/lookup, the sheet stays",
+                  relayTrace.count("/v1/lookup") == lookups && window.attachedSheet === sheet && contactState().count == 0)
+            deliver(hardwareKey(36), to: sheet)
+            waitFor(10, { window.attachedSheet == nil }) { closed in
+                let h = mail.header
+                check("contact sheet: Return adds the contact: one /v1/lookup 200, the sheet closes wiped, one contact",
+                      closed && relayTrace.count("/v1/lookup", 200) == lookups + 1 && contactState().count == 1
+                          && zeroed(sheet.field.model.text))
+                check("header: line 2 is the contact's address and code, the code its own header shows (V61's rule)",
+                      shows(h.addresses.lines[1], addrB) && shows(h.codes.lines[1], ownCode(ekkoUser.session))
+                          && !h.showsKeyChange)
+                later(0.5) {
+                    checkProtected("header: both addresses and codes", [h.addresses, h.codes])
+                    checkAX("mail screen with a contact", [window], control: L10n.headerCode)
+                    keyChangeStage()
+                }
+            }
+        }
+    }
+}
+
+/// The relay's operator frees $ADDR_B (`brev-relay release`), and a new
+/// identity registers it: the host's pinned key for it has changed.
+func replaceContact() -> User? {
+    guard let path = relayBinary else { return nil }
+    let release = Process()
+    release.executableURL = URL(fileURLWithPath: path)
+    release.arguments = ["release", "--db", dir.appendingPathComponent("relay.db").path, addrB]
+    release.standardError = FileHandle.nullDevice
+    guard (try? release.run()) != nil else { return nil }
+    release.waitUntilExit()
+    guard release.terminationStatus == 0, let user = try? User(in: dir.appendingPathComponent("ekko2"), relay: relayURL),
+          (try? user.register(addrB)) != nil
+    else { return nil }
+    return user
+}
+
+func keyChangeStage() {
+    let h = mail.header
+    guard let newPeer = replaceContact() else {
+        check("key change: the relay releases $ADDR_B and a new identity registers it", false)
+        finish()
+    }
+    let oldCode = ownCode(ekkoUser.session), newCode = ownCode(newPeer.session)
+    let envelopes = relayTrace.count("/v1/envelopes"), signs = me.signatures
+    mail.newLetter(nil)
+    guard let compose = window.attachedSheet as? ComposeSheet else {
+        check("key change: Nytt brev opens a compose sheet", false)
+        finish()
+    }
+    deliver(hardwareKey(36, .maskCommand), to: compose)
+    waitFor(10, { compose.sendButton?.isEnabled == true }) { back in
+        check("key change: Send finds the changed key, keeps the sheet: no signature, no /v1/envelopes",
+              back && window.attachedSheet === compose && me.signatures == signs
+                  && relayTrace.count("/v1/envelopes") == envelopes)
+        deliver(hardwareKey(53), to: compose)
+        later(0.5) {
+            check("key change: then the header shows the warning, the pinned code on line 2 and the new code",
+                  window.attachedSheet == nil && h.showsKeyChange && shows(h.codes.lines[1], oldCode)
+                      && shows(h.newCodeView.lines[0], newCode) && h.newCode?.withBytes({ Array($0) }) == newCode
+                      && oldCode != newCode && contactState().changed)
+            mail.newLetter(nil)
+            check("key change: Nytt brev does nothing for this contact", window.attachedSheet == nil)
+            check("key change: Godta ny kode refuses a click made in code and an AX press", pressRefused(h.acceptButton))
+            later(0.5) {
+                check("key change: so no sheet, the key still changed", window.attachedSheet == nil && contactState().changed)
+                checkProtected("header: the pinned and the new code", [h.codes, h.newCodeView])
+                acceptStage(h, newCode)
+            }
+        }
+    }
+}
+
+func acceptStage(_ h: ContactHeaderView, _ newCode: [UInt8]) {
+    mail.acceptNewKey()
+    guard let confirm = window.attachedSheet as? ConfirmSheet else {
+        check("accept sheet: Godta ny kode opens ConfirmSheet", false)
+        finish()
+    }
+    check("accept sheet: Hardening's settings (V67)", hardened(confirm))
+    check("accept sheet: Godta refuses a click made in code and an AX press", pressRefused(confirm.okButton))
+    later(0.5) {
+        check("accept sheet: so the sheet stays, the key still changed", window.attachedSheet === confirm && contactState().changed)
+        checkAX("accept sheet", [window, confirm], control: L10n.acceptConfirmTitle)
+        announceStage("accept", [("header", h), ("accept", h.acceptButton), ("godta", confirm.okButton)]) {
+            check("accept sheet: the hold changed nothing (a driver's AX presses): the sheet stays, the key still changed",
+                  window.attachedSheet === confirm && contactState().changed)
+            confirm.confirm(nil)   // as a human's press of Godta
+            later(0.5) {
+                check("accept: the shown code is now the contact's, no warning",
+                      window.attachedSheet == nil && !contactState().changed && !h.showsKeyChange
+                          && shows(h.codes.lines[1], newCode) && h.newCode == nil)
+                mail.newLetter(nil)
+                let reopened = window.attachedSheet is ComposeSheet
+                if let compose = window.attachedSheet { deliver(hardwareKey(53), to: compose) }
+                check("accept: Nytt brev opens a compose sheet again (Escape closes it)", reopened && window.attachedSheet == nil)
+                later(0.5, contactsLock)
+            }
+        }
+    }
+}
+
+/// The lock sequence with AddContactSheet open and $ADDR_B typed.
+func contactsLock() {
+    mail.addContact(nil)
+    guard let sheet = window.attachedSheet as? AddContactSheet else {
+        check("before lock: a contact sheet opens", false)
+        finish()
+    }
+    let b = fake([addrB])
+    let typed = typeKeys(b, into: sheet)
+    b.wipe()
+    later(0.5) {
+        let views = all(ContentView.self, in: mail.view) + all(ContentView.self, in: sheet.contentView!)
+        let buffers = views.flatMap { $0.pool }
+        check("before lock: the header and the sheet's typed address hold pixels (control)",
+              typed && sheet.field.pool.contains(where: hasPixels) && mail.header.addresses.pool.contains(where: hasPixels))
+        lock.lock(.manual)
+        check("lock: the contact sheet ended, its field wiped, secure input off",
+              window.attachedSheet == nil && zeroed(sheet.field.model.text) && secureInputOff())
+        check("lock: the header's addresses and codes are wiped",
+              all(ContactTextView.self, in: mail.header).allSatisfy { $0.lines.allSatisfy { $0 == nil } }
+                  && mail.header.newCode == nil)
+        check("lock: every pixel buffer is zero, and no layer shows a pixel",
+              !buffers.contains(where: hasPixels) && !views.contains(where: showsPixels),
+              "\(buffers.filter(hasPixels).count) of \(buffers.count) buffers")
+        check("lock: the session is locked and the lock screen shows",
+              session.brev.isLocked() && window.root.child is NoticeViewController)
+        finish()
+    }
+}
+
 // MARK: - The lock triggers (--triggers)
 
 /// The app in front before this one asked to be active.
@@ -933,15 +1373,19 @@ func triggersEnd() {
     later(0.3) { finish() }
 }
 
+/// When the switch run's unlock began.
+var switchStarted = Date()
+
 /// --triggers switch: resigning active while an unlock is in flight does
-/// not lock (the Touch ID panel may take activation); once unlocked, it
-/// runs the lock sequence.
+/// not lock (the Touch ID panel may take activation), and says so in the
+/// log (U4's measurement line); once unlocked, it runs the lock sequence.
 func triggersSwitch() {
     becomeActive { active in
         check("switch: this app became active", active)
         guard active else { return triggersEnd() }
         let before = lock.state.generation
         let started = lock.beginUnlock()
+        switchStarted = Date()
         switchAway()
         waitFor(3, { !NSApp.isActive }) { away in
             later(0.3) {
@@ -971,6 +1415,9 @@ func switchWhileUnlocked() {
             let lines = logged("lock", since: since)
             check("switch: the log says lock reason=resignActive, once", lines == ["lock reason=resignActive"],
                   "\(lines)")
+            let u4 = logged("touchid", since: switchStarted)
+            check("switch: the log says resign active during Touch ID (unlock), once (U4's measurement line)",
+                  u4 == ["resign active during Touch ID (unlock)"], "\(u4)")
             triggersEnd()
         }
     }
@@ -1049,13 +1496,16 @@ if let triggers {
     if triggers == "switch" { triggersSwitch() } else { triggersIdle() }
 } else if composing {
     composeStart()
+} else if contactsMode {
+    contactsStart()
 } else {
     announceReady(then: mailChecks)
 }
 
 func mailChecks() {
     snapshot(mail.view, "unlocked.png")
-    check("no button action ran during the hold (a driver's AX presses)", events.isEmpty, "\(events)")
+    check("no button action ran during the hold (a driver's AX presses): no event, no sheet",
+          events.isEmpty && window.attachedSheet == nil, "\(events)")
     check("two contacts, the first selected", lists.count == 2 && lists[0].count == 2 && lists[0].selected == 0)
     check("Ekko's two threads, the newest selected", lists[1].count == 2 && lists[1].selected == 0)
     check("its letter is shown", shownLetters() == 1)
