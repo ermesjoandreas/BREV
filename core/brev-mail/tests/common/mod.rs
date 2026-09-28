@@ -7,7 +7,8 @@
 
 use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use brev_core::{Brev, OpenText, CHUNK};
@@ -32,14 +33,24 @@ pub fn len32(n: usize) -> u32 {
     u32::try_from(n).unwrap()
 }
 
-/// A fresh directory under the system temp dir, removed on drop.
+/// The idle time of the test sessions: long enough that no timer fires.
+pub const TEST_IDLE: u32 = 3600;
+
+/// Unlocks `b` and confirms it, as the app does once it shows the mail.
+pub fn unlock_active(b: &Brev, dek: &[u8]) {
+    b.unlock(dek, TEST_IDLE).unwrap();
+    b.confirm_active().unwrap();
+}
+
+/// A fresh directory with mode 0700 under the system temp dir (a store
+/// needs a private folder of its own), removed on drop.
 pub struct TempDir(pub PathBuf);
 
 impl TempDir {
     pub fn new() -> TempDir {
         let p =
             std::env::temp_dir().join(format!("brev-test-{:016x}", u64::from_le_bytes(random())));
-        fs::create_dir(&p).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&p).unwrap();
         TempDir(p)
     }
 
@@ -47,15 +58,29 @@ impl TempDir {
         self.0.to_str().unwrap().to_owned()
     }
 
-    /// The names in the directory, sorted.
+    /// The names of the files in the directory and in its subdirectories,
+    /// sorted.
     pub fn files(&self) -> Vec<String> {
-        let mut names: Vec<_> = fs::read_dir(&self.0)
-            .unwrap()
+        let mut names: Vec<_> = walk(&self.0)
+            .into_iter()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         names.sort();
         names
     }
+}
+
+/// The entries of every file below `dir`: its subdirectories are walked,
+/// not listed.
+pub fn walk(dir: &Path) -> Vec<std::io::Result<fs::DirEntry>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        match entry {
+            Ok(e) if e.file_type().unwrap().is_dir() => out.extend(walk(&e.path())),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 impl Drop for TempDir {
@@ -191,7 +216,7 @@ impl User {
     /// A new session for the relay at `url`, unlocked.
     pub fn new(url: &str) -> User {
         let u = User::locked(url);
-        u.b.unlock(&u.dek).unwrap();
+        unlock_active(&u.b, &u.dek);
         u
     }
 

@@ -245,7 +245,8 @@ final class User {
     let identity: SecKey
 
     init(in dir: URL, relay: String) throws {
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
         let attrs: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
                                     kSecAttrKeySizeInBits as String: 256]
         guard let kek = SecKeyCreateRandomKey(attrs as CFDictionary, nil), let kekPublic = SecKeyCopyPublicKey(kek),
@@ -260,7 +261,10 @@ final class User {
         session = try Session.create(dir: dir.path, relay: relay, dek: dek,
                                      signingKey: try Enclave.publicKeyBytes(of: identityPublic))
         do {
-            try Enclave.unwrap(wrapped, with: kek) { try session.brev.unlock(dek: $0) }
+            try Enclave.unwrap(wrapped, with: kek) {
+                try session.brev.unlock(dek: $0, idleSecs: LockState.rustIdleSecs)
+            }
+            try session.brev.confirmActive()
         } catch {
             session.brev.lock()
             throw error
@@ -448,7 +452,8 @@ if scanning && getenv("MallocScribble").map({ String(cString: $0) }) != "1" {
 
 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("brev-viewhost-\(getpid())")
 try? FileManager.default.removeItem(at: dir)
-try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                         attributes: [.posixPermissions: 0o700])
 var relayProcess: Process?
 func finish() -> Never {
     relayProcess?.terminate()
@@ -567,6 +572,8 @@ if unprotected {
 lock.window = window
 lock.session = session
 lock.showLockScreen = { window.root.show(NoticeViewController(L10n.unlockTitle)) }
+// Accepted input reaches Rust's idle clock, as AppDelegate wires it.
+BrevApplication.noteActivity = { session.brev.noteActivity() }
 // Unlocked, as LockController.endUnlock records it, without asking whether
 // this (inactive) app is active; the idle timer and the triggers stay off.
 // --triggers goes through LockController itself.

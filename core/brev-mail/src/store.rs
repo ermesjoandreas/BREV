@@ -16,11 +16,11 @@ use std::path::Path;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Weak;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use brev_proto::body::{self, is_valid_address};
 use brev_proto::{identity_code, sig, IDENTITY_CODE_LEN, SIG_LEN};
-use brev_vault::{check_path, DekSlot, Text, Vault, VaultConfig};
+use brev_vault::{check_path, Clock, DekSlot, Text, Vault, VaultConfig};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use zeroize::Zeroizing;
 
@@ -245,7 +245,9 @@ impl Core {
     /// must make a fresh DEK. Refuses a relative path, an all-zero DEK, a bad
     /// key and an existing path; on any later failure the new file is
     /// removed. The file is created with mode 0600 (SQLite gives its journal
-    /// the same mode). The new core is unlocked.
+    /// the same mode), in a folder with mode 0700 that no other store holds
+    /// (`Unsafe`, `Busy`). The new core is armed: [`Core::confirm_active`]
+    /// opens it.
     pub fn create(path: &Path, dek: &mut [u8; 32], signing_key: &[u8]) -> Result<Core, Error> {
         let slot = DekSlot::take(dek);
         check_path(path)?;
@@ -257,7 +259,9 @@ impl Core {
     }
 
     /// Opens an existing store, locked. Refuses a file that is not a Brev
-    /// store of this schema version, before writing anything to it.
+    /// store of this schema version (`Corrupt`), before writing anything to
+    /// it, then a file that is not mode 0600 or a folder that is not 0700
+    /// (`Unsafe`), and a folder another store holds (`Busy`).
     pub fn open(path: &Path) -> Result<Core, Error> {
         Ok(Core {
             v: Vault::open(path, &MAIL)?,
@@ -266,7 +270,8 @@ impl Core {
 
     /// Unlocks with `dek`, which is zeroed before this returns. An all-zero
     /// DEK, or one that cannot open the identity row, gives `WrongKey`; any
-    /// failure leaves the core locked.
+    /// failure leaves the core locked. Success leaves it armed: every
+    /// content call gives `Locked` until [`Core::confirm_active`].
     pub fn unlock(&mut self, dek: &mut [u8; 32]) -> Result<(), Error> {
         // Opening the identity row is the key check. The X25519 secret is
         // not needed, so it is never built and never copied onto the stack.
@@ -281,6 +286,19 @@ impl Core {
         })
     }
 
+    /// The second step of `unlock` (or `create`): within 2 s of it, the
+    /// core opens until it has been idle for the idle time
+    /// ([`Core::set_idle`]). Late, or locked: locks, and `Locked`.
+    /// Idempotent while open.
+    pub fn confirm_active(&mut self) -> Result<(), Error> {
+        Ok(self.v.confirm_active()?)
+    }
+
+    /// The idle time from the next `confirm_active` on (300 s until set).
+    pub fn set_idle(&mut self, idle: Duration) {
+        self.v.set_idle(idle);
+    }
+
     /// Closes the texts handed out, zeroes the DEK and locks. Idempotent.
     /// The core holds no other key or plaintext between calls, so this is
     /// all there is to wipe.
@@ -288,7 +306,8 @@ impl Core {
         self.v.lock();
     }
 
-    /// True while locked.
+    /// True unless open: also while armed, and once the idle time has
+    /// passed.
     pub fn is_locked(&self) -> bool {
         self.v.is_locked()
     }
@@ -903,6 +922,11 @@ impl Core {
     /// Wraps `p` in a text that [`Core::lock`] closes.
     pub(crate) fn open_text(&mut self, p: Plaintext) -> Arc<Text> {
         self.v.open_text(p)
+    }
+
+    /// The vault's clock, for the session's timer.
+    pub(crate) fn clock(&self) -> Arc<Clock> {
+        self.v.clock()
     }
 
     /// Own identity id (plaintext column), behind the gate.

@@ -2,10 +2,12 @@
 # Runs every check that can run on this machine, in order. On macOS first the
 # patched bindings (gen-bindings.sh) and the Xcode project (xcodegen), so
 # every later step sees the current core. Then Rust formatting, clippy,
-# tests, the zeroize, allocator and crate-feature checks, brev-vault's
-# dependency whitelist, the check that no production code makes a P-256
-# signing key, the FFI surface and
-# patch-marker checks (macOS), the forbidden-API grep, the check that
+# tests (without the launch guard) and the launch guard's own test, the
+# zeroize, allocator and crate-feature checks, the launch-guard feature and
+# its cfg sites, brev-vault's dependency whitelist, the check that no
+# production code makes a P-256 signing key, the FFI surface and
+# patch-marker checks (macOS), the test archive and its bindings (macOS),
+# the forbidden-API grep, the check that
 # AVFoundation, CoreMedia and CoreVideo stay in the protected layer, the
 # check that the Xcode minimum is stated alike, the dependency audit, a relay
 # on 127.0.0.1 with a fresh database (macOS; stopped when the script ends),
@@ -82,8 +84,24 @@ cargo clippy --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace 
 echo "==> cargo clippy --all-features (warnings are errors)"
 cargo clippy --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace --all-targets --all-features -- -D warnings
 
-echo "==> cargo test"
-cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace
+# Without the default features, which turns brev-vault's launch guard off
+# (cargo sets DYLD_FALLBACK_LIBRARY_PATH, and nothing sets MallocScribble=1);
+# the zeroing allocator stays on through brev-mail's dependency line
+# (docs/VAULT_SPLIT_PLAN.md §4).
+echo "==> cargo test (--no-default-features: launch guard off)"
+cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace --no-default-features
+
+# The launch guard on: this test process must be refused. The test must run.
+echo "==> cargo test (launch guard on)"
+GUARD_OUT="$(cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" -p brev-vault --features launch-guard --lib launch 2>&1)" || {
+  echo "$GUARD_OUT"
+  exit 1
+}
+echo "$GUARD_OUT" | grep -E '^test |^test result'
+if ! grep -q '^test store::tests::launch_guard_refuses_this_process \.\.\. ok$' <<<"$GUARD_OUT"; then
+  echo "error: the launch guard's test did not run with the feature on" >&2
+  exit 1
+fi
 
 # scrub_stack() and scrub_stack_deep() must survive the optimiser, so their
 # tests also run optimised (the filter matches both test names, which live in
@@ -165,6 +183,28 @@ for pin in 'p256 v[^ ]+ \[arithmetic,digest,ecdsa,ecdsa-core,sha2,sha256\]' 'req
   fi
 done
 
+# The app's archive has brev-vault's launch guard (brev-mail's default), the
+# test archive below does not (docs/VAULT_SPLIT_PLAN.md §4, R7). The feature
+# is the only difference between the two, so its cfg sites are counted: a
+# new one fails here until it is reviewed and the count updated.
+echo "==> launch guard: in the app's archive, not in the test archive; its cfg sites"
+VAULT_FEATURES="$(grep -E '(^|[^a-z0-9_-])brev-vault v' <<<"$FEATURES" || true)"
+if [[ -z "$VAULT_FEATURES" ]] || grep -Evq '\[[^]]*launch-guard' <<<"$VAULT_FEATURES"; then
+  echo "error: brev-vault is built without launch-guard in brev-mail's default graph" >&2
+  exit 1
+fi
+if cargo tree --manifest-path "$MANIFEST" -p brev-mail -e normal --no-default-features -f '{p} [{f}]' \
+  | grep -E '(^|[^a-z0-9_-])brev-vault v' | grep -q 'launch-guard'; then
+  echo "error: brev-vault has launch-guard in brev-mail's graph without default features (the test archive)" >&2
+  exit 1
+fi
+GUARD_SITES="$(cd "$REPO_ROOT" && grep -rn 'feature = "launch-guard"' core/*/src || true)"
+if [[ "$(grep -c . <<<"$GUARD_SITES")" != 2 ]]; then
+  echo "error: expected 2 cfg sites of the launch-guard feature (launch.rs, its test in store/tests.rs), found:" >&2
+  echo "$GUARD_SITES" >&2
+  exit 1
+fi
+
 # brev-vault takes only the dependencies docs/VAULT_SPLIT_PLAN.md §4 lists:
 # no network, no UniFFI, no mail crypto. The script checks its own control.
 echo "==> brev-vault dependency whitelist"
@@ -241,6 +281,32 @@ if [[ "$DARWIN" == yes ]]; then
     echo "error: $BINDINGS is not patched (scripts/patch-bindings.py did not run)" >&2
     exit 1
   fi
+
+  # The test archive: brev-mail without its default features, so without
+  # the launch guard, in its own target dir so it never replaces the app's
+  # archive (docs/VAULT_SPLIT_PLAN.md §4, N4). The harness, the lock probe
+  # and the view host link it, since some of their runs have no
+  # MallocScribble (the lock probe, the harness's controls). Features must
+  # not change the FFI: its bindings, patched, are the app's.
+  echo "==> test archive (no launch guard) and its bindings"
+  TEST_ARCHIVE_DIR="$TARGET_DIR/test-archive"
+  cargo build --manifest-path "$MANIFEST" --target-dir "$TEST_ARCHIVE_DIR" --release -p brev-mail --no-default-features
+  TEST_BINDINGS="$TEST_ARCHIVE_DIR/bindings"
+  rm -rf "$TEST_BINDINGS"
+  mkdir -p "$TEST_BINDINGS"
+  NO_FORMAT=""
+  if ! command -v swift-format >/dev/null 2>&1; then NO_FORMAT="--no-format"; fi
+  # shellcheck disable=SC2086  # NO_FORMAT is empty or one flag, as in gen-bindings.sh
+  cargo run --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" -p uniffi-bindgen -- generate \
+    --library "$TEST_ARCHIVE_DIR/release/libbrev_core.dylib" --language swift \
+    --config "$REPO_ROOT/core/uniffi-global.toml" --out-dir "$TEST_BINDINGS" $NO_FORMAT >/dev/null
+  python3 "$REPO_ROOT/scripts/patch-bindings.py" "$TEST_BINDINGS/BrevCore.swift"
+  for f in BrevCore.swift BrevCoreFFI.h BrevCoreFFI.modulemap; do
+    if ! cmp "$TEST_BINDINGS/$f" "$REPO_ROOT/app/Generated/$f"; then
+      echo "error: the test archive's $f differs from the app's: a feature changed the FFI" >&2
+      exit 1
+    fi
+  done
 else
   echo "==> FFI surface and patch-marker checks skipped: not macOS ($(uname -s))"
 fi
@@ -361,7 +427,8 @@ fi
 
 # The Swift heap-scan harness (docs/PHASE2_DESIGN.md §11): a CLI process, so
 # no window and no prompt, built from app/Sources/Shared, the patched
-# bindings and the release archive. Every case runs five times and every run
+# bindings and the test archive (the release build without the launch
+# guard). Every case runs five times and every run
 # must pass: under MallocScribble=1, as the app runs (Info.plist
 # LSEnvironment), except the two controls without scribbling. Case 6's
 # proves that the glyph needle works and that scribbling is what clears the
@@ -380,7 +447,7 @@ if [[ "$DARWIN" == yes ]]; then
   xcrun swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" \
     -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
     "$REPO_ROOT"/app/Sources/Shared/*.swift "$BINDINGS" "$REPO_ROOT"/app/Tests/*.swift \
-    "$HARNESS_DIR/scan.o" "$STATICLIB" -o "$HARNESS_DIR/harness"
+    "$HARNESS_DIR/scan.o" "$TEST_ARCHIVE_DIR/release/libbrev_core.a" -o "$HARNESS_DIR/harness"
   # run_harness <label> <scribble|none> <harness arguments...>
   # A case may skip a part this Mac cannot run (design §11) and still pass;
   # its "skip ..." lines are shown under the result, never hidden.
@@ -422,8 +489,9 @@ fi
 # The lock probe (app/Tests/Lock): the app's own BrevApplication,
 # LockController, UnlockService and content views, which the harness
 # (Shared/ only) cannot reach. A CLI process built from
-# app/Sources/{Shared,App,UI,Keys}: no window on screen, no prompt, no
-# keychain (software keys; UnlockService gets a KeyStore subclass), and no
+# app/Sources/{Shared,App,UI,Keys} and the test archive: no window on
+# screen, no prompt, no keychain (software keys; UnlockService gets a
+# KeyStore subclass), and no
 # event posted but to itself. Its letters come through the relay above. It
 # checks that a synthetic key BrevApplication drops does not move the idle
 # clock (in sendEvent, and in nextEvent with a key posted to itself; that
@@ -441,14 +509,14 @@ if [[ "$DARWIN" == yes ]]; then
     -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
     "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/App/*.swift \
     "$REPO_ROOT"/app/Sources/UI/*.swift "$REPO_ROOT"/app/Sources/Keys/*.swift \
-    "$BINDINGS" "$REPO_ROOT/app/Tests/Lock/main.swift" "$STATICLIB" -o "$LOCK_DIR/lock-probe"
+    "$BINDINGS" "$REPO_ROOT/app/Tests/Lock/main.swift" "$TEST_ARCHIVE_DIR/release/libbrev_core.a" -o "$LOCK_DIR/lock-probe"
   if ! out="$(env TMPDIR="$LOCK_DIR/tmp/" BREV_RELAY_URL="$BREV_RELAY_URL" "$LOCK_DIR/lock-probe" 2>&1)"; then
     echo "$out"
     echo "error: the lock probe failed" >&2
     exit 1
   fi
   echo "    $(grep -c '^ok ' <<<"$out") checks passed"
-  grep '^skip ' <<<"$out" | sed 's/^/      /' || true
+  grep -E '^(skip|note) ' <<<"$out" | sed 's/^/      /' || true
 else
   echo "==> lock probe skipped: not macOS ($(uname -s))"
 fi

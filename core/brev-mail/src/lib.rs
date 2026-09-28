@@ -104,6 +104,15 @@ pub enum Error {
     /// The relay refused a request (a 4xx other than those above).
     #[error("refused")]
     Refused,
+    /// The store's folder is held by another open store (brev-vault's
+    /// directory lock).
+    #[error("busy")]
+    Busy,
+    /// Not safe to decrypt here: the folder is not mode 0700 or `brev.db`
+    /// not 0600, or the process has a `DYLD_*` variable or no
+    /// `MallocScribble=1` (brev-vault's launch guard).
+    #[error("unsafe")]
+    Unsafe,
 }
 
 impl From<rusqlite::Error> for Error {
@@ -129,6 +138,8 @@ impl From<brev_vault::Error> for Error {
             V::Rng => Error::Rng,
             V::Io(e) => Error::Io(e),
             V::Storage(e) => Error::Storage(e),
+            V::Busy => Error::Busy,
+            V::Unsafe => Error::Unsafe,
         }
     }
 }

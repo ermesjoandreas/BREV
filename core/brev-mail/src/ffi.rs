@@ -12,12 +12,18 @@
 //! content (§3.2). Every network call runs with the session mutex released,
 //! so `lock()` never waits for the relay; the session's lock epoch tells the
 //! second half of a call that a lock came in between (§5.2).
+//!
+//! An unlock takes effect only with `confirm_active`, and the session locks
+//! itself when idle (docs/VAULT_SPLIT_PLAN.md §5d, §5e): its timer thread,
+//! or the first call to take the session mutex after the deadline, wipes.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use brev_proto::body::{self, is_valid_address, ADDRESS_MAX};
-use brev_vault::Text;
+use brev_vault::{Holder, Text, Timer};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -34,6 +40,8 @@ pub const CHUNK: usize = brev_vault::CHUNK;
 pub const MAX_SUBJECT: usize = 256;
 /// Largest body, in UTF-8 bytes.
 pub const MAX_BODY: usize = 64 * 1024;
+/// Longest idle time `unlock` takes, in seconds.
+const MAX_IDLE_SECS: u32 = 3600;
 
 /// Errors across the FFI. Unit variants only, so nothing but a variant
 /// index ever crosses. Each is the [`Error`] of the same name.
@@ -89,6 +97,13 @@ pub enum BrevError {
     /// The relay refused the request.
     #[error("refused")]
     Refused,
+    /// The store's folder is held by another open store.
+    #[error("busy")]
+    Busy,
+    /// The folder or the file has the wrong mode, or the process is not
+    /// safe to decrypt in (a `DYLD_*` variable, no `MallocScribble=1`).
+    #[error("unsafe")]
+    Unsafe,
 }
 
 impl From<Error> for BrevError {
@@ -109,6 +124,8 @@ impl From<Error> for BrevError {
             Error::AddressTaken => BrevError::AddressTaken,
             Error::Network => BrevError::Network,
             Error::Refused => BrevError::Refused,
+            Error::Busy => BrevError::Busy,
+            Error::Unsafe => BrevError::Unsafe,
         }
     }
 }
@@ -236,7 +253,10 @@ impl OpenText {
 /// The app's session: the user's store and the relay client.
 #[derive(uniffi::Object)]
 pub struct Brev {
-    s: Mutex<Session>,
+    /// Wipes the session when its deadline passes. Dropped (joined) before
+    /// `s`, so the last `Arc` of the session is this one's.
+    timer: Timer,
+    s: Arc<Mutex<Session>>,
     net: RelayTransport,
 }
 
@@ -289,18 +309,47 @@ impl Brev {
     pub fn open(dir: String, relay: String) -> Result<Arc<Brev>, BrevError> {
         let net = RelayTransport::new(&relay)?;
         let me = Core::open(&MAIL.path_in(&PathBuf::from(dir)))?;
-        Ok(Arc::new(Brev::new(me, net)))
+        Ok(Arc::new(Brev::start(me, net).map_err(|_| BrevError::Io)?))
     }
 
     /// Unlocks with the DEK. A DEK that is not 32 bytes gives `WrongKey`.
-    /// Any failure, also a panic, leaves the session locked. Every exit
-    /// ends with a 64 KiB stack scrub.
-    pub fn unlock(&self, dek: &[u8]) -> Result<(), BrevError> {
+    /// `idle_secs` (1 to 3600, `Malformed` otherwise) is how long the
+    /// session stays open without `note_activity`. Success leaves the
+    /// session armed: every content call gives `Locked` until
+    /// `confirm_active`. Any failure, also a panic, leaves the session
+    /// locked. Every exit ends with a 64 KiB stack scrub.
+    pub fn unlock(&self, dek: &[u8], idle_secs: u32) -> Result<(), BrevError> {
         let mut fin = Finish { s: None, ok: false };
         let s = fin.s.insert(self.session()?);
+        if !(1..=MAX_IDLE_SECS).contains(&idle_secs) {
+            return Err(BrevError::Malformed);
+        }
+        s.me.set_idle(Duration::from_secs(idle_secs.into()));
         let r = unlock_all(s, dek);
         fin.ok = r.is_ok();
         r
+    }
+
+    /// The second step of an unlock, once the app shows the mail: within
+    /// 2 s of `unlock` returning, the session opens until it has been idle
+    /// for `idle_secs`. Later, or while locked: everything is locked, and
+    /// `Locked`. Idempotent while open.
+    pub fn confirm_active(&self) -> Result<(), BrevError> {
+        let mut s = self.session()?;
+        if s.me.confirm_active().is_err() {
+            s.lock_all();
+            return Err(BrevError::Locked);
+        }
+        Ok(())
+    }
+
+    /// A human used the app just now: an open session's idle deadline
+    /// moves to `idle_secs` from now. Call it only for input that passed
+    /// the synthetic-event filter. Does nothing while locked or armed, or
+    /// once the deadline has passed. Never fails, and never waits for the
+    /// session mutex.
+    pub fn note_activity(&self) {
+        self.timer.clock().note_activity();
     }
 
     /// Closes every open text, forgets the letter and the registration
@@ -644,16 +693,21 @@ impl Brev {
 }
 
 impl Brev {
-    fn new(me: Core, net: RelayTransport) -> Brev {
-        Brev {
-            s: Mutex::new(Session {
-                me,
-                epoch: 0,
-                ticket: None,
-                letter: None,
-                registration: None,
-            }),
-            net,
+    /// The session and its timer. If the timer thread cannot start, gives
+    /// the session back, so `create_in` can remove the new file while the
+    /// store's folder is still locked.
+    fn start(me: Core, net: RelayTransport) -> Result<Brev, Arc<Mutex<Session>>> {
+        let clock = me.clock();
+        let s = Arc::new(Mutex::new(Session {
+            me,
+            epoch: 0,
+            ticket: None,
+            letter: None,
+            registration: None,
+        }));
+        match Timer::spawn(Arc::downgrade(&s), clock) {
+            Ok(timer) => Ok(Brev { timer, s, net }),
+            Err(_) => Err(s),
         }
     }
 
@@ -668,16 +722,29 @@ impl Brev {
     ) -> Result<Brev, BrevError> {
         let net = RelayTransport::new(relay)?;
         let mut key = dek32(dek).ok_or(BrevError::Malformed)?;
-        let mut me = Core::create(&MAIL.path_in(dir), &mut key, signing_key)?;
+        let path = MAIL.path_in(dir);
+        let mut me = Core::create(&path, &mut key, signing_key)?;
         me.lock();
-        Ok(Brev::new(me, net))
+        Brev::start(me, net).map_err(|s| {
+            let _ = fs::remove_file(&path);
+            drop(s);
+            BrevError::Io
+        })
     }
 
-    /// The session. If a panic poisoned the mutex, locks everything, clears
-    /// the poison and gives `Locked`.
+    /// The session. If its deadline has passed, it is wiped first, so the
+    /// first call after the deadline (or the timer, whichever takes the
+    /// mutex first) wipes and moves the epoch before anything else runs.
+    /// If a panic poisoned the mutex, locks everything, clears the poison
+    /// and gives `Locked`.
     fn session(&self) -> Result<MutexGuard<'_, Session>, BrevError> {
         match self.s.lock() {
-            Ok(g) => Ok(g),
+            Ok(mut g) => {
+                if self.timer.clock().take_expired() {
+                    g.lock_all();
+                }
+                Ok(g)
+            }
             Err(p) => {
                 p.into_inner().lock_all();
                 self.s.clear_poison();
@@ -728,6 +795,8 @@ impl Brev {
     }
 }
 
+/// Then the timer is joined, and the session, its connection and its
+/// folder lock go with the last `Arc`, before the drop returns.
 impl Drop for Brev {
     fn drop(&mut self) {
         guard(&self.s).lock_all();
@@ -801,6 +870,15 @@ impl Session {
         }
         let (id, token) = self.me.relay_token()?;
         Ok((id.0, token))
+    }
+}
+
+/// The timer's wipe, on its thread, under the session mutex: everything
+/// `lock` wipes. A call waiting for the relay finds a new epoch and stores
+/// nothing.
+impl Holder for Session {
+    fn lock_all(&mut self) {
+        Session::lock_all(self);
     }
 }
 

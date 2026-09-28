@@ -229,7 +229,7 @@ impl<'a> Request<'a> {
 
     /// The payload of an ack: 1 to [`MAX_ACK`] envelope ids.
     pub fn ack(&self) -> Result<Vec<[u8; 32]>, BodyError> {
-        if self.payload.len() % 32 != 0 {
+        if !self.payload.len().is_multiple_of(32) {
             return Err(BodyError::Length);
         }
         if !(1..=MAX_ACK).contains(&(self.payload.len() / 32)) {

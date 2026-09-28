@@ -7,7 +7,10 @@
 // prompt if LockState's U4 switch says that its panel does;
 // docs/PHASE3_DESIGN.md §3.2), when the screen locks,
 // before sleep, when the displays sleep, on a user switch, after 300 s
-// without input on Brev's own clock, on ⌘L or the Lås button, and on quit.
+// without input on Brev's own clock (or once Rust has locked itself on its
+// own idle clock, LockState.rustIdleSecs), on ⌘L or the Lås button, and on
+// quit. An unlock shows mail only once Rust confirms it (`confirmActive`,
+// within 2 s of `Brev.unlock`).
 // Triggers only ever lock; nothing here unlocks. The decisions are in
 // LockState; this file observes the triggers and runs the sequence. Main
 // thread only.
@@ -106,16 +109,27 @@ final class LockController: NSObject {
 
     /// Called on main when the unlock closure returns. True means show
     /// mail; on false after a successful unlock the session is locked again
-    /// (a lock happened meanwhile, or Brev is not the active app).
+    /// (a lock happened meanwhile, or Brev is not the active app, or Rust
+    /// found the confirmation too late).
     func endUnlock(_ started: UInt64, succeeded: Bool) -> Bool {
         guard state.endUnlock(started, succeeded: succeeded, appActive: NSApp.isActive) else {
             if succeeded { session?.brev.lock() }
             return false
         }
+        do {
+            try session?.brev.confirmActive()
+        } catch {
+            lock(.unlockExpired)
+            return false
+        }
         idleTimer?.invalidate()
         idleTimer = commonModeTimer(every: LockState.idleCheckInterval) { [weak self] in
-            if LockState.isIdle(now: clock_gettime_nsec_np(CLOCK_MONOTONIC), lastInput: BrevApplication.lastHumanInput) {
-                self?.lock(.idle)
+            guard let self else { return }
+            let idle = LockState.isIdle(now: clock_gettime_nsec_np(CLOCK_MONOTONIC),
+                                        lastInput: BrevApplication.lastHumanInput)
+            // Rust wipes on its own idle deadline; the screen is blanked here.
+            if idle || (self.state.unlocked && self.session?.brev.isLocked() == true) {
+                self.lock(.idle)
             }
         }
         return true

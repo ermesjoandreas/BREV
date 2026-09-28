@@ -8,7 +8,8 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
 
 use brev_core::{
     ContactId, Core, Envelope, Error, MessageId, MockTransport, PublicBundle, Transport,
@@ -26,7 +27,8 @@ struct Party {
 fn make(dir: &Path, name: &str, net: MockTransport) -> Party {
     let dek = random();
     let key = TestKey::new();
-    let core = Core::create(&dir.join(name), &mut dek.clone(), &key.public).unwrap();
+    let mut core = Core::create(&dir.join(name), &mut dek.clone(), &key.public).unwrap();
+    core.confirm_active().unwrap();
     Party {
         core,
         dek,
@@ -35,11 +37,19 @@ fn make(dir: &Path, name: &str, net: MockTransport) -> Party {
     }
 }
 
-/// A and B in one directory, each with the other as a contact.
+/// `dir/name`, a new folder with mode 0700.
+fn sub(dir: &Path, name: &str) -> PathBuf {
+    let p = dir.join(name);
+    fs::DirBuilder::new().mode(0o700).create(&p).unwrap();
+    p
+}
+
+/// A and B, each in its own folder in `dir` (a store locks its folder),
+/// each with the other as a contact.
 fn pair(dir: &Path) -> (Party, Party, ContactId, ContactId) {
     let (net_a, net_b) = MockTransport::pair();
-    let mut a = make(dir, "a.db", net_a);
-    let mut b = make(dir, "b.db", net_b);
+    let mut a = make(&sub(dir, "a"), "a.db", net_a);
+    let mut b = make(&sub(dir, "b"), "b.db", net_b);
     let b_at_a = a
         .core
         .add_contact(&b.core.bundle().unwrap(), b"bob")
@@ -197,7 +207,7 @@ fn no_plaintext_in_any_file() {
     let own = b.core.bundle().unwrap().id();
     let scan = |when: &str| {
         let mut saw_id = false;
-        for entry in fs::read_dir(&dir.0).unwrap() {
+        for entry in common::walk(&dir.0) {
             let path = entry.unwrap().path();
             let bytes = fs::read(&path).unwrap();
             for m in markers {
@@ -219,11 +229,11 @@ fn no_plaintext_in_any_file() {
     );
 
     // Positive control: a marker that SQLite *is* given shows up in the scan.
-    let raw = rusqlite::Connection::open(dir.0.join("b.db")).unwrap();
+    let raw = rusqlite::Connection::open(dir.0.join("b/b.db")).unwrap();
     raw.execute_batch("CREATE TABLE leak (v BLOB)").unwrap();
     raw.execute("INSERT INTO leak VALUES (?1)", [BODY]).unwrap();
     drop(raw);
-    assert!(contains(&fs::read(dir.0.join("b.db")).unwrap(), BODY));
+    assert!(contains(&fs::read(dir.0.join("b/b.db")).unwrap(), BODY));
 }
 
 #[test]
@@ -273,13 +283,14 @@ fn locked_core_refuses_every_content_call() {
     assert!(a.core.is_locked());
 
     // Reopen from disk: starts locked, the right DEK opens it again.
-    let path = dir.0.join("a.db");
+    let path = dir.0.join("a/a.db");
     drop(a.core);
     let mut again = Core::open(&path).unwrap();
     assert!(again.is_locked());
     assert!(matches!(again.threads().map(drop), Err(Error::Locked)));
     let mut dek = a.dek;
     again.unlock(&mut dek).unwrap();
+    again.confirm_active().unwrap();
     assert_eq!(dek, [0u8; 32]);
     assert_eq!(&again.read_body(msg).unwrap()[..], b"x");
     let ut = again.thread_of(unread).unwrap();
@@ -460,7 +471,7 @@ fn stored_metadata_is_bound_to_ciphertext() {
         .collect();
     // Each thread lists only its own messages.
     assert!(a.core.messages(other).unwrap()[0].id != ids[0]);
-    let raw = rusqlite::Connection::open(dir.0.join("a.db")).unwrap();
+    let raw = rusqlite::Connection::open(dir.0.join("a/a.db")).unwrap();
     let sql = |q: &str, p: &[&[u8]]| {
         raw.execute(q, rusqlite::params_from_iter(p.iter()))
             .unwrap();
@@ -609,6 +620,7 @@ fn stored_metadata_is_bound_to_ciphertext() {
     ));
     sql("UPDATE identity SET id = ?1", &[&own[..]]);
     a.core.unlock(&mut a.dek.clone()).unwrap();
+    a.core.confirm_active().unwrap();
 }
 
 #[test]
@@ -774,6 +786,7 @@ fn open_turns_a_wal_store_back_to_delete_mode() {
 
     let mut core = Core::open(&dir.0.join("a.db")).unwrap();
     core.unlock(&mut dek).unwrap();
+    core.confirm_active().unwrap();
     core.add_contact(&stranger(), b"someone").unwrap();
     assert_eq!(TempDir::files(&dir), ["a.db"]);
 }

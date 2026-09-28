@@ -5,17 +5,27 @@
 //! buffer that holds the DEK, the gate in front of it ([`Vault::dek`]) and
 //! the open [`Text`]s. The caller owns the schema and every row, which it
 //! seals with [`crate::seal_column`] and reads through [`Vault::db`].
+//!
+//! Before a store is made, opened or unlocked, the vault checks the process
+//! (the launch guard, `crate::launch`), and it keeps its directory locked
+//! while it is open (mode 0700, one store per directory). The file must
+//! have mode 0600. An unlock is `Armed` until [`Vault::confirm_active`], and
+//! an active vault locks itself when idle ([`crate::Clock`]).
 
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::clock::{Clock, CONFIRM_WINDOW, DEFAULT_IDLE};
 use crate::crypto::{is_zero, scrub_stack};
+use crate::dirlock::DirLock;
+use crate::launch::check_env;
 use crate::{Error, Plaintext, Text};
 
 /// What kind of store a file is: its name, its SQLite `application_id`,
@@ -63,18 +73,30 @@ pub struct Vault {
     /// The DEK. Allocated once per `Vault` and never moved or reallocated,
     /// so `lock()` wipes the only copy the vault holds.
     dek: Box<Zeroizing<[u8; 32]>>,
+    /// The DEK is loaded. The gate also needs the clock to say `Active`.
     unlocked: bool,
     /// Every `Text` handed out; `lock` closes the ones still alive.
     texts: Vec<Weak<Text>>,
+    /// Armed, active or locked, and until when; shared with a [`crate::Timer`].
+    clock: Arc<Clock>,
+    /// How long `Active` lasts without activity (from the next confirm).
+    idle: Duration,
+    /// How long an unlock stays `Armed`: [`CONFIRM_WINDOW`] (the vault's
+    /// own tests shorten it).
+    window: Duration,
+    /// Last, so the directory is unlocked after the connection is closed.
+    _dir: DirLock,
 }
 
 impl Vault {
     /// Creates a store of `cfg` at `path` (absolute; it may not exist yet),
-    /// with mode 0600 (SQLite gives its journal the same mode). `seal` gets
-    /// the DEK before the transaction and seals the first rows; one
-    /// transaction then writes the `application_id`, the schema, those rows
-    /// (`insert`) and the schema version. On any failure after the file
-    /// exists, the file is removed. The new vault is unlocked.
+    /// with mode 0600 (SQLite gives its journal the same mode), in a
+    /// directory with mode 0700 that no other store holds. `seal` gets the
+    /// DEK before the transaction and seals the first rows; one transaction
+    /// then writes the `application_id`, the schema, those rows (`insert`)
+    /// and the schema version. On any failure after the file exists, the
+    /// file is removed while the directory is still locked. The new vault is
+    /// armed ([`Vault::confirm_active`]).
     pub fn create<T, E: From<Error>>(
         path: &Path,
         dek: DekSlot,
@@ -83,32 +105,52 @@ impl Vault {
         insert: impl FnOnce(&Transaction<'_>, T) -> Result<(), E>,
     ) -> Result<Vault, E> {
         check_path(path)?;
+        check_env()?;
+        let dir = DirLock::acquire(path)?;
         OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(path)
             .map_err(Error::from)?;
-        let result = Vault::init(path, dek, cfg, seal, insert);
-        if result.is_err() {
-            let _ = fs::remove_file(path);
+        match Vault::init(path, dek, cfg, seal, insert) {
+            Ok((db, dek)) => {
+                let mut v = Vault::assemble(db, dek.0, dir);
+                v.unlocked = true;
+                v.clock.arm(v.window);
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = fs::remove_file(path);
+                Err(e)
+            }
         }
-        result
     }
 
     /// Opens an existing store, locked. Refuses a file that is not a store
-    /// of `cfg` (`Corrupt`), before writing anything to it.
+    /// of `cfg` (`Corrupt`), before writing anything to it, and then a file
+    /// whose mode is not 0600 (`Unsafe`). The directory must have mode 0700
+    /// (`Unsafe`) and no other store may hold it (`Busy`).
     pub fn open(path: &Path, cfg: &'static VaultConfig) -> Result<Vault, Error> {
         check_path(path)?;
-        let v = Vault::connect(path, Box::new(Zeroizing::new([0u8; 32])))?;
-        verify_store(&v.db, cfg).map_err(not_a_store)?;
-        set_journal_mode(&v.db)?;
-        Ok(v)
+        check_env()?;
+        let dir = DirLock::acquire(path)?;
+        let db = connect(path)?;
+        verify_store(&db, cfg).map_err(not_a_store)?;
+        check_file_mode(path)?;
+        set_journal_mode(&db)?;
+        Ok(Vault::assemble(
+            db,
+            Box::new(Zeroizing::new([0u8; 32])),
+            dir,
+        ))
     }
 
-    /// Unlocks with `dek`, which is zeroed before this returns. An all-zero
-    /// DEK gives `WrongKey`; any other must pass `check` (the caller opens a
-    /// sealed row with it). Any failure leaves the vault locked.
+    /// Unlocks with `dek`, which is zeroed before this returns. An unsafe
+    /// process (the launch guard) gives `Unsafe`, an all-zero DEK
+    /// `WrongKey`; any other must pass `check` (the caller opens a sealed
+    /// row with it). Success leaves the vault armed: the gate opens with
+    /// [`Vault::confirm_active`]. Any failure leaves the vault locked.
     pub fn unlock<E: From<Error>>(
         &mut self,
         dek: &mut [u8; 32],
@@ -116,18 +158,49 @@ impl Vault {
     ) -> Result<(), E> {
         self.dek.copy_from_slice(dek);
         dek.zeroize();
+        if let Err(e) = check_env() {
+            self.lock();
+            return Err(e.into());
+        }
         if is_zero(&self.dek) {
             self.lock();
             return Err(Error::WrongKey.into());
         }
         self.unlocked = true;
         match check(&self.db, &self.dek) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.clock.arm(self.window);
+                Ok(())
+            }
             Err(e) => {
                 self.lock();
                 Err(e)
             }
         }
+    }
+
+    /// The second step of an unlock (or a create): within the confirm
+    /// window ([`CONFIRM_WINDOW`] after it), the gate opens until the vault
+    /// has been idle for its idle time ([`Vault::set_idle`]). Late, or not
+    /// unlocked: locks, and `Locked`. Idempotent while active.
+    pub fn confirm_active(&mut self) -> Result<(), Error> {
+        if self.unlocked && self.clock.confirm(self.idle) {
+            Ok(())
+        } else {
+            self.lock();
+            Err(Error::Locked)
+        }
+    }
+
+    /// The idle time from the next [`Vault::confirm_active`] on. The default
+    /// is 300 s.
+    pub fn set_idle(&mut self, idle: Duration) {
+        self.idle = idle;
+    }
+
+    /// The clock, for a [`crate::Timer`] and for activity.
+    pub fn clock(&self) -> Arc<Clock> {
+        Arc::clone(&self.clock)
     }
 
     /// Closes every open text, zeroes the DEK and locks. Idempotent. The
@@ -141,17 +214,20 @@ impl Vault {
         }
         self.dek.zeroize();
         self.unlocked = false;
+        self.clock.set_locked();
         scrub_stack();
     }
 
-    /// True while locked.
+    /// True unless the gate is open: also while armed, and once a deadline
+    /// has passed, before anything wiped.
     pub fn is_locked(&self) -> bool {
-        !self.unlocked
+        !(self.unlocked && self.clock.is_active())
     }
 
-    /// The single gate: every content call goes through here.
+    /// The single gate: every content call goes through here. Open only
+    /// while unlocked, confirmed, and before the idle deadline.
     pub fn dek(&self) -> Result<&[u8; 32], Error> {
-        if self.unlocked {
+        if self.unlocked && self.clock.is_active() {
             Ok(&self.dek)
         } else {
             Err(Error::Locked)
@@ -201,20 +277,41 @@ impl Vault {
         &self.texts
     }
 
-    /// Second half of `create`, after the file exists.
+    /// Test only: a shorter confirm window.
+    #[cfg(test)]
+    pub(crate) fn set_window(&mut self, window: Duration) {
+        self.window = window;
+    }
+
+    /// A locked vault of `db`, with `dek` as its key buffer.
+    fn assemble(db: Connection, dek: Box<Zeroizing<[u8; 32]>>, dir: DirLock) -> Vault {
+        Vault {
+            db,
+            dek,
+            unlocked: false,
+            texts: Vec::new(),
+            clock: Arc::new(Clock::new()),
+            idle: DEFAULT_IDLE,
+            window: CONFIRM_WINDOW,
+            _dir: dir,
+        }
+    }
+
+    /// Second half of `create`, after the file exists: the connection and
+    /// the DEK, or the error (the connection is closed by then).
     fn init<T, E: From<Error>>(
         path: &Path,
         dek: DekSlot,
         cfg: &'static VaultConfig,
         seal: impl FnOnce(&[u8; 32]) -> Result<T, E>,
         insert: impl FnOnce(&Transaction<'_>, T) -> Result<(), E>,
-    ) -> Result<Vault, E> {
-        let mut v = Vault::connect(path, dek.0)?;
-        set_journal_mode(&v.db)?;
+    ) -> Result<(Connection, DekSlot), E> {
+        let mut db = connect(path)?;
+        set_journal_mode(&db)?;
         // What `seal` decrypts or generates lives only inside it, so it is
         // gone before the commit.
-        let sealed = seal(&v.dek)?;
-        let tx = v.db.transaction().map_err(Error::from)?;
+        let sealed = seal(&dek.0)?;
+        let tx = db.transaction().map_err(Error::from)?;
         tx.pragma_update(None, "application_id", cfg.application_id)
             .map_err(Error::from)?;
         tx.execute_batch(cfg.schema).map_err(Error::from)?;
@@ -222,34 +319,37 @@ impl Vault {
         tx.pragma_update(None, "user_version", cfg.schema_version)
             .map_err(Error::from)?;
         tx.commit().map_err(Error::from)?;
-        v.unlocked = true;
-        Ok(v)
+        Ok((db, dek))
     }
+}
 
-    /// Opens the file without CREATE, then applies the per-connection
-    /// settings. Writes nothing to the file. The bundled SQLite parses any
-    /// name starting with `file:` as a URI whatever the flags say, so only
-    /// absolute paths get here (`check_path`).
-    fn connect(path: &Path, slot: Box<Zeroizing<[u8; 32]>>) -> Result<Vault, Error> {
-        let db = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        db.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
-        db.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
-        db.pragma_update(None, "secure_delete", "ON")?;
-        db.pragma_update(None, "temp_store", "MEMORY")?;
-        db.pragma_update(None, "foreign_keys", "ON")?;
-        db.pragma_update(None, "cell_size_check", "ON")?;
-        // On macOS plain fsync() does not flush the drive's cache, so a power
-        // cut mid-commit could corrupt the only copy of the history.
-        db.pragma_update(None, "fullfsync", "ON")?;
-        Ok(Vault {
-            db,
-            dek: slot,
-            unlocked: false,
-            texts: Vec::new(),
-        })
+/// Opens the file without CREATE, then applies the per-connection
+/// settings. Writes nothing to the file. The bundled SQLite parses any name
+/// starting with `file:` as a URI whatever the flags say, so only absolute
+/// paths get here (`check_path`).
+fn connect(path: &Path) -> Result<Connection, Error> {
+    let db = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    db.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    db.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+    db.pragma_update(None, "secure_delete", "ON")?;
+    db.pragma_update(None, "temp_store", "MEMORY")?;
+    db.pragma_update(None, "foreign_keys", "ON")?;
+    db.pragma_update(None, "cell_size_check", "ON")?;
+    // On macOS plain fsync() does not flush the drive's cache, so a power
+    // cut mid-commit could corrupt the only copy of the history.
+    db.pragma_update(None, "fullfsync", "ON")?;
+    Ok(db)
+}
+
+/// The store file must have mode 0600: `Unsafe` otherwise.
+fn check_file_mode(path: &Path) -> Result<(), Error> {
+    if fs::metadata(path)?.permissions().mode() & 0o7777 == 0o600 {
+        Ok(())
+    } else {
+        Err(Error::Unsafe)
     }
 }
 
@@ -315,3 +415,6 @@ fn set_journal_mode(db: &Connection) -> Result<(), Error> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

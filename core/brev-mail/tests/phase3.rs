@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use brev_core::{Brev, BrevError};
 use brev_relay::{Decision, Endpoint, Policy};
-use common::{len32, pair, read, Relayed, TestKey, User};
+use common::{len32, pair, read, unlock_active, Relayed, TestKey, User};
 
 /// UTF-8 and UTF-16LE forms of a marker.
 fn encodings(marker: &str) -> [Vec<u8>; 2] {
@@ -252,7 +252,7 @@ fn ack_after_store() {
     assert!(b.b.is_locked());
     assert_eq!(hooks.acks.load(Ordering::SeqCst), 0, "nothing acknowledged");
     assert_eq!(relay.waiting(), 1);
-    b.b.unlock(&b.dek).unwrap();
+    unlock_active(&b.b, &b.dek);
     assert!(
         b.b.threads(a_at_b.clone()).unwrap().is_empty(),
         "nothing stored"
@@ -389,7 +389,7 @@ fn locked_session_makes_no_request() {
     assert_eq!(relay.requests(), requests, "no request while locked");
 
     // A lock while `sync` polls: no ack follows, the letter waits.
-    a.b.unlock(&a.dek).unwrap();
+    unlock_active(&a.b, &a.dek);
     *hooks.lock_on_inbox.lock().unwrap() = Some(Arc::clone(&a.b));
     let requests = relay.requests();
     assert!(matches!(a.b.sync(), Err(BrevError::Locked)));
@@ -400,7 +400,7 @@ fn locked_session_makes_no_request() {
     );
     assert_eq!(hooks.acks.load(Ordering::SeqCst), 0);
     assert_eq!(relay.waiting(), 1);
-    a.b.unlock(&a.dek).unwrap();
+    unlock_active(&a.b, &a.dek);
     assert_eq!(a.b.sync().unwrap(), 1);
     assert_eq!(hooks.acks.load(Ordering::SeqCst), 1);
 }

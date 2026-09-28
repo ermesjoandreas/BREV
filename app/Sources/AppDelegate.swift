@@ -123,8 +123,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Installed (the wrapped-DEK item exists): open the store, locked,
     /// and show the lock screen; if it does not open, the damaged state with
-    /// only the reset. Not installed: onboarding. The keychain unreadable
-    /// (an unsigned build, say): only a notice.
+    /// only the reset. Rust finding the process or the folder unsafe shows
+    /// launch.error.unsafe; the folder held by another Brev hands over to
+    /// it, as a second instance does. Not installed: onboarding. The
+    /// keychain unreadable (an unsigned build, say): only a notice.
     private func route() {
         switch keyStore.installState() {
         case .fresh:
@@ -135,6 +137,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 adopt(try Session.open(dir: keyStore.dir.path, relay: UnlockService.relayURL))
                 Self.appLog.notice("route lock screen")
                 showLockScreen()
+            } catch BrevError.Unsafe {
+                Self.appLog.error("open failed: Unsafe")
+                present(NoticeViewController(L10n.launchErrorUnsafe))
+            } catch BrevError.Busy {
+                Self.appLog.notice("open failed: Busy; second instance")
+                handOverToRunningBrev()
+                NSApp.terminate(nil)
             } catch {
                 Self.appLog.error("open failed: \(Self.errorName(error), privacy: .public)")
                 let screen = makeUnlockScreen(.lockScreen)
@@ -147,9 +156,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Also points BrevApplication's accepted input at Rust's idle clock.
     private func adopt(_ opened: Session) {
         session = opened
         lock.session = opened
+        BrevApplication.noteActivity = { [weak opened] in opened?.brev.noteActivity() }
     }
 
     // MARK: - Onboarding (§5.3)
@@ -314,6 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session?.brev.lock()
         session = nil
         lock.session = nil
+        BrevApplication.noteActivity = nil
         pendingWrapped = nil
         do {
             try keyStore.deleteKnownNames()

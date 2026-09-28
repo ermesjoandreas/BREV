@@ -20,8 +20,10 @@
 import Foundation
 
 /// Why Brev locked; the log line is `lock reason=<rawValue>`.
+/// `unlockExpired`: Rust refused to confirm an unlock, which came more than
+/// 2 s after `Brev.unlock` returned.
 enum LockReason: String {
-    case resignActive, screenLocked, sleep, sessionResign, idle, manual, terminate
+    case resignActive, screenLocked, sleep, sessionResign, idle, manual, terminate, unlockExpired
 }
 
 final class LockState {
@@ -29,6 +31,12 @@ final class LockState {
     static let idleLimitNanos: UInt64 = 300 * 1_000_000_000
     /// How often the idle timer looks.
     static let idleCheckInterval: TimeInterval = 15
+    /// Rust's own idle deadline (`Brev.unlock`'s idleSecs), which it keeps
+    /// from the input `BrevApplication` accepts: Swift's 300 s, plus its 15 s
+    /// check interval, plus 5 s. Swift locks first; Rust's wipe is the
+    /// backstop, and the idle timer blanks the screen if Rust locked first
+    /// (docs/VAULT_SPLIT_PLAN.md, owner answer Q3).
+    static let rustIdleSecs: UInt32 = 320
 
     /// U4 (docs/PHASE3_DESIGN.md §3.2): whether the Touch ID panel of a
     /// signature makes Brev resign active. Unmeasured, so false: resigning

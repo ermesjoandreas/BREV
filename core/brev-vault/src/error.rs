@@ -34,6 +34,15 @@ pub enum Error {
     /// its messages cannot contain content.
     #[error("storage: {0}")]
     Storage(rusqlite::Error),
+    /// The store's directory is locked by another open store, in this
+    /// process or another: one store per directory, opened once.
+    #[error("busy")]
+    Busy,
+    /// Not safe to decrypt here: the store's directory is not mode 0700 or
+    /// its file not 0600, or (feature `launch-guard`) a `DYLD_*` variable is
+    /// set or `MallocScribble` is not `1`.
+    #[error("unsafe")]
+    Unsafe,
 }
 
 impl From<rusqlite::Error> for Error {

@@ -4,9 +4,12 @@
 //! under a data-encryption key (DEK) with XChaCha20-Poly1305, the
 //! `Locked`/`Unlocked` state of that key with its single gate
 //! ([`Vault::dek`]), the store hardening (path, pragmas, exact schema,
-//! journal mode, file mode 0600), the length-hiding padding ([`padding`]),
-//! decrypted values that wipe themselves ([`Plaintext`], [`Text`]), the stack
-//! scrubs, and the zeroing global allocator (feature `zeroing-allocator`).
+//! journal mode, file mode 0600, a locked directory with mode 0700), the
+//! launch guard ([`launch_check`], feature `launch-guard`), the two-step
+//! unlock and the idle deadline with their [`Timer`] ([`Clock`]), the
+//! length-hiding padding ([`padding`]), decrypted values that wipe
+//! themselves ([`Plaintext`], [`Text`]), the stack scrubs, and the zeroing
+//! global allocator (feature `zeroing-allocator`).
 //!
 //! What a store holds is the caller's: the file name, `application_id`,
 //! schema and schema version come in a [`VaultConfig`], and the rows are
@@ -24,17 +27,22 @@
 static ALLOC: zeroizing_alloc::ZeroAlloc<std::alloc::System> =
     zeroizing_alloc::ZeroAlloc(std::alloc::System);
 
+mod clock;
 mod crypto;
+mod dirlock;
 mod error;
+mod launch;
 pub mod padding;
 mod store;
 mod text;
 
+pub use clock::{Clock, Holder, Timer, CONFIRM_WINDOW, DEFAULT_IDLE};
 pub use crypto::{
     aead_open, aead_seal, column_ad, fill, is_zero, open_column, pad, random, scrub_stack,
     scrub_stack_deep, seal_column, Plaintext, NONCE_LEN, TAG_LEN,
 };
 pub use error::Error;
+pub use launch::launch_check;
 pub use store::{check_path, DekSlot, Vault, VaultConfig};
 pub use text::{Text, CHUNK};
 

@@ -3,9 +3,12 @@
 //! in-process on 127.0.0.1:0 with a policy that counts its calls and checks
 //! at each one that the session mutex is free.
 
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Weak;
+use std::thread;
+use std::time::Instant;
 
 use brev_relay::{parse_listen, Decision, Endpoint, Policy, Relay, Server};
 
@@ -13,7 +16,8 @@ use super::*;
 use crate::test_keys::TestKey;
 use crate::{Envelope, MockTransport};
 
-/// A fresh directory under the system temp dir, removed on drop.
+/// A fresh directory with mode 0700 under the system temp dir, removed on
+/// drop.
 struct Tmp(PathBuf);
 impl Drop for Tmp {
     fn drop(&mut self) {
@@ -23,8 +27,17 @@ impl Drop for Tmp {
 fn tmp() -> Tmp {
     let r: [u8; 8] = crypto::random().unwrap();
     let p = std::env::temp_dir().join(format!("brev-ffi-{:016x}", u64::from_le_bytes(r)));
-    std::fs::create_dir(&p).unwrap();
+    std::fs::DirBuilder::new().mode(0o700).create(&p).unwrap();
     Tmp(p)
+}
+
+/// The idle time of the test sessions: long enough that no timer fires.
+const TEST_IDLE: u32 = 3600;
+
+/// Unlocks `b` and confirms it, as the app does once it shows the mail.
+fn unlock_active(b: &Brev, dek: &[u8]) {
+    b.unlock(dek, TEST_IDLE).unwrap();
+    b.confirm_active().unwrap();
 }
 
 fn len32(n: usize) -> u32 {
@@ -137,7 +150,7 @@ fn locked_user(url: &str) -> User {
 /// A new, unlocked session at `net`, watched by its probe.
 fn user(net: &Net) -> User {
     let u = locked_user(&net.url);
-    u.b.unlock(&u.dek).unwrap();
+    unlock_active(&u.b, &u.dek);
     net.probe.watch(&u.b);
     u
 }
@@ -227,7 +240,7 @@ fn panic_in_unlock_locks_all_scrubs_and_poison_returns_locked() {
     let panic_in_unlock = || {
         let deep = crypto::deep_scrubs();
         PANIC_IN_UNLOCK.with(|p| p.set(true));
-        let r = catch_unwind(AssertUnwindSafe(|| b.unlock(&dek)));
+        let r = catch_unwind(AssertUnwindSafe(|| b.unlock(&dek, TEST_IDLE)));
         PANIC_IN_UNLOCK.with(|p| p.set(false));
         assert!(r.is_err(), "the test panic must propagate");
         assert_eq!(crypto::deep_scrubs(), deep + 1, "scrubbed while unwinding");
@@ -244,7 +257,7 @@ fn panic_in_unlock_locks_all_scrubs_and_poison_returns_locked() {
     // `unlock` on the poisoned session: `Locked`, and it still scrubs.
     panic_in_unlock();
     let deep = crypto::deep_scrubs();
-    assert!(matches!(b.unlock(&dek), Err(BrevError::Locked)));
+    assert!(matches!(b.unlock(&dek, TEST_IDLE), Err(BrevError::Locked)));
     assert_eq!(crypto::deep_scrubs(), deep + 1);
     assert!(!b.s.is_poisoned());
     assert!(is_locked());
@@ -261,7 +274,7 @@ fn panic_in_unlock_locks_all_scrubs_and_poison_returns_locked() {
     b.lock();
     assert!(!b.s.is_poisoned());
     assert!(is_locked());
-    b.unlock(&dek).unwrap();
+    unlock_active(b, &dek);
     assert!(!b.is_locked());
     assert!(b.contacts().unwrap().is_empty());
 }
@@ -318,16 +331,19 @@ fn unlock_scrubs_deep_on_every_path() {
         &[7u8; 32][..],
     ] {
         let n = crypto::deep_scrubs();
-        assert!(matches!(b.unlock(bad), Err(BrevError::WrongKey)));
+        assert!(matches!(b.unlock(bad, TEST_IDLE), Err(BrevError::WrongKey)));
         assert_eq!(crypto::deep_scrubs(), n + 1);
         assert!(b.is_locked());
     }
     let n = crypto::deep_scrubs();
-    b.unlock(&u.dek).unwrap();
+    unlock_active(b, &u.dek);
     assert_eq!(crypto::deep_scrubs(), n + 1);
     assert!(!b.is_locked());
     let n = crypto::deep_scrubs();
-    assert!(matches!(b.unlock(&[7u8; 32]), Err(BrevError::WrongKey)));
+    assert!(matches!(
+        b.unlock(&[7u8; 32], TEST_IDLE),
+        Err(BrevError::WrongKey)
+    ));
     assert_eq!(crypto::deep_scrubs(), n + 1);
     assert!(b.is_locked(), "a wrong DEK on an unlocked session locks it");
 }
@@ -426,7 +442,7 @@ fn sign_request_needs_a_fresh_prepare() {
     // `lock` and `cancel_send` clear it.
     a.b.prepare_send(b_at_a.clone()).unwrap();
     a.b.lock();
-    a.b.unlock(&a.dek).unwrap();
+    unlock_active(&a.b, &a.dek);
     malformed(sign_request(&a, &b_at_a));
     a.b.prepare_send(b_at_a.clone()).unwrap();
     a.b.cancel_send();
@@ -497,7 +513,7 @@ fn lock_and_cancel_clear_the_pending_letter() {
     not_found(a.b.attach_signature(a.key.sign_digest(&d)));
     let d = digest(&a);
     a.b.lock();
-    a.b.unlock(&a.dek).unwrap();
+    unlock_active(&a.b, &a.dek);
     not_found(a.b.attach_signature(a.key.sign_digest(&d)));
     // Signed, then cancelled or locked.
     for lock in [false, true] {
@@ -506,7 +522,7 @@ fn lock_and_cancel_clear_the_pending_letter() {
         assert!(guard(&a.b.s).letter.as_ref().unwrap().is_signed());
         if lock {
             a.b.lock();
-            a.b.unlock(&a.dek).unwrap();
+            unlock_active(&a.b, &a.dek);
         } else {
             a.b.cancel_send();
         }
@@ -626,4 +642,186 @@ fn sync_counts_arrivals_when_the_ack_fails() {
         Err(BrevError::Locked)
     ));
     assert_eq!(at_b.poll().unwrap().len(), 1, "not acked");
+}
+
+/// Waits up to 5 s for `t` to be closed (`Locked`; an open empty text is
+/// `Malformed`), without touching the session. The time it took.
+fn wait_closed(t: &OpenText) -> Duration {
+    let start = Instant::now();
+    while !matches!(t.chunk(0), Err(BrevError::Locked)) && start.elapsed() < Duration::from_secs(5)
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
+    start.elapsed()
+}
+
+/// `unlock` arms: nothing opens until `confirm_active`. The idle time must
+/// be 1 to 3600 s.
+#[test]
+fn unlock_is_armed_until_confirmed() {
+    let u = locked_user(NO_RELAY);
+    let b = &u.b;
+    assert!(
+        matches!(b.confirm_active(), Err(BrevError::Locked)),
+        "nothing to confirm"
+    );
+    b.unlock(&u.dek, TEST_IDLE).unwrap();
+    assert!(b.is_locked());
+    assert!(matches!(b.contacts(), Err(BrevError::Locked)));
+    assert!(matches!(b.me().map(drop), Err(BrevError::Locked)));
+    b.confirm_active().unwrap();
+    assert!(!b.is_locked());
+    assert!(b.contacts().unwrap().is_empty());
+    b.confirm_active().unwrap();
+    assert!(!b.is_locked(), "idempotent while open");
+    for idle in [0, MAX_IDLE_SECS + 1, u32::MAX] {
+        assert!(matches!(b.unlock(&u.dek, idle), Err(BrevError::Malformed)));
+        assert!(b.is_locked());
+    }
+    b.note_activity();
+    assert!(b.is_locked(), "activity opens nothing");
+}
+
+/// No confirm within 2 s: the timer wipes everything (texts, the ticket,
+/// the epoch), and a confirm after that is `Locked`.
+#[test]
+fn an_unconfirmed_unlock_is_wiped_after_2_s() {
+    let net = net();
+    let (a, _b, b_at_a, _) = pair(&net);
+    let kept = Arc::clone(&a.b.contacts().unwrap()[0].name);
+    a.b.prepare_send(b_at_a).unwrap();
+    // Unlocking an open session arms it again, texts and all.
+    a.b.unlock(&a.dek, TEST_IDLE).unwrap();
+    let epoch = guard(&a.b.s).epoch;
+    assert!(kept.byte_len() > 0, "control: the text is open");
+    let took = wait_closed(&kept);
+    assert!(
+        took >= Duration::from_millis(1500),
+        "not before the window: {took:?}"
+    );
+    assert_eq!(kept.byte_len(), 0, "the timer closed the text");
+    {
+        let s = guard(&a.b.s);
+        assert!(s.me.is_locked() && s.ticket.is_none() && s.epoch != epoch);
+    }
+    assert!(matches!(a.b.confirm_active(), Err(BrevError::Locked)));
+    assert!(a.b.is_locked());
+}
+
+/// Idle for `idle_secs`: the timer wipes. `note_activity` moves the
+/// deadline.
+#[test]
+fn idle_wipes_and_activity_postpones_it() {
+    let u = locked_user(NO_RELAY);
+    let b = &u.b;
+    b.unlock(&u.dek, 2).unwrap();
+    b.confirm_active().unwrap();
+    // The empty own address: `Malformed` while open, `Locked` once closed.
+    let kept = b.me().unwrap().address;
+    assert!(matches!(kept.chunk(0), Err(BrevError::Malformed)));
+    thread::sleep(Duration::from_millis(1200));
+    b.note_activity();
+    let noted = Instant::now();
+    thread::sleep(Duration::from_millis(1200));
+    assert!(!guard(&b.s).me.is_locked(), "open 2.4 s after the confirm");
+    wait_closed(&kept);
+    let idle = noted.elapsed();
+    assert!(
+        idle >= Duration::from_millis(1900) && idle < Duration::from_millis(4000),
+        "{idle:?}"
+    );
+    assert!(matches!(kept.chunk(0), Err(BrevError::Locked)));
+    assert!(guard(&b.s).me.is_locked());
+    assert!(b.is_locked());
+}
+
+/// A deadline that passes while the session mutex is held (critic 8a):
+/// whoever takes the mutex next, an `unlock` or the timer, wipes first, so
+/// the epoch moves and a `sync` that was on the network stores nothing.
+#[test]
+fn a_passed_deadline_moves_the_epoch_before_anything_runs() {
+    let net = net();
+    let (a, b, b_at_a, a_at_b) = pair(&net);
+    send(&a, &b_at_a, b"s", b"x");
+    let (caller, token) = guard(&b.b.s).credentials().unwrap();
+    let envelopes = b.b.net.inbox(&caller, &token).unwrap();
+    let (to_b, at_b) = MockTransport::pair();
+    for e in &envelopes {
+        to_b.send(e).unwrap();
+    }
+    b.b.unlock(&b.dek, 1).unwrap();
+    b.b.confirm_active().unwrap();
+    // The epoch of a `sync` whose poll is under way.
+    let epoch = guard(&b.b.s).epoch;
+    let held = guard(&b.b.s);
+    thread::sleep(Duration::from_millis(1300));
+    drop(held);
+    unlock_active(&b.b, &b.dek);
+    assert_ne!(guard(&b.b.s).epoch, epoch);
+    assert!(matches!(b.b.sync_via(&at_b, epoch), Err(BrevError::Locked)));
+    assert!(b.b.threads(a_at_b).unwrap().is_empty(), "nothing stored");
+    assert_eq!(at_b.poll().unwrap().len(), 1, "nothing acknowledged");
+}
+
+/// One open session per folder: a second open is `Busy`; a dropped session
+/// frees the folder at once (its timer is joined), every time.
+#[test]
+fn one_session_per_folder_and_drop_frees_it() {
+    let u = locked_user(NO_RELAY);
+    let dir = u._dir.0.to_str().unwrap().to_owned();
+    let dek = u.dek;
+    assert!(matches!(
+        Brev::open(dir.clone(), NO_RELAY.into()).map(drop),
+        Err(BrevError::Busy)
+    ));
+    let key = TestKey::new();
+    assert!(matches!(
+        Brev::create(dir.clone(), NO_RELAY.into(), &dek, &key.public).map(drop),
+        Err(BrevError::Busy)
+    ));
+    drop(u.b);
+    for i in 0..100 {
+        let b = Brev::open(dir.clone(), NO_RELAY.into()).unwrap();
+        if i % 2 == 0 {
+            unlock_active(&b, &dek);
+        } else {
+            b.unlock(&dek, TEST_IDLE).unwrap();
+        }
+        drop(b);
+    }
+}
+
+/// The folder must be 0700 and `brev.db` 0600: `Unsafe` otherwise, and
+/// `create` makes no file.
+#[test]
+fn folder_and_file_modes_are_checked() {
+    let dir = tmp();
+    let arg = dir.0.to_str().unwrap().to_owned();
+    let path = MAIL.path_in(&dir.0);
+    let key = TestKey::new();
+    let dek: [u8; 32] = crypto::random().unwrap();
+    let chmod = |p: &Path, mode: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    chmod(&dir.0, 0o755);
+    assert!(matches!(
+        Brev::create(arg.clone(), NO_RELAY.into(), &dek, &key.public).map(drop),
+        Err(BrevError::Unsafe)
+    ));
+    assert!(!path.exists());
+    chmod(&dir.0, 0o700);
+    drop(Brev::create(arg.clone(), NO_RELAY.into(), &dek, &key.public).unwrap());
+    chmod(&dir.0, 0o755);
+    assert!(matches!(
+        Brev::open(arg.clone(), NO_RELAY.into()).map(drop),
+        Err(BrevError::Unsafe)
+    ));
+    chmod(&dir.0, 0o700);
+    chmod(&path, 0o644);
+    assert!(matches!(
+        Brev::open(arg.clone(), NO_RELAY.into()).map(drop),
+        Err(BrevError::Unsafe)
+    ));
+    chmod(&path, 0o600);
+    unlock_active(&Brev::open(arg, NO_RELAY.into()).unwrap(), &dek);
 }

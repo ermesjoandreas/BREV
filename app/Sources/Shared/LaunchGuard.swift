@@ -9,7 +9,10 @@
 // default, or a missing MallocScribble=1, as an unsafe launch: it
 // re-executes itself once with a cleaned environment, and if the launch is
 // still unsafe, nothing is ever decrypted in the process (AppDelegate shows
-// only launch.error.unsafe).
+// only launch.error.unsafe). DYLD_* variables (Xcode sets them for Debug
+// runs) are stripped the same way, since Rust's own launch guard refuses a
+// process that has one (docs/VAULT_SPLIT_PLAN.md, owner answer Q2); a Debug
+// build logs when it strips them and restarts.
 // No AppKit: compiled into the app and the CLI harness, which tests every
 // function here except `run`.
 
@@ -20,7 +23,7 @@ enum LaunchGuard {
     /// Environment variables with these prefixes make a launch unsafe.
     static let unsafePrefixes = ["NSZombie", "CFZombie", "NSDebug", "NSTrace", "NSDeallocateZombies",
                                  "NSObjCMessageLogging", "OBJC_", "MallocStackLogging", "CFLOG",
-                                 "OS_ACTIVITY_DT_MODE"]
+                                 "OS_ACTIVITY_DT_MODE", "DYLD_"]
     /// Defaults that make a launch unsafe when true (global domain included).
     /// TSMEventTracing is HIToolbox's key-event trace: it traces every key
     /// event on stderr without get-task-allow, so also in Release (launch
@@ -105,6 +108,12 @@ enum LaunchGuard {
             isSafe = true
         case .reexec:
             log.notice("launch unsafe: environment; re-executing")
+            #if DEBUG
+            let dyld = unsafeVariables(env).filter { $0.hasPrefix("DYLD_") }
+            if !dyld.isEmpty {
+                log.notice("Debug build: stripping \(dyld.joined(separator: " "), privacy: .public) and restarting once")
+            }
+            #endif
             let code = reexec(cleanedEnvironment(env))
             log.error("launch unsafe: re-exec failed errno=\(code, privacy: .public)")
         case .unsafe:

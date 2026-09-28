@@ -152,7 +152,9 @@ guard case .fresh = keyStore.installState() else {
 
 let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("touchid-probe-\(getpid())")
 try? FileManager.default.removeItem(at: tmp)
-try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+// Rust opens a store only in a folder with mode 0700.
+try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true,
+                                         attributes: [.posixPermissions: 0o700])
 
 /// Deletes every name the probe made (Brev's known names) and its files.
 func cleanup() {
@@ -235,6 +237,8 @@ func materialise(_ i: Int) -> SecretBytes {
 func afterUnlock(_ result: Result<Void, UnlockFailure>) -> Never {
     switch result {
     case .success:
+        // LockController's confirmation on main, as after Brev's unlock.
+        check("the unlock is confirmed within Rust's 2 s window", (try? session.brev.confirmActive()) != nil)
         let h = scan()
         check("while unlocked: the DEK is in Rust's box (positive control)", h[0] >= 1 && !session.brev.isLocked(), show(h))
         residueCheck("while unlocked: no copy of the DEK besides Rust's box", h[0] == 1, show(h))

@@ -35,7 +35,10 @@
 // - AppKit's own drawing of a content view (draw(_:), for print and PDF
 //   output) draws nothing (design §7.1);
 // - UnlockService locks Rust again when its closure fails after
-//   Brev.unlock succeeded (installing the wrapped DEK fails).
+//   Brev.unlock succeeded (installing the wrapped DEK fails);
+// - an unlock opens Rust only with confirmActive, which must come within
+//   2 s: the time from Brev.unlock to the completion on main is noted
+//   (docs/VAULT_SPLIT_PLAN.md R4).
 // The mail screen lives in a MainWindow that is never ordered onto the
 // screen; each content view draws its visible part into its pixel buffers
 // as AppKit's display pass would make it. Output is check names only.
@@ -157,9 +160,11 @@ if CGPreflightPostEventAccess() {
     print("skip nextEvent's idle-clock check: this process may not post events")
 }
 
+/// The mode Rust requires of a store's folder.
+let privateFolder: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("brev-lock-probe-\(getpid())")
 try? FileManager.default.removeItem(at: dir)
-try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: privateFolder)
 func finish() -> Never {
     try? FileManager.default.removeItem(at: dir)
     print(failures == 0 ? "PASS" : "FAIL: \(failures) check(s)")
@@ -176,7 +181,7 @@ func softwareKey() -> SecKey {
 /// the session and the wrapped DEK.
 func makeSession(_ sub: String, kek: SecKey, identity: SecKey) throws -> (Session, Data) {
     let path = dir.appendingPathComponent(sub)
-    try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true, attributes: privateFolder)
     let dek = SecretBytes(capacity: 64)
     guard SecRandomCopyBytes(kSecRandomDefault, 32, dek.base) == errSecSuccess else { throw BrevError.Rng }
     dek.setCount(32)
@@ -222,9 +227,15 @@ do {
     finish()
 }
 
-/// The unlock closure's core: unwrap with the software KEK, Brev.unlock.
+/// The unlock closure's core: unwrap with the software KEK, Brev.unlock;
+/// then the confirmation LockController makes on main.
 func unlockRust() -> Bool {
-    do { try Enclave.unwrap(wrappedDEK, with: softwareKEK) { try session.brev.unlock(dek: $0) } } catch { return false }
+    do {
+        try Enclave.unwrap(wrappedDEK, with: softwareKEK) {
+            try session.brev.unlock(dek: $0, idleSecs: LockState.rustIdleSecs)
+        }
+        try session.brev.confirmActive()
+    } catch { return false }
     return !session.brev.isLocked()
 }
 
@@ -232,6 +243,20 @@ let lock = LockController()
 lock.session = session
 var lockScreens = 0
 lock.showLockScreen = { lockScreens += 1 }
+
+// MARK: - An unlock opens only once confirmed (Brev.confirmActive)
+
+do {
+    try Enclave.unwrap(wrappedDEK, with: softwareKEK) {
+        try session.brev.unlock(dek: $0, idleSecs: LockState.rustIdleSecs)
+    }
+    let armed = session.brev.isLocked()
+    try session.brev.confirmActive()
+    check("an unlock opens Rust only once it is confirmed", armed && !session.brev.isLocked())
+} catch {
+    check("an unlock opens Rust only once it is confirmed", false, "\(error)")
+}
+session.brev.lock()
 
 // MARK: - A discarded unlock locks Rust (LockController.endUnlock)
 
@@ -257,7 +282,8 @@ do {
     // A second user, and a letter each way through the relay.
     let peerKEK = softwareKey(), peerIdentity = softwareKey()
     let (peer, peerWrapped) = try makeSession("b", kek: peerKEK, identity: peerIdentity)
-    try Enclave.unwrap(peerWrapped, with: peerKEK) { try peer.brev.unlock(dek: $0) }
+    try Enclave.unwrap(peerWrapped, with: peerKEK) { try peer.brev.unlock(dek: $0, idleSecs: LockState.rustIdleSecs) }
+    try peer.brev.confirmActive()
     let me = freshAddress("a"), other = freshAddress("b")
     try register(session, identity, me)
     try register(peer, peerIdentity, other)
@@ -440,12 +466,17 @@ for takes in [true, false] {
 /// software key, and installing the wrapped DEK fails after Brev.unlock
 /// succeeded (onboarding's first unlock, design §5.3 step 8).
 final class FailingInstall: KeyStore {
-    /// Whether Rust was unlocked when the install was tried (the control).
+    /// Whether Rust was unlocked when the install was tried (the control;
+    /// confirmed here, as LockController would on main).
     var unlockedAtInstall = false
+    /// CLOCK_MONOTONIC nanoseconds when the install was tried, right after
+    /// Brev.unlock returned.
+    var unlockedAt: UInt64 = 0
     override func kek(context: LAContext) throws -> SecKey { softwareKEK }
     override func readWrapped() throws -> Data { wrappedDEK }
     override func storeWrapped(_ wrapped: Data) throws {
-        unlockedAtInstall = !session.brev.isLocked()
+        unlockedAt = clock_gettime_nsec_np(CLOCK_MONOTONIC)
+        unlockedAtInstall = (try? session.brev.confirmActive()) != nil && !session.brev.isLocked()
         throw KeyStore.error(errSecIO)
     }
     override func readBiometryState() -> Data? { nil }
@@ -454,9 +485,16 @@ final class FailingInstall: KeyStore {
 
 let keys = FailingInstall()
 var outcome: Result<Void, UnlockFailure>?
-UnlockService(keyStore: keys).unlock(session, install: wrappedDEK) { outcome = $0 }
+var completedAt: UInt64 = 0
+UnlockService(keyStore: keys).unlock(session, install: wrappedDEK) {
+    completedAt = clock_gettime_nsec_np(CLOCK_MONOTONIC)
+    outcome = $0
+}
 let deadline = Date(timeIntervalSinceNow: 10)
 while outcome == nil && Date() < deadline { _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05)) }
+if completedAt > keys.unlockedAt, keys.unlockedAt > 0 {
+    print("note Brev.unlock to the completion on main: \((completedAt - keys.unlockedAt) / 1_000_000) ms of the 2000 ms window")
+}
 var failed = false
 if case .failure? = outcome { failed = true }
 check("UnlockService: a failure after Brev.unlock succeeded is reported, and Rust is locked again",

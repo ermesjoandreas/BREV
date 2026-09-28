@@ -100,7 +100,9 @@ final class UnlockService {
         let wrapped = try install ?? keyStore.readWrapped()
         let kek = try keyStore.kek(context: ctx)
         try Enclave.unwrap(wrapped, with: kek) { dek in
-            do { try session.brev.unlock(dek: dek) } catch { throw CoreUnlockError(underlying: error) }
+            do { try session.brev.unlock(dek: dek, idleSecs: LockState.rustIdleSecs) } catch {
+                throw CoreUnlockError(underlying: error)
+            }
         }
         if let install {
             try keyStore.storeWrapped(install)

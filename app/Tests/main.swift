@@ -163,18 +163,23 @@ func freshAddress(_ who: String) -> String {
     "\(who)-\(getpid())-\(UInt32.random(in: 0...UInt32.max))"
 }
 
-/// A fresh directory in TMPDIR for one run's stores, removed afterwards.
+/// The mode Rust requires of a store's folder.
+let privateFolder: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
+
+/// A fresh directory (mode 0700) in TMPDIR for one run's stores, removed
+/// afterwards.
 func withStoreDir(_ body: (URL) -> Void) {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("brev-harness-\(getpid())")
     try? FileManager.default.removeItem(at: dir)
-    try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: privateFolder)
     defer { try? FileManager.default.removeItem(at: dir) }
     body(dir)
 }
 
 /// The unlock closure of §5.4 (UnlockService): unwrap the DEK, unlock on
 /// the same thread without a copy, and the CFData is zeroed in place when
-/// `unwrap` returns. Any error locks the session. Returns whether `Brev.unlock`
+/// `unwrap` returns; then the confirmation LockController makes on main.
+/// Any error locks the session. Returns whether `Brev.unlock`
 /// got the bytes of the CFData Security returned (no copy) and whether that
 /// CFData is all zero after `unwrap`; the harness keeps it alive to look.
 @discardableResult
@@ -187,8 +192,11 @@ func unlock(_ session: Session, wrapped: Data, kek: SecKey) throws -> (sameAddre
             return plain
         }) { dek in
             seen = dek.withUnsafeBytes { $0.baseAddress }
-            do { try session.brev.unlock(dek: dek) } catch { throw CoreUnlockError(underlying: error) }
+            do { try session.brev.unlock(dek: dek, idleSecs: LockState.rustIdleSecs) } catch {
+                throw CoreUnlockError(underlying: error)
+            }
         }
+        try session.brev.confirmActive()
     } catch {
         session.brev.lock()
         throw error
@@ -214,7 +222,7 @@ final class User {
     /// Onboarding steps 6 and 7 in `dir`: a random DEK in a SecretBytes,
     /// wrapped, `Session.create` (which wipes it), then the unlock.
     init(in dir: URL, relay: String) throws {
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: privateFolder)
         identity = try newSoftwareKey()
         let dek = SecretBytes(capacity: 64)
         guard SecRandomCopyBytes(kSecRandomDefault, 32, dek.base) == errSecSuccess else { throw BrevError.Rng }
@@ -543,7 +551,8 @@ func caseShell() {
           InputFilter.isSynthetic(nil) && InputFilter.sourcePID(nil) == -1)
 
     // LockState
-    let all: [LockReason] = [.resignActive, .screenLocked, .sleep, .sessionResign, .idle, .manual, .terminate]
+    let all: [LockReason] = [.resignActive, .screenLocked, .sleep, .sessionResign, .idle, .manual, .terminate,
+                             .unlockExpired]
     let s = LockState()
     check("LockState: starts locked, generation 0, no auth",
           !s.unlocked && !s.authInFlight && s.generation == 0 && all.allSatisfy { s.shouldLock(for: $0) })
@@ -602,6 +611,8 @@ func caseShell() {
     check("LockState: idle at 300 s, not before, not with a clock behind the last input",
           limit == 300_000_000_000 && !LockState.isIdle(now: t0 + limit - 1, lastInput: t0)
             && LockState.isIdle(now: t0 + limit, lastInput: t0) && !LockState.isIdle(now: t0 - 1, lastInput: t0))
+    check("LockState: Rust's idle deadline (320 s) comes after Swift's last idle check (300 s + 15 s)",
+          UInt64(LockState.rustIdleSecs) * 1_000_000_000 > limit + UInt64(LockState.idleCheckInterval) * 1_000_000_000)
 
     caseUnlockFailure()
 

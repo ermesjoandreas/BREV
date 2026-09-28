@@ -105,7 +105,8 @@ impl std::ops::Deref for Plaintext {
 #[cfg(any(test, feature = "test-hooks"))]
 impl Drop for Plaintext {
     fn drop(&mut self) {
-        LIVE_PLAINTEXTS.with(|n| n.set(n.get() - 1));
+        // Wraps on a thread that drops what another made (the timer's wipe).
+        LIVE_PLAINTEXTS.with(|n| n.set(n.get().wrapping_sub(1)));
     }
 }
 

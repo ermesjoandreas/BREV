@@ -11,7 +11,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 use brev_core::{limits, Brev, BrevError, Core, Error, MessageId, CHUNK, MAX_BODY, MAX_SUBJECT};
-use common::{contains, len32, pair, random, Relayed, TempDir, TestKey, User};
+use common::{
+    contains, len32, pair, random, unlock_active, Relayed, TempDir, TestKey, User, TEST_IDLE,
+};
 
 const FILES: [&str; 1] = ["brev.db"];
 
@@ -23,7 +25,7 @@ fn create_returns_a_locked_session_without_contacts() {
     assert!(matches!(u.b.contacts(), Err(BrevError::Locked)));
     assert_eq!(u.dir.files(), FILES);
 
-    u.b.unlock(&u.dek).unwrap();
+    unlock_active(&u.b, &u.dek);
     assert!(u.b.contacts().unwrap().is_empty());
     let me = u.b.me().unwrap();
     assert!(!me.registered);
@@ -36,7 +38,7 @@ fn create_returns_a_locked_session_without_contacts() {
     drop(u.b);
     let b = Brev::open(dir, relay.url.clone()).unwrap();
     assert!(b.is_locked());
-    b.unlock(&u.dek).unwrap();
+    unlock_active(&b, &u.dek);
     assert_eq!(b.me().unwrap().code, code);
     assert_eq!(relay.requests(), 0, "nothing registered, nothing asked");
 }
@@ -164,7 +166,7 @@ fn create_refuses_existing_files() {
     assert_eq!(fs::read(dir.0.join("brev.db")).unwrap(), before);
     Brev::open(dir.arg(), URL.into())
         .unwrap()
-        .unlock(&dek)
+        .unlock(&dek, TEST_IDLE)
         .unwrap();
 
     // Bad input makes no file: the DEK, the key, the directory, the relay.
@@ -344,16 +346,18 @@ fn older_store_is_refused() {
     raw.pragma_update(None, "user_version", 3).unwrap();
     Brev::open(dir.arg(), "http://127.0.0.1:9".into())
         .unwrap()
-        .unlock(&dek)
+        .unlock(&dek, TEST_IDLE)
         .unwrap();
 }
 
 #[test]
 fn thread_of_is_gated_metadata() {
-    let dir = TempDir::new();
+    let (dir, dir_b) = (TempDir::new(), TempDir::new());
     let key = TestKey::new();
     let mut a = Core::create(&dir.0.join("a.db"), &mut random(), &key.public).unwrap();
-    let b = Core::create(&dir.0.join("b.db"), &mut random(), &TestKey::new().public).unwrap();
+    let mut b = Core::create(&dir_b.0.join("b.db"), &mut random(), &TestKey::new().public).unwrap();
+    a.confirm_active().unwrap();
+    b.confirm_active().unwrap();
     let b_at_a = a.add_contact(&b.bundle().unwrap(), b"bob").unwrap();
     let mut letter = a.seal_letter(b_at_a, b"s", b"x").unwrap();
     let der = key.sign_digest(&letter.digest());

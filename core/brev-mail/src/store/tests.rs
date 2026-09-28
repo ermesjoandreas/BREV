@@ -2,6 +2,7 @@
 //! SQL trace or the test-build counters.
 
 use std::fs;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -11,33 +12,46 @@ use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use super::*;
 use crate::test_keys::TestKey;
 
+/// A store path in a fresh folder with mode 0700 of its own: a store locks
+/// its folder.
 fn temp_path() -> PathBuf {
     let r: [u8; 8] = crypto::random().unwrap();
-    std::env::temp_dir().join(format!("brev-unit-{:016x}.db", u64::from_le_bytes(r)))
+    let dir = std::env::temp_dir().join(format!("brev-unit-{:016x}", u64::from_le_bytes(r)));
+    fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+    dir.join("brev.db")
 }
 
-/// A store and the identity key it was made with. The file (and any
-/// journal) is removed on drop.
+/// Removes the folder of a `temp_path()` on drop.
+struct Cleanup(PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if let Some(dir) = self.0.parent() {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// A store, confirmed, and the identity key it was made with. Its folder is
+/// removed on drop, after the store is closed.
 struct Party {
     core: Core,
     key: TestKey,
     path: PathBuf,
-}
-
-impl Drop for Party {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        let mut journal = self.path.clone().into_os_string();
-        journal.push("-journal");
-        let _ = fs::remove_file(journal);
-    }
+    _cleanup: Cleanup,
 }
 
 fn party() -> Party {
     let key = TestKey::new();
     let path = temp_path();
-    let core = Core::create(&path, &mut crypto::random().unwrap(), &key.public).unwrap();
-    Party { core, key, path }
+    let mut core = Core::create(&path, &mut crypto::random().unwrap(), &key.public).unwrap();
+    core.confirm_active().unwrap();
+    Party {
+        core,
+        key,
+        _cleanup: Cleanup(path.clone()),
+        path,
+    }
 }
 
 /// Each adds the other under the given address; returns (b at a, a at b).
@@ -116,6 +130,7 @@ fn lock_zeroes_the_dek_buffer() {
     let mut right = original;
     let built = crypto::secrets_built();
     core.unlock(&mut right).unwrap();
+    core.confirm_active().unwrap();
     assert_eq!(right, [0u8; 32]);
     assert_eq!(core.dek_for_test(), original);
     assert_eq!(core.dek_addr_for_test(), addr);
@@ -146,7 +161,7 @@ fn lock_zeroes_the_dek_buffer() {
     assert_eq!(core.dek_for_test(), [0u8; 32]);
     assert!(matches!(core.bundle().map(drop), Err(Error::Locked)));
     drop(core);
-    let _ = fs::remove_file(&path);
+    drop(Cleanup(path));
 }
 
 /// A store sealed under the all-zero key (a crafted file: `create`
@@ -162,12 +177,13 @@ fn unlock_refuses_all_zero_dek() {
     assert!(matches!(core.unlock(&mut zero), Err(Error::WrongKey)));
     assert!(core.is_locked());
     drop(core);
-    let _ = fs::remove_file(&path);
+    drop(Cleanup(path));
 }
 
 #[test]
 fn schema_v3_pragmas() {
     let p = party();
+    drop(p.core);
     let core = Core::open(&p.path).unwrap();
     let q = |name: &str| -> String {
         core.db()
@@ -252,10 +268,11 @@ CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
     let before = fs::read(&path).unwrap();
     assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
     assert_eq!(fs::read(&path).unwrap(), before);
-    let _ = fs::remove_file(&path);
+    drop(Cleanup(path));
 
     // A v3 store relabelled as version 2.
     let p = party();
+    drop(p.core);
     let raw = Connection::open(&p.path).unwrap();
     raw.pragma_update(None, "user_version", 2).unwrap();
     assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));

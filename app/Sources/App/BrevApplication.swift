@@ -6,9 +6,11 @@
 // through InputFilter's PID rule twice: in `sendEvent`, and in `nextEvent`,
 // where tracking loops (buttons, scrollers, menus) pull events without
 // `sendEvent`. A dropped event is logged by type and source PID only.
-// Accepted input stamps the idle clock that LockController reads, and marks
-// the time spent dispatching it (`inHumanDispatch`), which HumanButton uses
-// to refuse actions that do not come from a human event.
+// Accepted input stamps the idle clock that LockController reads, tells
+// Rust's idle clock at most once a second (`noteActivity`), and marks the
+// time spent dispatching it (`inHumanDispatch`), which HumanButton uses to
+// refuse actions that do not come from a human event. Dropped events reach
+// neither clock.
 
 import AppKit
 import os
@@ -44,6 +46,11 @@ final class BrevApplication: NSApplication {
     private(set) static var inHumanDispatch = false
     /// CLOCK_MONOTONIC nanoseconds of the last accepted input event.
     private(set) static var lastHumanInput = clock_gettime_nsec_np(CLOCK_MONOTONIC)
+    /// Tells Rust a human is there (`Brev.noteActivity`); set by
+    /// AppDelegate while it holds a session.
+    static var noteActivity: (() -> Void)?
+    /// CLOCK_MONOTONIC nanoseconds of the last `noteActivity` call.
+    private static var lastNoted: UInt64 = 0
 
     override func sendEvent(_ event: NSEvent) {
         if InputFilter.isSynthetic(event) {
@@ -51,7 +58,7 @@ final class BrevApplication: NSApplication {
             return
         }
         let human = InputFilter.isInput(event)
-        if human { Self.lastHumanInput = clock_gettime_nsec_np(CLOCK_MONOTONIC) }
+        if human { Self.accepted() }
         let was = Self.inHumanDispatch
         Self.inHumanDispatch = human
         defer { Self.inHumanDispatch = was }
@@ -64,7 +71,7 @@ final class BrevApplication: NSApplication {
             guard let event = super.nextEvent(matching: mask, until: expiration, inMode: mode, dequeue: deqFlag)
             else { return nil }
             if !InputFilter.isSynthetic(event) {
-                if InputFilter.isInput(event) { Self.lastHumanInput = clock_gettime_nsec_np(CLOCK_MONOTONIC) }
+                if InputFilter.isInput(event) { Self.accepted() }
                 return event
             }
             Self.drop(event)
@@ -72,6 +79,16 @@ final class BrevApplication: NSApplication {
             // returns it again.
             if !deqFlag { _ = super.nextEvent(matching: mask, until: .distantPast, inMode: mode, dequeue: true) }
         }
+    }
+
+    /// An input event passed the filter: stamp the idle clock, and Rust's
+    /// at most once a second.
+    private static func accepted() {
+        let now = clock_gettime_nsec_np(CLOCK_MONOTONIC)
+        lastHumanInput = now
+        guard now &- lastNoted >= 1_000_000_000 else { return }
+        lastNoted = now
+        noteActivity?()
     }
 
     private static func drop(_ event: NSEvent) {

@@ -23,10 +23,15 @@ zeroize = { workspace = true }
 zeroizing-alloc = { workspace = true, optional = true }
 
 [features]
-default = ["zeroing-allocator"]
+default = ["zeroing-allocator", "launch-guard"]
 # The global allocator that zeroes every freed heap block (src/lib.rs).
 # brev-mail turns it on; brev-proto, and so the relay, leave it off.
 zeroing-allocator = ["dep:zeroizing-alloc"]
+# Refuse to create, open or unlock a store in a process with a DYLD_*
+# variable or without MallocScribble=1 (src/launch.rs). In the app's archive
+# (brev-mail's default); off in the tests, which run with
+# --no-default-features (docs/VAULT_SPLIT_PLAN.md §4, §5c).
+launch-guard = []
 # Test counters and accessors for the tests of the crates built on the
 # vault. Never in the app's archive.
 test-hooks = []

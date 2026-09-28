@@ -3,10 +3,10 @@ name = "brev-mail"
 description = "Brev mail: identity, contacts, letters and the relay client on top of brev-vault, exposed to Swift via UniFFI"
 version.workspace = true
 edition.workspace = true
-# Not the workspace's 1.85: reqwest -> url -> idna -> idna_adapter 1.2.2 ->
-# ICU4X 2.3 declares 1.88 (docs/PHASE3_DESIGN.md §0). brev-vault, brev-proto
-# and brev-relay stay at 1.85.
-rust-version = "1.88"
+# The workspace's 1.89 (brev-vault's File::try_lock); reqwest -> url -> idna
+# -> idna_adapter 1.2.2 -> ICU4X 2.3 alone needs 1.88 (docs/PHASE3_DESIGN.md
+# §0).
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
@@ -34,7 +34,10 @@ zeroize = { workspace = true }
 reqwest = { workspace = true }
 
 [features]
-default = []
+# The app's archive refuses an unsafe process (brev-vault's launch guard).
+# The tests run with --no-default-features, which turns it off.
+default = ["launch-guard"]
+launch-guard = ["brev-vault/launch-guard"]
 # `MockTransport` and the vault's test counters and accessors, for the tests
 # (docs/VAULT_SPLIT_PLAN.md Q5). Never in the app's archive: gen-bindings.sh
 # builds with the default features.

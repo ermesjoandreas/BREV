@@ -29,12 +29,14 @@ uniffi_brev_core_fn_method_brev_accept_new_key
 uniffi_brev_core_fn_method_brev_add_contact
 uniffi_brev_core_fn_method_brev_attach_signature
 uniffi_brev_core_fn_method_brev_cancel_send
+uniffi_brev_core_fn_method_brev_confirm_active
 uniffi_brev_core_fn_method_brev_contact_info
 uniffi_brev_core_fn_method_brev_contacts
 uniffi_brev_core_fn_method_brev_is_locked
 uniffi_brev_core_fn_method_brev_lock
 uniffi_brev_core_fn_method_brev_me
 uniffi_brev_core_fn_method_brev_messages
+uniffi_brev_core_fn_method_brev_note_activity
 uniffi_brev_core_fn_method_brev_open_body
 uniffi_brev_core_fn_method_brev_prepare_send
 uniffi_brev_core_fn_method_brev_register
@@ -173,17 +175,18 @@ FfiConverterByRefBytes.lower(subject) { subjectFb in
 FfiConverterByRefBytes.lower(body) { bodyFb in
 
 # The other arguments and results: signRequest's two lengths, the address
-# lengths of addContact and registerRequest, chunk's index; sync's count and
-# byteLen; isLocked; limits(); the Brev of create and open; openBody's
-# OpenText; contactInfo's ContactInfo and me's MeInfo; the row lists of
-# contacts, threads and messages; the error of the throwing methods that
-# return nothing (acceptNewKey, attachSignature, prepareSend, register,
-# unlock).
+# lengths of addContact and registerRequest, chunk's index, unlock's idle
+# seconds; sync's count and byteLen; isLocked; limits(); the Brev of create
+# and open; openBody's OpenText; contactInfo's ContactInfo and me's MeInfo;
+# the row lists of contacts, threads and messages; the error of the throwing
+# methods that return nothing (acceptNewKey, attachSignature, confirmActive,
+# prepareSend, register, unlock). noteActivity takes and returns nothing.
 FfiConverterUInt32.lower(subjectLen),
 FfiConverterUInt32.lower(bodyLen),uniffiCallStatus
 FfiConverterUInt32.lower(addressLen),uniffiCallStatus
 FfiConverterUInt32.lower(addressLen),uniffiCallStatus
 FfiConverterUInt32.lower(index),uniffiCallStatus
+FfiConverterUInt32.lower(idleSecs),uniffiCallStatus
 return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
 return try!  FfiConverterUInt32.lift(try! rustCall() {
 return try!  FfiConverterBool.lift(try! rustCall() {
@@ -198,9 +201,10 @@ return try  FfiConverterSequenceTypeMessageRow.lift(try rustCallWithError(FfiCon
 return try  FfiConverterSequenceTypeThreadRow.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
 open func acceptNewKey(contact: Data, newCode: Data)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
 open func attachSignature(signature: Data)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
+open func confirmActive()throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
 open func prepareSend(contact: Data)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
 open func register(signature: Data)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
-open func unlock(dek: Data)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
+open func unlock(dek: Data, idleSecs: UInt32)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
 
 # Record fields other than the Data above: Limits' four numbers;
 # ContactRow.name, ContactInfo.address and MeInfo.address (OpenText handles:
