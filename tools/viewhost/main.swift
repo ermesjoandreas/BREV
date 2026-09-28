@@ -423,6 +423,10 @@ do {
     speilUser.session.brev.lock()
     let arrived = try session.sync()
     check("Ekko's letter arrives through the relay", arrived == 1, "\(arrived)")
+    // Ekko takes the first letter now, so its sync after a compose send
+    // counts only the composed letter.
+    let atEkko = try ekkoUser.session.sync()
+    check("the first letter arrives at Ekko", atEkko == 1, "\(atEkko)")
 } catch {
     check("fake letters sent", false, "\((error as? BrevError).map { "\($0)" } ?? "other")")
     finish()
