@@ -46,6 +46,26 @@ fn local_rows(u: &User, table: &str) -> i64 {
         .unwrap()
 }
 
+/// The sealed flags cell of `contact` in `u`'s store; with `put`, that
+/// cell is then written in its place, as a program that can write the
+/// container could (CLAUDE.md §2).
+fn flags_cell(u: &User, contact: &[u8], put: Option<&[u8]>) -> Vec<u8> {
+    let raw = rusqlite::Connection::open(u.dir.0.join("brev.db")).unwrap();
+    let cell = raw
+        .query_row("SELECT flags FROM contacts WHERE id = ?1", [contact], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    if let Some(put) = put {
+        raw.execute(
+            "UPDATE contacts SET flags = ?1 WHERE id = ?2",
+            rusqlite::params![put, contact],
+        )
+        .unwrap();
+    }
+    cell
+}
+
 /// Events waiting at the relay for the identity at `address`.
 fn events_at(relay: &Relayed, address: &str) -> i64 {
     relay
@@ -101,7 +121,9 @@ fn invite_with_wrong_fingerprint_is_rejected() {
     let root_secret = root.strip_prefix("brev1.").unwrap();
 
     // (a) one character of the fingerprint changed, (b) another address,
-    // (d) a 4-part code whose secret is a root invite's, answered `00`.
+    // (d) a 4-part code whose secret is a root invite's, answered `00`,
+    // (e) a 2-part (root form) code whose secret is A's invite, answered
+    // with A.
     let mut edited = fp.as_bytes().to_vec();
     edited[7] = if edited[7] == b'a' { b'b' } else { b'a' };
     let edited = String::from_utf8(edited).unwrap();
@@ -109,6 +131,7 @@ fn invite_with_wrong_fingerprint_is_rejected() {
         format!("brev1.anna.{edited}.{secret}"),
         format!("brev1.carl.{fp}.{secret}"),
         format!("brev1.anna.{fp}.{root_secret}"),
+        format!("brev1.{secret}"),
     ];
 
     // The invitee on the address page (not registered), and a registered
@@ -518,7 +541,8 @@ fn events_are_processed_once() {
 /// under B's address: A's contact shows the key change, no answer goes
 /// out, B' cannot write; once A accepts the new code, the next sync
 /// approves B', whose letters then arrive. The accepted key keeps none of
-/// the old key's flags.
+/// the old key's flags, also when the old flags cell is written back: it
+/// does not open under the new key.
 #[test]
 fn key_change_through_a_request() {
     let relay = Relayed::new();
@@ -544,8 +568,15 @@ fn key_change_through_a_request() {
 
     let new_code = a.b.contact_info(b_at_a.clone()).unwrap().new_code;
     assert_eq!(new_code, b2.b.me().unwrap().code);
+    let old = flags_cell(&a, &b_at_a, None);
     a.b.accept_new_key(b_at_a.clone(), new_code).unwrap();
     assert_eq!(state(&a, "bert"), (true, false, false), "old flags gone");
+    let new = flags_cell(&a, &b_at_a, Some(&old));
+    assert!(matches!(
+        a.b.contact_info(b_at_a.clone()),
+        Err(BrevError::Crypto)
+    ));
+    flags_cell(&a, &b_at_a, Some(&new));
     assert!(a.b.sync().unwrap().contacts_changed);
     assert_eq!(state(&a, "bert"), (false, false, false));
     assert_eq!(events_at(&relay, "anna"), 0, "answered yes");
@@ -723,8 +754,9 @@ fn session_invite_and_requests_cleared_on_lock() {
 
 /// *Blokker* (owner answer 6): one call sets the sealed flag and tells the
 /// relay. Nothing goes to the blocked contact (no request is made), a
-/// letter being sent to it is forgotten, its letters are dropped also when
-/// the relay would store them, and the relay refuses its new letters.
+/// letter or ticket for it is forgotten, a ticket the block did not see is
+/// refused at the seal, its letters are dropped also when the relay would
+/// store them, and the relay refuses its new letters.
 #[test]
 fn blokker_blocks_sending_and_receiving() {
     let relay = Relayed::new();
@@ -733,6 +765,8 @@ fn blokker_blocks_sending_and_receiving() {
     a.b.prepare_send(b_at_a.clone()).unwrap();
     let digest = a.b.sign_request(b_at_a.clone(), b"s", 1, b"x", 1).unwrap();
     a.b.attach_signature(a.key.sign_digest(&digest)).unwrap();
+    // And a ticket for the next letter.
+    a.b.prepare_send(b_at_a.clone()).unwrap();
 
     a.b.block_contact(b_at_a.clone()).unwrap();
     a.b.block_contact(b_at_a.clone()).unwrap();
@@ -741,6 +775,19 @@ fn blokker_blocks_sending_and_receiving() {
         matches!(a.b.submit(), Err(BrevError::NotFound)),
         "forgotten"
     );
+    assert!(
+        matches!(
+            a.b.sign_request(b_at_a.clone(), b"s", 1, b"x", 1),
+            Err(BrevError::Malformed)
+        ),
+        "the ticket too"
+    );
+    // A ticket set after the block (a lookup that was in flight).
+    a.b.force_ticket_for_test(b_at_a.clone()).unwrap();
+    assert!(matches!(
+        sign_and_submit(&a, &b_at_a, b"late"),
+        Err(BrevError::NotApproved)
+    ));
     let requests = relay.requests();
     assert!(matches!(
         a.b.prepare_send(b_at_a.clone()),
@@ -776,6 +823,53 @@ fn blokker_blocks_sending_and_receiving() {
     assert_eq!(a.b.sync().unwrap().letters, 0);
     assert_eq!(relay.waiting(), 0);
     assert!(a.b.threads(b_at_a).unwrap().is_empty());
+}
+
+/// *Blokker* through a key change: A blocks B; B is released and B'
+/// (brought in by D) asks A under B's address. The relay's block was for
+/// B, so only A's flag stands: accepting the new key keeps it, the next
+/// sync answers no (the relay declines B', no event is left), and B''s
+/// letters are refused.
+#[test]
+fn blokker_holds_through_a_key_change() {
+    let relay = Relayed::new();
+    let (a, _b, b_at_a, _) = pair(&relay);
+    a.b.block_contact(b_at_a.clone()).unwrap();
+    let d = User::new(&relay.url);
+    relay.join(&d, "dora");
+    assert!(relay.relay.release("bert").unwrap());
+    let b2 = User::new(&relay.url);
+    b2.register_with(&d.invite(), "bert");
+    let a_at_b2 = b2.add("anna");
+
+    assert!(a.b.sync().unwrap().contacts_changed);
+    let new_code = a.b.contact_info(b_at_a.clone()).unwrap().new_code;
+    assert_eq!(new_code, b2.b.me().unwrap().code);
+    a.b.accept_new_key(b_at_a.clone(), new_code).unwrap();
+    assert_eq!(state(&a, "bert"), (true, false, true), "the block stays");
+
+    a.b.sync().unwrap();
+    assert_eq!(state(&a, "bert"), (true, false, true));
+    assert_eq!(events_at(&relay, "anna"), 0, "answered");
+    let link: i64 = relay
+        .sql()
+        .query_row(
+            "SELECT state FROM links WHERE owner = ?1 AND peer = ?2",
+            [relay.id_of("anna"), relay.id_of("bert")],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(link, 2, "declined");
+    assert!(matches!(
+        b2.b.prepare_send(a_at_b2.clone()),
+        Err(BrevError::NotApproved)
+    ));
+    b2.b.force_ticket_for_test(a_at_b2.clone()).unwrap();
+    assert!(matches!(
+        sign_and_submit(&b2, &a_at_b2, b"blocked"),
+        Err(BrevError::NotApproved)
+    ));
+    assert_eq!(relay.waiting(), 0);
 }
 
 /// The deferred WP2 review note: A asks B, then blocks B before B answers.

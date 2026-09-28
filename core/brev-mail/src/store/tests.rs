@@ -979,18 +979,30 @@ fn column_ad_uses_local_contact_id() {
     );
     assert!(crypto::open_column(&dek, &by_identity, &subject).is_err());
     for column in ["bundle", "address", "pending", "flags"] {
-        let sealed: Vec<u8> = a
+        let (tag, sealed): (Vec<u8>, Vec<u8>) = a
             .core
             .db()
             .query_row(
-                &format!("SELECT {column} FROM contacts WHERE id = ?1"),
+                &format!("SELECT tag, {column} FROM contacts WHERE id = ?1"),
                 [&b_at_a.0[..]],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         let label = format!("contacts.{column}");
-        assert!(crypto::open_column(&dek, &column_ad(&label, &[&b_at_a.0]), &sealed).is_ok());
-        assert!(crypto::open_column(&dek, &column_ad(&label, &[&b_id.0]), &sealed).is_err());
+        // The flags also hold the pinned key's keyed tag.
+        let (local, by_identity) = if column == "flags" {
+            (
+                column_ad(&label, &[&b_at_a.0, &tag]),
+                column_ad(&label, &[&b_id.0, &tag]),
+            )
+        } else {
+            (
+                column_ad(&label, &[&b_at_a.0]),
+                column_ad(&label, &[&b_id.0]),
+            )
+        };
+        assert!(crypto::open_column(&dek, &local, &sealed).is_ok());
+        assert!(crypto::open_column(&dek, &by_identity, &sealed).is_err());
     }
     // After a key change is accepted, the history opens unchanged.
     let before: Vec<u8> = a

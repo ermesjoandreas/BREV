@@ -546,8 +546,7 @@ impl Core {
         let sealed_address =
             crypto::seal_column(dek, &column_ad("contacts.address", &[&id]), address)?;
         let pending = crypto::seal_column(dek, &column_ad("contacts.pending", &[&id]), &[])?;
-        let sealed_flags =
-            crypto::seal_column(dek, &column_ad("contacts.flags", &[&id]), &[flags])?;
+        let sealed_flags = crypto::seal_column(dek, &flags_ad(&id, &tag), &[flags])?;
         // Any uniqueness conflict: the same identity (tag) is already there.
         let n = self.db().execute(
             "INSERT INTO contacts (id, tag, bundle, address, pending, flags)
@@ -598,15 +597,21 @@ impl Core {
     /// The flags of `contact` (one byte, `Corrupt` if the value is not one
     /// byte; `Crypto` if it does not open under this row's AD).
     pub(crate) fn contact_flags(&self, contact: ContactId) -> Result<u8, Error> {
+        Ok(self.flags_and_tag(contact)?.0)
+    }
+
+    /// The flags of `contact` and the row's tag. The flags' AD holds the
+    /// tag, so flags sealed while another key was pinned do not open.
+    fn flags_and_tag(&self, contact: ContactId) -> Result<(u8, [u8; 32]), Error> {
         let dek = self.dek()?;
-        let sealed: Vec<u8> = self.db().query_row(
-            "SELECT flags FROM contacts WHERE id = ?1",
+        let (tag, sealed): ([u8; 32], Vec<u8>) = self.db().query_row(
+            "SELECT tag, flags FROM contacts WHERE id = ?1",
             [&contact.0[..]],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        let flags = crypto::open_column(dek, &column_ad("contacts.flags", &[&contact.0]), &sealed)?;
+        let flags = crypto::open_column(dek, &flags_ad(&contact.0, &tag), &sealed)?;
         match flags[..] {
-            [byte] => Ok(byte),
+            [byte] => Ok((byte, tag)),
             _ => Err(Error::Corrupt),
         }
     }
@@ -620,13 +625,12 @@ impl Core {
         clear: u8,
     ) -> Result<bool, Error> {
         let dek = self.dek()?;
-        let before = self.contact_flags(contact)?;
+        let (before, tag) = self.flags_and_tag(contact)?;
         let after = (before | set) & !clear;
         if after == before {
             return Ok(false);
         }
-        let sealed =
-            crypto::seal_column(dek, &column_ad("contacts.flags", &[&contact.0]), &[after])?;
+        let sealed = crypto::seal_column(dek, &flags_ad(&contact.0, &tag), &[after])?;
         self.db().execute(
             "UPDATE contacts SET flags = ?1 WHERE id = ?2",
             params![sealed, &contact.0[..]],
@@ -758,7 +762,8 @@ impl Core {
     /// change is pending). One statement sets the tag and the bundle,
     /// empties `pending`, and clears the flags that were about the old key
     /// (it took the user's letters, it was verified by an invite; a block
-    /// stays); a key that belongs to another contact gives `Duplicate`. The
+    /// stays), sealed under the new tag, so the old flags no longer open;
+    /// a key that belongs to another contact gives `Duplicate`. The
     /// contact keeps its local id and its threads.
     pub fn accept_new_key(&mut self, contact: ContactId, code: &[u8]) -> Result<(), Error> {
         let dek = self.dek()?;
@@ -785,8 +790,7 @@ impl Core {
             &pending.to_bytes(),
         )?;
         let empty = crypto::seal_column(dek, &column_ad("contacts.pending", &[&contact.0]), &[])?;
-        let sealed_flags =
-            crypto::seal_column(dek, &column_ad("contacts.flags", &[&contact.0]), &[flags])?;
+        let sealed_flags = crypto::seal_column(dek, &flags_ad(&contact.0, &tag), &[flags])?;
         self.db().execute(
             "UPDATE contacts SET tag = ?1, bundle = ?2, pending = ?3, flags = ?4 WHERE id = ?5",
             params![&tag[..], sealed_bundle, empty, sealed_flags, &contact.0[..]],
@@ -1302,6 +1306,12 @@ fn local(e: Error) -> Error {
         Error::Crypto | Error::Malformed | Error::NotFound => Error::Corrupt,
         e => e,
     }
+}
+
+/// AD for `contacts.flags`: local contact id, and the tag of the key the
+/// flags describe.
+fn flags_ad(contact: &[u8; 16], tag: &[u8; 32]) -> Vec<u8> {
+    column_ad("contacts.flags", &[contact, tag])
 }
 
 /// AD for `threads.subject`: thread id, local contact id, created_at.

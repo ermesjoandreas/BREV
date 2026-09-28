@@ -563,8 +563,9 @@ fn stored_metadata_is_bound_to_ciphertext() {
 
     // Contact rows are bound to their local id. Bob's and Mallory's
     // bundles swapped: nothing is sealed to Mallory as Bob. Their tags
-    // swapped: the bundle no longer matches the tag. Their addresses
-    // swapped: Mallory is not shown as Bob.
+    // swapped: the bundle no longer matches the tag, and the flags, sealed
+    // with the tag, do not open. Their addresses swapped: Mallory is not
+    // shown as Bob.
     swap("contacts", "bundle", &b_at_a.0, &m_at_a.0);
     assert!(matches!(
         a.core.seal_letter(b_at_a, b"s", b"secret").map(drop),
@@ -573,8 +574,12 @@ fn stored_metadata_is_bound_to_ciphertext() {
     swap("contacts", "bundle", &b_at_a.0, &m_at_a.0);
     swap("contacts", "tag", &b_at_a.0, &m_at_a.0);
     assert!(matches!(
-        a.core.seal_letter(b_at_a, b"s", b"secret").map(drop),
+        a.core.contact_bundle(b_at_a).map(drop),
         Err(Error::Corrupt)
+    ));
+    assert!(matches!(
+        a.core.seal_letter(b_at_a, b"s", b"secret").map(drop),
+        Err(Error::Crypto)
     ));
     swap("contacts", "tag", &b_at_a.0, &m_at_a.0);
     for column in ["address", "pending"] {

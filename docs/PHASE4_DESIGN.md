@@ -187,7 +187,7 @@ This goes beyond Phase 3, where who-writes-to-whom lived only until delivery. It
 
 ### 5.1 Schema v5 (`SCHEMA_VERSION = 5`; v4 opens as `Corrupt`; reset)
 
-- `contacts` gains `flags BLOB NOT NULL`, sealed under the DEK with AD `contacts.flags` ‖ local id: one byte, `APPROVED_ME = 1` (they take my letters), `VERIFIED = 2` (key checked through an invite).
+- `contacts` gains `flags BLOB NOT NULL`, sealed under the DEK with AD `contacts.flags` ‖ local id ‖ the row's `tag` (flags about an earlier key do not open after `accept_new_key`): one byte, `APPROVED_ME = 1` (they take my letters), `VERIFIED = 2` (key checked through an invite).
 - New `invites (id BLOB PRIMARY KEY, body BLOB NOT NULL)`: `id` is 16 random local bytes; `body` sealed with AD `invites.body` ‖ id holds `s ‖ UTC day u64`. Rows older than 7 days are deleted at each sync. The file shows only how many invites are open.
 - Incoming requests and an opened invite live only in the session (cleared on lock) and are fetched again at each sync.
 
@@ -319,7 +319,7 @@ Attestation at registration proves the app was genuine once. The next step would
 12. `release_deletes_links_events_invites_counts`; `v1_relay_file_is_refused`; `relay_file_holds_no_invite_secret` (byte scan: `s` and `a` absent, `SHA-256(a)` present; Phase 3's plaintext test re-run).
 
 **brev-mail** (`tests/phase4.rs`, two or three sessions, the relay in-process, p256 test signers):
-1. **`invite_with_wrong_fingerprint_is_rejected`** (DoD): (a) fingerprint changed in one character, (b) address changed, (c) the relay lies (another bundle in its row for the inviter), (d) a 4-part code answered with `00`. Each → `InviteMismatch`; the request log has no `/v1/register` or `/v1/invites/redeem`; no contact stored.
+1. **`invite_with_wrong_fingerprint_is_rejected`** (DoD): (a) fingerprint changed in one character, (b) address changed, (c) the relay lies (another bundle in its row for the inviter), (d) a 4-part code answered with `00`, (e) a 2-part code answered with an inviter. Each → `InviteMismatch`; the request log has no `/v1/register` or `/v1/invites/redeem`; no contact stored.
 2. `invite_makes_both_approved_and_verified` (root → A; A invites B; B registers with A `verified`; A's sync pins B `verified`; letters both ways; the A invite row is gone).
 3. **`forged_invited_event_is_dropped`**: the relay handle inserts a kind-2 event with a random tag, one with a real tag but another bundle, and one with a real bundle and tag under another address → A pins nothing; a letter from that identity is dropped by the client rule.
 4. **`a_stranger_cannot_reach_an_inbox`** (DoD): C cannot `prepare_send` to A (`NotApproved`, no digest); a forced submit (test hook) → `NotApproved`; A's sync gets nothing.
@@ -386,6 +386,7 @@ Numbered after D-0068. **Collision:** DECISIONS.md reserves the numbers after D-
 - **Stubs:** any build registers; one person can hold several identities, limited by invites.
 - **The relay's clock** decides the day; on a local relay the user can move it.
 - **Lookups are not rate-limited:** a registered identity can probe addresses (as in Phase 3). Registration no longer leaks it to outsiders.
+- **Rollback of the local flags:** a program that can write Brev's container can put back an older `flags` cell of the same row under the same key (one from before *Blokker*, say), as it can put back a whole older `brev.db` from an APFS snapshot. Only a version counter would catch it. A cell from before a key change does not open (the AD holds the tag).
 - **Unverified here:** P1; the Swift UI with Touch ID; `CFBundleDisplayName` for Brev B.
 
 ## 12. Review record (critic findings and what changed)
