@@ -1,4 +1,6 @@
-// Enclave.swift — the key-encryption operations on Secure Enclave SecKeys.
+// Enclave.swift — the operations on Secure Enclave SecKeys: the KEK's wrap
+// and unwrap, and the identity key's signature (`sign(digest:key:)`,
+// docs/PHASE3_DESIGN.md §3.1; Swift only signs, Rust verifies).
 //
 // Upholds CLAUDE.md §1.8, §1.9, §1.10 and §3.3 (docs/DECISIONS.md D-0035):
 // both keys are permanent Secure Enclave SecKeys in the data protection
@@ -12,7 +14,7 @@
 // returns: the caller sees it as a no-copy Data inside a closure, and the
 // CFData is zeroed in place when the closure returns, on every path. No
 // AppKit and no keychain: compiled into the app and the CLI harness, which
-// runs `wrap` and `unwrap` with a software key.
+// runs `wrap`, `unwrap` and `sign` with software keys.
 
 import Foundation
 import LocalAuthentication
@@ -105,6 +107,21 @@ enum Enclave {
         // view is these bytes, not a copy (SecretBytes.capacity).
         let view = Data(bytesNoCopy: bytes, count: n, deallocator: .none)
         return try withExtendedLifetime(data) { try body(view) }
+    }
+
+    /// Signs a 32-byte SHA-256 digest with `key` and returns the DER
+    /// signature (docs/PHASE3_DESIGN.md §3.1): the signature
+    /// `.ecdsaSignatureMessageX962SHA256` gives over the bytes the digest was
+    /// made from, which Rust computed and checks. With the Secure Enclave
+    /// identity key, looked up with an LAContext (SignService), this is the
+    /// one Touch ID prompt of a letter or a registration; the harness passes
+    /// a software key. Neither the digest nor the signature is secret.
+    static func sign(digest: Data, key: SecKey) throws -> Data {
+        guard digest.count == 32 else { throw Failure.malformed }
+        var err: Unmanaged<CFError>?
+        guard let signature = SecKeyCreateSignature(key, .ecdsaSignatureDigestX962SHA256, digest as CFData, &err) as Data?
+        else { throw err.map { $0.takeRetainedValue() as Error } ?? Failure.unknown }
+        return signature
     }
 
     /// Whether Touch ID is set up and usable. No prompt.

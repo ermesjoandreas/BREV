@@ -1,23 +1,25 @@
-// padcheck — docs/VERIFY.md V18: every sealed column in Brev's three stores
-// has a padded length (design §2.8; CLAUDE.md §3.1).
+// padcheck — docs/VERIFY.md V18: every sealed column in Brev's store has a
+// padded length (design §2.8; CLAUDE.md §3.1).
 //
-// A verification tool, never linked into Brev.app. It opens each store
+// A verification tool, never linked into Brev.app. It opens the store
 // read-only with the system SQLite and reads only lengths, never a value.
 // A sealed column is nonce (24) || XChaCha20-Poly1305 ciphertext of the
 // padded plaintext || tag (16), and the padded length is one of 256, 1024,
 // 4096 or 16384 bytes, or a larger multiple of 16384 up to 1 MiB
 // (brev-proto::padded_len). The sealed columns are identity.keys,
-// contacts.bundle, contacts.name, threads.subject and messages.body
-// (brev-core/src/store.rs, schema v2).
+// identity.address, contacts.bundle, contacts.address, contacts.pending,
+// threads.subject and messages.body (brev-core/src/store.rs, schema v3;
+// docs/PHASE3_DESIGN.md §6.1). Phase 2's version read three stores; the echo
+// peers' stores went with Phase 3.
 //
 // usage: padcheck [<dir>]
-//   <dir> holds brev.db, peer-1.db and peer-2.db; the default is Brev's
-//   folder, ~/Library/Containers/no.brev.app/Data/Library/Application
-//   Support/Brev. Prints, per store, its application_id and user_version
-//   (must be BREV and 2) and per column the rows checked and any row whose
-//   length is not padded (rowid and length only). Exit 0 when every store
-//   passes and has at least one checked column value (the control); 1
-//   otherwise; 3 when a store cannot be opened.
+//   <dir> holds brev.db; the default is Brev's folder,
+//   ~/Library/Containers/no.brev.app/Data/Library/Application Support/Brev.
+//   Prints the store's application_id and user_version (must be BREV and 3)
+//   and per column the rows checked and any row whose length is not padded
+//   (rowid and length only). Exit 0 when the store passes and has at least
+//   one checked column value (the control); 1 otherwise; 3 when it cannot be
+//   opened.
 
 import Foundation
 import SQLite3
@@ -27,7 +29,8 @@ let home = FileManager.default.homeDirectoryForCurrentUser.path
 let dir = CommandLine.arguments.dropFirst().first
     ?? "\(home)/Library/Containers/no.brev.app/Data/Library/Application Support/Brev"
 let nonce = 24, tag = 16
-let columns = [("identity", "keys"), ("contacts", "bundle"), ("contacts", "name"), ("threads", "subject"), ("messages", "body")]
+let columns = [("identity", "keys"), ("identity", "address"), ("contacts", "bundle"), ("contacts", "address"),
+               ("contacts", "pending"), ("threads", "subject"), ("messages", "body")]
 
 func padded(_ n: Int) -> Bool {
     if [256, 1024, 4096, 16384].contains(n) { return true }
@@ -35,7 +38,7 @@ func padded(_ n: Int) -> Bool {
 }
 
 var failed = false
-for store in ["brev.db", "peer-1.db", "peer-2.db"] {
+for store in ["brev.db"] {
     let path = (dir as NSString).appendingPathComponent(store)
     var db: OpaquePointer?
     guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
@@ -51,7 +54,7 @@ for store in ["brev.db", "peer-1.db", "peer-2.db"] {
         return sqlite3_step(st) == SQLITE_ROW ? Int(sqlite3_column_int64(st, 0)) : nil
     }
     let appID = int("PRAGMA application_id"), version = int("PRAGMA user_version")
-    let header = appID == 0x4252_4556 && version == 2
+    let header = appID == 0x4252_4556 && version == 3
     print("\(store): application_id=0x\(String(appID ?? -1, radix: 16)) user_version=\(version ?? -1) \(header ? "ok" : "BAD")")
     if !header { failed = true }
     var checked = 0

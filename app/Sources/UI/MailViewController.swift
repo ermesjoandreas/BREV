@@ -1,27 +1,33 @@
 // MailViewController.swift — the unlocked screen: contacts, threads, letters.
 //
-// Upholds CLAUDE.md §1.2, §1.10 and §3.2 (docs/PHASE2_DESIGN.md §7.2, §9).
-// A bar with Nytt brev and Lås (HumanButtons) above an NSSplitView with
-// three panes: contacts (SecureListView), the contact's threads, newest
-// first (SecureListView), and the selected thread's letters, oldest first
-// (LetterStackView). `start()` reads the contacts and selects the first,
-// then its newest thread, then that thread's letters. A 3-second timer in
-// the common run-loop modes (D-0052 in the shifted numbering) calls `sync()`
-// while unlocked, which moves the echo peers' letters; when letters
-// arrive, the thread and letter panes are read again (their old texts
-// wiped) and keep the selected thread by id. Every text read here is a
-// SecretText owned by a list or letter view; a new selection wipes what it
-// replaces, and `wipeAll()` (lock sequence §8.4 step 3) wipes everything and
-// stops the timer. The controller holds the Session weakly, never an
-// OpenText. Logs carry counts and error names only (§6.3 rule 7).
+// Upholds CLAUDE.md §1.2, §1.10 and §3.2 (docs/PHASE2_DESIGN.md §7.2, §9;
+// docs/PHASE3_DESIGN.md §5.3, §6.5). A bar with Nytt brev and Lås
+// (HumanButtons) above an NSSplitView with three panes: contacts
+// (SecureListView; a contact's name is its address), the contact's
+// threads, newest first (SecureListView), and the selected thread's
+// letters, oldest first (LetterStackView). `start()` reads the contacts and
+// selects the first, then its newest thread, then that thread's letters.
+// Nytt brev is off for a contact whose key changed. `sync()` fetches the
+// letters waiting at the relay: once at `start()`, every 5 seconds from a
+// timer in the common run-loop modes (D-0052 in the shifted numbering), and
+// once after a letter is sent. It runs on `Session.net`, never on main; a
+// sync still running makes the next tick skip, and its result returns to
+// main, where a result from before `wipeAll()` is dropped. When letters
+// arrive, the thread and letter panes are read again (their old texts wiped)
+// and keep the selected thread by id. Every text read here is a SecretText
+// owned by a list or letter view; a new selection wipes what it replaces,
+// and `wipeAll()` (lock sequence §8.4 step 3) wipes everything and stops the
+// timer. The controller holds the Session weakly, never an OpenText. Logs
+// carry counts and error names only (§6.3 rule 7); a sync failure is logged
+// once per change, not at every tick.
 
 import AppKit
 import os
 
 final class MailViewController: NSViewController, ContentHolder, MailActions, NSMenuItemValidation {
     private static let log = Logger(subsystem: "no.brev.app", category: "mail")
-    /// Seconds between two `sync()` calls (§9).
-    static let syncInterval: TimeInterval = 3
+    /// Seconds between two `sync()` calls (PHASE3 §5.3).
+    static let syncInterval: TimeInterval = 5
     /// The narrowest the contacts, threads and letter panes get, by divider
     /// or window. A letter laid out much narrower puts a few units on each
     /// line, and every line costs a CTLine (TextLayout), again at every
@@ -42,6 +48,12 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     /// The selected contact's threads, newest first, as the list shows them.
     private var threads: [ThreadItem] = []
     private var syncTimer: Timer?
+    /// True while a `sync()` is on `Session.net`.
+    private var syncing = false
+    /// Bumped by `stopSync()`: a sync result from before it is dropped.
+    private var syncGeneration = 0
+    /// The last sync's outcome ("ok" or an error name), logged on change.
+    private var syncOutcome = "ok"
 
     private let contactList = SecureListView(rowHeight: 32)
     private let threadList = SecureListView(rowHeight: 48)
@@ -180,6 +192,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         showThreads(keeping: nil)
         syncTimer?.invalidate()
         syncTimer = commonModeTimer(every: Self.syncInterval) { [weak self] in self?.syncNow() }
+        syncNow()
         view.window?.makeFirstResponder(contactList)
     }
 
@@ -232,6 +245,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     /// selected, its threads are read again with the new one selected, and
     /// its letter shows from the top.
     func showSent(thread: Data, contact: Data) {
+        syncNow()
         guard selectedContact?.id == contact else { return }
         showThreads(keeping: thread)
         letters.scroll(.zero)
@@ -245,28 +259,56 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         dates.string(from: Date(timeIntervalSince1970: TimeInterval(seconds)))
     }
 
-    // MARK: - Sync (§9)
+    // MARK: - Sync (PHASE3 §5.3)
 
-    /// Moves the echo peers' letters. When some arrived, the thread and
-    /// letter panes are read again. A locked session stops the timer.
+    /// Fetches the waiting letters on `Session.net`, unless a sync is still
+    /// running or the timer is stopped. Before registration Rust answers
+    /// NotFound without a request.
     private func syncNow() {
         guard let session else { return stopSync() }
-        do {
-            let arrived = try session.sync()
+        guard syncTimer != nil, !syncing else { return }
+        syncing = true
+        let generation = syncGeneration
+        Session.net.async {
+            let result = Result { try session.sync() }
+            DispatchQueue.main.async { [weak self] in self?.synced(result, generation) }
+        }
+    }
+
+    /// On main. When letters arrived, the thread and letter panes are read
+    /// again. A locked session stops the timer.
+    private func synced(_ result: Result<UInt32, Error>, _ generation: Int) {
+        syncing = false
+        guard generation == syncGeneration else { return }
+        switch result {
+        case .success(let arrived):
+            noteSync("ok")
             guard arrived > 0 else { return }
             Self.log.notice("sync arrived=\(arrived, privacy: .public)")
             let kept = threadList.selected.flatMap { threads.indices.contains($0) ? threads[$0].id : nil }
             showThreads(keeping: kept)
-        } catch BrevError.Locked {
+        case .failure(BrevError.Locked):
             stopSync()
-        } catch {
-            Self.log.error("sync failed: \(Self.name(error), privacy: .public)")
+        case .failure(let error):
+            noteSync(Self.name(error))
+        }
+    }
+
+    /// Logs a sync's outcome when it differs from the last one.
+    private func noteSync(_ outcome: String) {
+        guard outcome != syncOutcome else { return }
+        syncOutcome = outcome
+        if outcome == "ok" {
+            Self.log.notice("sync ok")
+        } else {
+            Self.log.error("sync failed: \(outcome, privacy: .public)")
         }
     }
 
     private func stopSync() {
         syncTimer?.invalidate()
         syncTimer = nil
+        syncGeneration &+= 1
     }
 
     // MARK: - ContentHolder (lock sequence §8.4 step 3)
@@ -286,7 +328,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
 
     /// One compose sheet at a time (⌘N can reach this while the sheet is key).
     @objc func newLetter(_ sender: Any?) {
-        guard !composing, let contact = selectedContact, let onNewLetter else { return }
+        guard !composing, canWriteNewLetter, let contact = selectedContact, let onNewLetter else { return }
         onNewLetter(contact)
     }
 
@@ -304,7 +346,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     }
 
     private var canWriteNewLetter: Bool {
-        onNewLetter != nil && selectedContact != nil
+        onNewLetter != nil && selectedContact.map { !$0.keyChanged } == true
     }
 
     private func updateButtons() {

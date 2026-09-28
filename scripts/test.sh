@@ -2,13 +2,15 @@
 # Runs every check that can run on this machine, in order. On macOS first the
 # patched bindings (gen-bindings.sh) and the Xcode project (xcodegen), so
 # every later step sees the current core. Then Rust formatting, clippy,
-# tests, the zeroize and allocator checks, the FFI surface and patch-marker
-# checks (macOS), the forbidden-API grep, the check that AVFoundation,
-# CoreMedia and CoreVideo stay in the protected layer, the dependency audit,
-# the Swift heap-scan harness (macOS), the lock probe (macOS), a compile
-# check of the view host (macOS), a type-check of the verification tools and
-# capture-probe's self-test (macOS) and an Xcode compile check (macOS with
-# xcodegen).
+# tests, the zeroize, allocator and crate-feature checks, the check that no
+# production code makes a P-256 signing key, the FFI surface and
+# patch-marker checks (macOS), the forbidden-API grep, the check that
+# AVFoundation, CoreMedia and CoreVideo stay in the protected layer, the
+# dependency audit, a relay on 127.0.0.1 with a fresh database (macOS; stopped
+# when the script ends), the Swift heap-scan harness and the lock probe
+# against it (macOS), a compile check of the view host (macOS), a type-check
+# of the verification tools and capture-probe's self-test (macOS) and an
+# Xcode compile check (macOS with xcodegen).
 # Exits non-zero on the first failure.
 #
 # Usage: scripts/test.sh
@@ -120,12 +122,45 @@ if ! grep -q "zeroizing_alloc5WIPER" <<<"$SYMBOLS"; then
   exit 1
 fi
 
+# The two Phase 3 crates in the app's graph keep exactly the features the
+# design allows (docs/PHASE3_DESIGN.md §3.3, §5.1): p256 with only `ecdsa`
+# (what it implies: arithmetic, digest, ecdsa-core, sha2, sha256; no
+# SigningKey helpers beyond ecdsa's, no PEM, no serde), and reqwest with only
+# `blocking` (no TLS, no system proxy, no JSON, no cookies). Every line of the
+# crate must match, and each must be found.
+echo "==> p256 and reqwest features in brev-core"
+for pin in 'p256 v[^ ]+ \[arithmetic,digest,ecdsa,ecdsa-core,sha2,sha256\]' 'reqwest v[^ ]+ \[blocking\]'; do
+  crate="${pin%% *}"
+  LINES="$(grep -E "(^|[^a-z0-9_-])$crate v" <<<"$FEATURES" || true)"
+  if [[ -z "$LINES" ]] || grep -Evq "(^|[^a-z0-9_-])$pin( |\$)" <<<"$LINES"; then
+    echo "error: $crate in brev-core's graph has other features than docs/PHASE3_DESIGN.md allows:" >&2
+    echo "${LINES:-(not found)}" >&2
+    exit 1
+  fi
+done
+
+# Swift signs, Rust only verifies (docs/PHASE3_DESIGN.md §3.3): no production
+# source makes a P-256 signing key. Test signers live in each crate's
+# src/test_keys.rs (compiled only under cfg(test)) and in tests/. The control:
+# the same grep finds the test signers.
+echo "==> no SigningKey outside the test signers"
+if (cd "$REPO_ROOT" && grep -rn 'SigningKey' core/*/src | grep -v '/src/test_keys\.rs:'); then
+  echo "error: the lines above name SigningKey outside src/test_keys.rs (docs/PHASE3_DESIGN.md §3.3)" >&2
+  exit 1
+fi
+if ! (cd "$REPO_ROOT" && grep -q 'SigningKey' core/brev-core/src/test_keys.rs); then
+  echo "error: the SigningKey grep finds nothing in core/brev-core/src/test_keys.rs; fix the check" >&2
+  exit 1
+fi
+
 if [[ "$DARWIN" == yes ]]; then
-  # No String carries content across the FFI (docs/PHASE2_DESIGN.md §2.2).
-  # The only public functions with a String are these three, and each must
-  # be found, so the grep cannot pass by matching nothing.
+  # No String carries content across the FFI (docs/PHASE2_DESIGN.md §2.2;
+  # docs/PHASE3_DESIGN.md §5.6). The only public functions with a String are
+  # these three (the folder and the relay URL of create and open, and ping's
+  # reply), and each must be found, so the grep cannot pass by matching
+  # nothing.
   echo "==> FFI surface: no content String, only the known Data"
-  ALLOWED_FUNCS=('func ping\(\) -> String' 'func create\(dir: String, ' 'func `?open`?\(dir: String\)')
+  ALLOWED_FUNCS=('func ping\(\) -> String' 'func create\(dir: String, relay: String, ' 'func `?open`?\(dir: String, relay: String\)')
   FUNCS="$(grep -nE '^(public |open )(static )?func .*String' "$BINDINGS" || true)"
   for f in "${ALLOWED_FUNCS[@]}"; do
     if ! grep -Eq "$f" <<<"$FUNCS"; then
@@ -154,14 +189,17 @@ if [[ "$DARWIN" == yes ]]; then
   # type, so every line that names one must be one of these, exactly as often
   # as listed: the converter itself, a Rust panic's message (content-free,
   # design §14.1), uniffi's two callback error helpers (always emitted; there
-  # is no callback), the `dir` of create and open, and ping's reply.
+  # is no callback), the `dir` and `relay` of create and open, and ping's
+  # reply.
   CONV_LIST=(
     'fileprivate struct FfiConverterString: FfiConverter {'
     'throw UniffiInternalError.rustPanic(try FfiConverterString.lift(callStatus.errorBuf))'
     'callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))'
     'callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))'
     'FfiConverterString.lower(dir),'
-    'FfiConverterString.lower(dir),uniffiCallStatus'
+    'FfiConverterString.lower(dir),'
+    'FfiConverterString.lower(relay),'
+    'FfiConverterString.lower(relay),uniffiCallStatus'
     'return try!  FfiConverterString.lift(try! rustCall() {'
   )
   CONV_EXPECTED="$(printf '%s\n' "${CONV_LIST[@]}" | LC_ALL=C sort)"
@@ -173,31 +211,52 @@ if [[ "$DARWIN" == yes ]]; then
     exit 1
   fi
   # Bytes too: content leaves Rust only as OpenText.chunk's 960-byte
-  # results, and records carry ids and metadata (design §2.2), so a body or
-  # a name must not cross as Data either. Bytes cross in a RustBuffer only
-  # through a FfiConverter…Data type (an Option, a Vec or an enum payload of
-  # Data as well), so every line that names one must be one of these,
-  # exactly as often as listed: the converter itself; the ids passed to
-  # messages, openBody, sendNew and threads; two lifts, chunk's result and
-  # sendNew's thread id; and the reads and writes of ContactRow.id,
-  # MessageRow.id, ThreadRow.id and ThreadRow.contact. (`&[u8]` arguments,
-  # which carry bytes into Rust without a copy, use FfiConverterByRefBytes.)
+  # results, and records carry ids, metadata and identity codes (design
+  # §2.2; PHASE3 §5.6, §6.4), so a body, a name or an address must not cross
+  # as Data either. Bytes cross in a RustBuffer only through a
+  # FfiConverter…Data type (an Option, a Vec or an enum payload of Data as
+  # well), so every line that names one must be one of these, exactly as
+  # often as listed: the converter itself; the ids passed to acceptNewKey
+  # and signRequest (followed by more arguments) and to contactInfo,
+  # prepareSend, threads, messages and openBody; acceptNewKey's code; the DER
+  # signatures of attachSignature and register; five lifts: chunk's result,
+  # the digests of registerRequest and signRequest, addContact's contact id
+  # and submit's thread id; and the reads and writes of ContactRow.id,
+  # MessageRow.id, ThreadRow.id, ThreadRow.contact, ContactInfo.code and
+  # .newCode and MeInfo.code. (`&[u8]` arguments, which carry bytes into Rust
+  # without a copy, use FfiConverterByRefBytes: the DEK, the signing key, the
+  # typed addresses, the subject and the body.)
   DATA_LIST=(
     'fileprivate struct FfiConverterData: FfiConverterRustBuffer {'
-    'FfiConverterData.lower(thread),uniffiCallStatus'
-    'FfiConverterData.lower(message),uniffiCallStatus'
+    'FfiConverterData.lower(contact),'
     'FfiConverterData.lower(contact),'
     'FfiConverterData.lower(contact),uniffiCallStatus'
+    'FfiConverterData.lower(contact),uniffiCallStatus'
+    'FfiConverterData.lower(contact),uniffiCallStatus'
+    'FfiConverterData.lower(thread),uniffiCallStatus'
+    'FfiConverterData.lower(message),uniffiCallStatus'
+    'FfiConverterData.lower(newCode),uniffiCallStatus'
+    'FfiConverterData.lower(signature),uniffiCallStatus'
+    'FfiConverterData.lower(signature),uniffiCallStatus'
+    'return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {'
+    'return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {'
+    'return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {'
     'return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {'
     'return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {'
     'id: FfiConverterData.read(from: &buf),'
     'id: FfiConverterData.read(from: &buf),'
     'id: FfiConverterData.read(from: &buf),'
     'contact: FfiConverterData.read(from: &buf),'
+    'code: FfiConverterData.read(from: &buf),'
+    'code: FfiConverterData.read(from: &buf)'
+    'newCode: FfiConverterData.read(from: &buf)'
     'FfiConverterData.write(value.id, into: &buf)'
     'FfiConverterData.write(value.id, into: &buf)'
     'FfiConverterData.write(value.id, into: &buf)'
     'FfiConverterData.write(value.contact, into: &buf)'
+    'FfiConverterData.write(value.code, into: &buf)'
+    'FfiConverterData.write(value.code, into: &buf)'
+    'FfiConverterData.write(value.newCode, into: &buf)'
   )
   DATA_EXPECTED="$(printf '%s\n' "${DATA_LIST[@]}" | LC_ALL=C sort)"
   DATA_FOUND="$(grep -E 'FfiConverter[A-Za-z0-9_]*Data' "$BINDINGS" \
@@ -226,13 +285,15 @@ fi
 # checkable cases of §6.3 rules 1 and 5 that §11's list misses: the other
 # ways to make a String from bytes or units, the mutable string classes, the
 # copying CFString constructor (the NoCopy one does not match) and the other
-# logging calls.
+# logging calls. URLSession and NSURLConnection (docs/PHASE3_DESIGN.md §5.5):
+# the relay is reached only through brev-core's client, so Swift never opens
+# a second network path, which App Transport Security would govern.
 echo "==> forbidden APIs in app/Sources"
 FORBIDDEN=(NSPasteboard NSTextView NSTextField NSTextInputClient .characters 'String(decoding' 'NSString('
            'NSAttributedString(' CTTypesetter CTFramesetter NSAlert 'print(' servicesMenu
            'String(utf16CodeUnits' 'String(data' 'String(bytes' 'String(cString' 'String(validating'
            'String(utf8String' 'String(unsafeUninitializedCapacity' NSMutableString NSMutableAttributedString
-           'CFStringCreateWithCharacters(' 'NSLog(' 'debugPrint(' 'dump(' 'os_log(')
+           'CFStringCreateWithCharacters(' 'NSLog(' 'debugPrint(' 'dump(' 'os_log(' URLSession NSURLConnection)
 GREP_ARGS=()
 for p in "${FORBIDDEN[@]}"; do GREP_ARGS+=(-e "$p"); done
 # "path<TAB>trimmed line" for every hit and for every allow-list entry
@@ -287,6 +348,38 @@ else
   echo "         Install it with: cargo install cargo-audit" >&2
 fi
 
+# The relay the harness and the lock probe send letters through
+# (docs/PHASE3_DESIGN.md §8): brev-relay on 127.0.0.1 with a port the OS
+# picks and a fresh database under core/target, written to --port-file; the
+# script waits for /v1/health and stops the relay when it ends, also on a
+# failure (trap). Nothing listens anywhere but 127.0.0.1.
+if [[ "$DARWIN" == yes ]]; then
+  echo "==> relay for the harness and the lock probe (127.0.0.1, fresh database)"
+  cargo build --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-relay
+  RELAY_DIR="$TARGET_DIR/test-relay"
+  rm -rf "$RELAY_DIR"
+  mkdir -p -m 700 "$RELAY_DIR"
+  "$TARGET_DIR/release/brev-relay" serve --db "$RELAY_DIR/relay.db" --listen 127.0.0.1:0 \
+    --port-file "$RELAY_DIR/port" 2>"$RELAY_DIR/relay.log" &
+  RELAY_PID=$!
+  trap 'kill "$RELAY_PID" 2>/dev/null || true; wait "$RELAY_PID" 2>/dev/null || true' EXIT
+  for _ in $(seq 100); do
+    [[ -s "$RELAY_DIR/port" ]] && break
+    kill -0 "$RELAY_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  PORT="$(cat "$RELAY_DIR/port" 2>/dev/null || true)"
+  BREV_RELAY_URL="http://127.0.0.1:$PORT"
+  if [[ ! "$PORT" =~ ^[0-9]+$ ]] || [[ "$(curl -sf --noproxy '*' --max-time 3 "$BREV_RELAY_URL/v1/health" || true)" != "brev-relay v1" ]]; then
+    cat "$RELAY_DIR/relay.log" >&2 || true
+    echo "error: the relay did not start on 127.0.0.1 (port '$PORT')" >&2
+    exit 1
+  fi
+  echo "    $BREV_RELAY_URL"
+else
+  echo "==> relay skipped: not macOS ($(uname -s)); the harness and the lock probe need it"
+fi
+
 # The Swift heap-scan harness (docs/PHASE2_DESIGN.md §11): a CLI process, so
 # no window and no prompt, built from app/Sources/Shared, the patched
 # bindings and the release archive. Every case runs five times and every run
@@ -296,7 +389,9 @@ fi
 # glyphs (it finds nothing at 200 units or less, so it runs at 4096 and
 # 65000). Case 7's proves that the scribble probe SelfScan runs in the
 # Verify build (docs/VERIFY.md V39) can fail: without scribbling, the freed
-# block keeps its pattern.
+# block keeps its pattern. Cases 4, 5 and 8 send their letters through the
+# relay above (BREV_RELAY_URL); case 8 is the network round trip of
+# docs/PHASE3_DESIGN.md §8.
 if [[ "$DARWIN" == yes ]]; then
   echo "==> Swift harness (app/Tests)"
   HARNESS_DIR="$TARGET_DIR/harness"
@@ -313,7 +408,7 @@ if [[ "$DARWIN" == yes ]]; then
   run_harness() {
     local label="$1" mode="$2" i out skips=""
     shift 2
-    local env_args=(TMPDIR="$HARNESS_DIR/tmp/")
+    local env_args=(TMPDIR="$HARNESS_DIR/tmp/" BREV_RELAY_URL="$BREV_RELAY_URL")
     if [[ "$mode" == scribble ]]; then env_args+=(MallocScribble=1); else env_args=(-u MallocScribble "${env_args[@]}"); fi
     for i in 1 2 3 4 5; do
       if ! out="$(env "${env_args[@]}" "$HARNESS_DIR/harness" "$@" 2>&1)"; then
@@ -340,6 +435,7 @@ if [[ "$DARWIN" == yes ]]; then
   done
   run_harness "case 7 (scribble probe)" scribble scribble
   run_harness "case 7 (no scribbling: the freed block is kept)" none scribble --no-scribble
+  run_harness "case 8 (network round trip through the relay)" scribble network
 else
   echo "==> Swift harness skipped: not macOS ($(uname -s))"
 fi
@@ -347,11 +443,12 @@ fi
 # The lock probe (app/Tests/Lock): the app's own LockController, UnlockService
 # and content views, which the harness (Shared/ only) cannot reach. A CLI
 # process built from app/Sources/{Shared,App,UI,Keys}: no window on screen,
-# no prompt, no keychain (a software KEK; UnlockService gets a KeyStore
-# subclass). It checks that a discarded unlock and the lock sequence lock the
-# Rust session, that the lock sequence zeroes every content view's pixel
-# buffers, that draw(_:) of a content view draws nothing, and that
-# UnlockService locks Rust when its closure fails after Brev.unlock.
+# no prompt, no keychain (software keys; UnlockService gets a KeyStore
+# subclass). Its letters come through the relay above. It checks that a
+# discarded unlock and the lock sequence lock the Rust session, that the lock
+# sequence zeroes every content view's pixel buffers, that draw(_:) of a
+# content view draws nothing, and that UnlockService locks Rust when its
+# closure fails after Brev.unlock.
 if [[ "$DARWIN" == yes ]]; then
   echo "==> lock probe (app/Tests/Lock)"
   LOCK_DIR="$TARGET_DIR/lock-probe"
@@ -362,7 +459,7 @@ if [[ "$DARWIN" == yes ]]; then
     "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/App/*.swift \
     "$REPO_ROOT"/app/Sources/UI/*.swift "$REPO_ROOT"/app/Sources/Keys/*.swift \
     "$BINDINGS" "$REPO_ROOT/app/Tests/Lock/main.swift" "$STATICLIB" -o "$LOCK_DIR/lock-probe"
-  if ! out="$(env TMPDIR="$LOCK_DIR/tmp/" "$LOCK_DIR/lock-probe" 2>&1)"; then
+  if ! out="$(env TMPDIR="$LOCK_DIR/tmp/" BREV_RELAY_URL="$BREV_RELAY_URL" "$LOCK_DIR/lock-probe" 2>&1)"; then
     echo "$out"
     echo "error: the lock probe failed" >&2
     exit 1

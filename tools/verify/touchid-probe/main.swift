@@ -214,7 +214,8 @@ do {
     let h = scan()
     check("before create: the DEK is in its SecretBytes only (positive control); no ECIES secret",
           h[0] == 1 && h.dropFirst().allSatisfy { $0 == 0 }, show(h))
-    session = try Session.create(dir: tmp.path, dek: dek, signingKey: signingKey)
+    // The relay URL is never contacted: the probe only unlocks and locks.
+    session = try Session.create(dir: tmp.path, relay: "http://127.0.0.1:8787", dek: dek, signingKey: signingKey)
 } catch {
     check("setup", false, "\(error)")
     finish()

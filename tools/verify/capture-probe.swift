@@ -287,8 +287,9 @@ struct Stats { var n = 0, green = 0, cyan = 0, black = 0, clear = 0, ink = 0; va
 /// When a pane counts as showing content: by the area its ink covers, not by
 /// its share of the pane. One line of 13 pt text (Brev's content font) is
 /// under 0.5 % of a pane at the default window size and far less in a large
-/// window, but a single short word such as "Ekko" covers several times
-/// `minArea`; a pane the protected layer keeps empty has none.
+/// window, but a single short word such as the shortest address (3
+/// characters) covers several times `minArea`; a pane the protected layer
+/// keeps empty has none.
 enum Ink {
     /// Square points: about one glyph at 13 pt.
     static let minArea: Double = 12
@@ -734,17 +735,26 @@ func selftest() -> Bool {
         print((cond ? "ok   " : "FAIL ") + what + (detail.isEmpty ? "" : "  [\(detail)]"))
         if !cond { ok = false }
     }
-    // VERIFY's letter: the contact names, and a one-line subject and body as
-    // long as the marker (not the marker itself, which V17, V19 and V21
-    // search for), in panes of Brev's default window (900×600) and of one
-    // that fills a 1512×982 screen.
+    // What VERIFY's panes show since Phase 3: a contact's name, which is its
+    // address (as long as $ADDR_B, and the shortest address the rules allow),
+    // the contact header's addresses and identity codes (V68), and a
+    // one-line subject and body as long as the letter marker. Stand-ins of
+    // the same length, not the markers themselves, which V17, V19 and V21
+    // search for. In panes of Brev's default window (900×600) and of one that
+    // fills a 1512×982 screen.
     let line = "ONE-LINE-SUBJECT æøå"
+    let address = "brev-sample-peer", ownAddress = "brev-sample-me", shortest = "abc"
+    let code = "ABCDE FGHIJ KLMNO PQRST UVWXY Z2345"
+    let header = CGSize(width: 680, height: 48)
     let cases: [(String, CGSize, String)] = [
-        ("contacts pane (default)", CGSize(width: 200, height: 540), "Ekko"),
-        ("contacts pane (default)", CGSize(width: 200, height: 540), "Speil"),
+        ("contacts pane (default)", CGSize(width: 200, height: 540), address),
+        ("contacts pane (default)", CGSize(width: 200, height: 540), shortest),
+        ("contact header (default)", header, address),
+        ("contact header (default)", header, ownAddress),
+        ("contact header (default)", header, code),
         ("threads pane (default)", CGSize(width: 280, height: 540), line),
         ("letters pane (default)", CGSize(width: 418, height: 540), line),
-        ("contacts pane (full screen)", CGSize(width: 330, height: 900), "Ekko"),
+        ("contacts pane (full screen)", CGSize(width: 330, height: 900), shortest),
         ("letters pane (full screen)", CGSize(width: 800, height: 900), line),
     ]
     for scale: CGFloat in [1, 2] {

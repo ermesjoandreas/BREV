@@ -5,12 +5,14 @@
 // launch (LaunchGuard) shows only launch.error.unsafe and never opens a
 // store. Otherwise Brev takes the instance lock, or hands over to the Brev
 // that holds it and quits. Then, if the wrapped-DEK keychain item exists,
-// Brev opens its stores, locked, and shows the lock screen; otherwise it
-// shows onboarding. Onboarding creates the keys and the stores
+// Brev opens its store, locked, and shows the lock screen; otherwise it
+// shows onboarding. Onboarding creates the keys and the store
 // (UnlockService), then asks for the first unlock, which also installs the
 // wrapped DEK. Every unlock starts from a human click, runs through
 // LockController's bookkeeping, and ends on the mail screen or the lock
-// screen. A reset needs ConfirmSheet. Quitting locks first. Nothing here
+// screen. A letter is signed with the identity key through SignService: one
+// Touch ID prompt per Send (docs/PHASE3_DESIGN.md §3.2). A reset needs
+// ConfirmSheet. Quitting locks first. Nothing here
 // persists anything: no state restoration, no frame autosave, no user
 // defaults. Logs are content-free: the `ping()` reply, lock and routing
 // events, and error names and codes (§6).
@@ -33,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let lock = LockController()
     private let keyStore = KeyStore()
     private lazy var unlocker = UnlockService(keyStore: keyStore)
+    private lazy var signer = SignService(keyStore: keyStore)
     /// `.lock`, held with O_EXLOCK until the process ends; never closed.
     private var instanceLock: Int32 = -1
     /// The only owner of the Rust `Brev` handle (through Session).
@@ -115,8 +118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Routing (§5.2)
 
-    /// Installed (the wrapped-DEK item exists): open the stores, locked,
-    /// and show the lock screen; if they do not open, the damaged state with
+    /// Installed (the wrapped-DEK item exists): open the store, locked,
+    /// and show the lock screen; if it does not open, the damaged state with
     /// only the reset. Not installed: onboarding. The keychain unreadable
     /// (an unsigned build, say): only a notice.
     private func route() {
@@ -126,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showOnboarding()
         case .installed:
             do {
-                adopt(try Session.open(dir: keyStore.dir.path))
+                adopt(try Session.open(dir: keyStore.dir.path, relay: UnlockService.relayURL))
                 Self.appLog.notice("route lock screen")
                 showLockScreen()
             } catch {
@@ -219,16 +222,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The unlocked screen: contacts, threads and letters, and the sync
     /// timer (docs/PHASE2_DESIGN.md §7.2). Nytt brev opens the compose sheet
-    /// on the main window (§7.3); after a send the mail screen selects the
-    /// new thread.
+    /// on the main window (§7.3), which signs through SignService with the
+    /// reason send.reason; after a send the mail screen selects the new
+    /// thread.
     private func showMail() {
         guard let session else { return }
         let mail = MailViewController(session: session)
         mail.onLock = { [weak self] in self?.lock.lockNow(nil) }
         mail.onNewLetter = { [weak self, weak mail] contact in
-            guard let window = self?.mainWindow, let session = self?.session else { return }
-            let id = contact.id
-            ComposeSheet.present(on: window, to: contact, session: session) { thread in
+            guard let self, let window = self.mainWindow, let session = self.session else { return }
+            let id = contact.id, signer = self.signer
+            ComposeSheet.present(on: window, to: contact, session: session,
+                                 signer: { signer.sign(digest: $0, reason: L10n.sendReason, $1) }) { thread in
                 if let thread { mail?.showSent(thread: thread, contact: id) }
             }
         }

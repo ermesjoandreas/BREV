@@ -2,26 +2,32 @@
 //
 // A test app, never linked into Brev.app (tools/viewhost/build.sh builds it
 // from app/Sources/{Shared,App,UI}). It needs no keychain and no Touch ID:
-// the stores live in a temporary folder and the DEK is wrapped to a software
-// P-256 key, as in the CLI harness (app/Tests). It sends fake, non-secret
-// letters to Ekko and Speil, lets them echo, and shows the real
+// the stores live in a temporary folder, each DEK is wrapped to a software
+// P-256 key and each identity key is a software key, as in the CLI harness
+// (app/Tests). It starts its own relay (brev-relay, built by build.sh, on
+// 127.0.0.1 with a port the OS picks and a database in the temporary folder;
+// stopped at the end) and makes three users: this host ("testvert") and the
+// contacts Ekko and Speil ("ekko", "speil"), which live in this process
+// without a window. The host sends fake, non-secret letters to Ekko and
+// Speil, Ekko sends a long one back, and the host shows the real
 // MailViewController in a hardened MainWindow without activating itself
 // (with --compose it asks to be active). Every letter carries the test
 // marker of app/Tests/scan.c, built from its XORed bytes, so no String copy
-// of it exists here.
+// of it exists here. Since Phase 3 a thread holds one letter.
 //
 // Timeline: ready → (hold) → checks, a wider window, a divider dragged right
-// and a narrow window, a posted ↓ key, the letter pane scrolled through and
-// then down, a new letter → the sync timer shows its echo → the real lock
-// sequence → exit.
+// and a narrow window, a posted ↓ key, the letter pane scrolled down (its
+// header leaves sight) and back up, Ekko sends a new letter → the sync timer
+// fetches it → the real lock sequence → exit.
 // With --compose: Nytt brev opens the real compose sheet, wired as
-// AppDelegate wires it, and the marker is typed into the subject and the
-// body by key-downs made here with source PID 0, delivered as AppKit
-// delivers a real key (key codes found with KeyTranslator). The ways in
-// that must fail are tried (events with a source PID, ⌘C ⌘X ⌘A ⌘V ⌘Z, ⌃V,
-// insertText, a click made in code, an AX press, and with --post keys
-// posted to this process), and secure event input is checked → ready →
-// (hold) → ⌘↩ sends → its echo → Escape discards a second letter → the lock
+// AppDelegate wires it (the signer is this host's software key instead of
+// SignService), and the marker is typed into the subject and the body by
+// key-downs made here with source PID 0, delivered as AppKit delivers a real
+// key (key codes found with KeyTranslator). The ways in that must fail are
+// tried (events with a source PID, ⌘C ⌘X ⌘A ⌘V ⌘Z, ⌃V, insertText, a click
+// made in code, an AX press, and with --post keys posted to this process),
+// and secure event input is checked → ready → (hold) → ⌘↩ sends through the
+// relay → Ekko fetches it → Escape discards a second letter → the lock
 // sequence discards a third → exit.
 // With --triggers: the real lock triggers (LockController.start) and the
 // real unlock bookkeeping, with this app active; switch: an unlock in
@@ -150,31 +156,90 @@ func letterBody(_ n: Int) -> SecretText {
     fake(["Hei!\n\n", String(repeating: paragraph, count: n), "\n\n", nil, " ", longWord, "\n\nHilsen\ntestverten 😀"])
 }
 
-// MARK: - A session as the app makes it, with a software KEK
+// MARK: - The relay and the users, as the app makes them, with software keys
 
-func makeSession(in dir: URL) throws -> Session {
-    let dek = SecretBytes(capacity: 64)
-    guard SecRandomCopyBytes(kSecRandomDefault, 32, dek.base) == errSecSuccess else { throw BrevError.Rng }
-    dek.setCount(32)
-    var err: Unmanaged<CFError>?
-    let attrs: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-                                kSecAttrKeySizeInBits as String: 256]
-    guard let kek = SecKeyCreateRandomKey(attrs as CFDictionary, &err), let pub = SecKeyCopyPublicKey(kek)
-    else { throw BrevError.Crypto }
-    let wrapped = try Enclave.wrap(dek: dek, to: pub)
-    let session = try Session.create(dir: dir.path, dek: dek, signingKey: Data(repeating: 4, count: 65))
-    do {
-        try Enclave.unwrap(wrapped, with: kek) { try session.brev.unlock(dek: $0) }
-    } catch {
-        session.brev.lock()
-        throw error
+/// This run's relay: build.sh's brev-relay (Info.plist BrevRelayBinary) on
+/// 127.0.0.1:0 with a database in `dir`; nil if it did not start.
+func startRelay(in dir: URL) -> (Process, String)? {
+    guard let path = Bundle.main.object(forInfoDictionaryKey: "BrevRelayBinary") as? String else { return nil }
+    let port = dir.appendingPathComponent("relay.port")
+    let relay = Process()
+    relay.executableURL = URL(fileURLWithPath: path)
+    relay.arguments = ["serve", "--db", dir.appendingPathComponent("relay.db").path,
+                       "--listen", "127.0.0.1:0", "--port-file", port.path]
+    relay.standardError = FileHandle.nullDevice
+    do { try relay.run() } catch { return nil }
+    for _ in 0..<100 {
+        if let text = try? String(contentsOf: port, encoding: .utf8), let n = Int(text.trimmingCharacters(in: .newlines)) {
+            return (relay, "http://127.0.0.1:\(n)")
+        }
+        guard relay.isRunning else { return nil }
+        usleep(50_000)
     }
-    return session
+    relay.terminate()
+    return nil
 }
 
-func send(_ session: Session, to contact: Data, subject: SecretText, body: SecretText) throws {
-    defer { subject.wipe(); body.wipe() }
-    _ = try session.send(to: contact, subject: subject, body: body)
+/// One user, unlocked: a store in its own folder under a DEK wrapped to a
+/// software KEK, and a software identity key that signs its digests
+/// through Enclave.sign (in Brev, SignService adds the keychain lookup and
+/// Touch ID).
+final class User {
+    let session: Session
+    let identity: SecKey
+
+    init(in dir: URL, relay: String) throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let attrs: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+                                    kSecAttrKeySizeInBits as String: 256]
+        guard let kek = SecKeyCreateRandomKey(attrs as CFDictionary, nil), let kekPublic = SecKeyCopyPublicKey(kek),
+              let identity = SecKeyCreateRandomKey(attrs as CFDictionary, nil),
+              let identityPublic = SecKeyCopyPublicKey(identity)
+        else { throw BrevError.Crypto }
+        self.identity = identity
+        let dek = SecretBytes(capacity: 64)
+        guard SecRandomCopyBytes(kSecRandomDefault, 32, dek.base) == errSecSuccess else { throw BrevError.Rng }
+        dek.setCount(32)
+        let wrapped = try Enclave.wrap(dek: dek, to: kekPublic)
+        session = try Session.create(dir: dir.path, relay: relay, dek: dek,
+                                     signingKey: try Enclave.publicKeyBytes(of: identityPublic))
+        do {
+            try Enclave.unwrap(wrapped, with: kek) { try session.brev.unlock(dek: $0) }
+        } catch {
+            session.brev.lock()
+            throw error
+        }
+    }
+
+    func register(_ address: String) throws {
+        let typed = fake([address])
+        defer { typed.wipe() }
+        try session.register(signature: try Enclave.sign(digest: try session.registerRequest(address: typed),
+                                                         key: identity))
+    }
+
+    /// Adds the contact with `address`; returns its local id.
+    func add(_ address: String) throws -> Data {
+        let typed = fake([address])
+        defer { typed.wipe() }
+        return try session.addContact(address: typed)
+    }
+
+    /// One letter in the app's steps, all on this thread; wipes the texts.
+    func send(to contact: Data, subject: SecretText, body: SecretText) throws {
+        defer { subject.wipe(); body.wipe() }
+        try session.prepareSend(contact: contact)
+        let digest = try session.signRequest(contact: contact, subject: subject, body: body)
+        try session.attachSignature(try Enclave.sign(digest: digest, key: identity))
+        _ = try session.submit()
+    }
+
+    /// The compose sheet's signer: the software key, answered on main as
+    /// SignService answers.
+    func sign(_ digest: Data, _ done: @escaping (Result<Data, Error>) -> Void) {
+        let result = Result { try Enclave.sign(digest: digest, key: identity) }
+        DispatchQueue.main.async { done(result) }
+    }
 }
 
 // MARK: - Looking at the views
@@ -315,7 +380,10 @@ if scanning && getenv("MallocScribble").map({ String(cString: $0) }) != "1" {
 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("brev-viewhost-\(getpid())")
 try? FileManager.default.removeItem(at: dir)
 try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+var relayProcess: Process?
 func finish() -> Never {
+    relayProcess?.terminate()
+    relayProcess?.waitUntilExit()
     try? FileManager.default.removeItem(at: dir)
     print(failures == 0 ? "PASS" : "FAIL: \(failures) check(s)")
     exit(failures == 0 ? 0 : 1)
@@ -326,20 +394,35 @@ DispatchQueue.main.asyncAfter(deadline: .now() + hold + 60 + (triggers == "idle"
     finish()
 }
 
+guard let relayRun = startRelay(in: dir) else {
+    check("the relay starts on 127.0.0.1 (build.sh builds it)", false)
+    finish()
+}
+relayProcess = relayRun.0
+let relayURL = relayRun.1
+let me: User, ekkoUser: User
 let session: Session
-/// The first contact (Ekko).
-var ekko = Data()
+/// Ekko's local id here, and this host's at Ekko.
+var ekko = Data(), meAtEkko = Data()
 do {
-    session = try makeSession(in: dir)
-    let contacts = try session.contacts()
-    ekko = contacts[0].id
-    // Two threads with Ekko, one with Speil; each echo arrives on sync.
-    try send(session, to: ekko, subject: fake(["Det første brevet ", nil]), body: letterBody(3))
-    try send(session, to: contacts[1].id, subject: fake(["Et brev til Speil ", nil]), body: letterBody(1))
-    try send(session, to: ekko, subject: fake(["Hei fra testverten ", nil, "\nandre linje"]), body: letterBody(12))
-    let echoed = try session.sync()
-    check("the echoes arrive", echoed == 3, "\(echoed)")
-    contacts.forEach { $0.name.wipe() }
+    me = try User(in: dir.appendingPathComponent("testvert"), relay: relayURL)
+    ekkoUser = try User(in: dir.appendingPathComponent("ekko"), relay: relayURL)
+    let speilUser = try User(in: dir.appendingPathComponent("speil"), relay: relayURL)
+    session = me.session
+    try me.register("testvert")
+    try ekkoUser.register("ekko")
+    try speilUser.register("speil")
+    ekko = try me.add("ekko")
+    let speil = try me.add("speil")
+    meAtEkko = try ekkoUser.add("testvert")
+    // Two threads with Ekko, one with Speil: a letter to each, and Ekko's
+    // long letter, which arrives on sync.
+    try me.send(to: ekko, subject: fake(["Det første brevet ", nil]), body: letterBody(3))
+    try me.send(to: speil, subject: fake(["Et brev til Speil ", nil]), body: letterBody(1))
+    try ekkoUser.send(to: meAtEkko, subject: fake(["Hei fra Ekko ", nil, "\nandre linje"]), body: letterBody(12))
+    speilUser.session.brev.lock()
+    let arrived = try session.sync()
+    check("Ekko's letter arrives through the relay", arrived == 1, "\(arrived)")
 } catch {
     check("fake letters sent", false, "\((error as? BrevError).map { "\($0)" } ?? "other")")
     finish()
@@ -531,7 +614,7 @@ func composeStart() {
     print("layout \(layoutID)")
     mail.onNewLetter = { contact in
         let id = contact.id
-        ComposeSheet.present(on: window, to: contact, session: session) { thread in
+        ComposeSheet.present(on: window, to: contact, session: session, signer: me.sign) { thread in
             composeEvents.append(thread == nil ? "closed" : "sent")
             if let thread { mail.showSent(thread: thread, contact: id) }
         }
@@ -562,8 +645,8 @@ func composeOpen() -> ComposeSheet? {
           sheet.sharingType == .none && !sheet.isRestorable && sheet.isExcludedFromWindowsMenu
               && sheet.tabbingMode == .disallowed)
     if capturable { sheet.sharingType = .readOnly }
-    let ekkoName = Array("Ekko".utf16)
-    check("compose: the recipient is the contact's name",
+    let ekkoName = Array("ekko".utf16)
+    check("compose: the recipient is the contact's name (its address)",
           sheet.recipient.name.map { n in n.length == 4 && (0..<4).allSatisfy { n.units[$0] == ekkoName[$0] } } ?? false)
     checkOpaque("SecureComposeView", sheet.body)
     checkOpaque("RecipientView", sheet.recipient)
@@ -664,7 +747,8 @@ func composePost(_ sheet: ComposeSheet, then next: @escaping () -> Void) {
 }
 
 /// After the hold: the driver changed nothing; the fields are pixels in
-/// the protected layer; ⌘↩ sends; the echo arrives.
+/// the protected layer; ⌘↩ sends in the three steps (the relay, the
+/// signature, the relay); Ekko fetches the letter.
 func composeAfterHold(_ sheet: ComposeSheet) {
     check("compose: the hold changed nothing (a driver's AX dump and presses): no send, no close",
           composeSheet() === sheet && composeEvents.isEmpty && sheet.body.model.text.length > 0)
@@ -690,18 +774,21 @@ func composeAfterHold(_ sheet: ComposeSheet) {
     let threads = lists[1].count
     let buffers = views.flatMap { $0.pool }
     deliver(hardwareKey(36, .maskCommand), to: sheet)
-    check("compose: ⌘↩ sends: the sheet closes, the new thread is selected and its letter shown",
-          composeSheet() == nil && composeEvents == ["sent"] && lists[1].count == threads + 1
-              && lists[1].selected == 0 && shownLetters() == 1,
-          "events \(composeEvents), threads \(threads) -> \(lists[1].count), letters \(shownLetters())")
-    check("compose: after the send the recipient, subject and body are wiped, their pixels zero, secure input off",
-          sheet.recipient.name == nil && zeroed(sheet.subject.model.text) && zeroed(sheet.body.model.text)
-              && !buffers.contains(where: hasPixels) && secureInputOff() && !sheet.subject.hasFocus
-              && !sheet.body.hasFocus)
-    sentSheet = sheet
-    DispatchQueue.main.asyncAfter(deadline: .now() + MailViewController.syncInterval + 1) {
-        check("compose: the echo arrives in the new thread, which stays selected",
-              lists[1].count == threads + 1 && lists[1].selected == 0 && shownLetters() == 2)
+    check("compose: ⌘↩ starts the send: the sheet stays, read-only, Send and Avbryt disabled",
+          composeSheet() === sheet && sheet.sendButton?.isEnabled == false && !sheet.body.isEditable)
+    waitFor(15, { composeSheet() == nil }) { closed in
+        check("compose: the letter is sent: the sheet closes, the new thread is selected and its letter shown",
+              closed && composeEvents == ["sent"] && lists[1].count == threads + 1
+                  && lists[1].selected == 0 && shownLetters() == 1,
+              "events \(composeEvents), threads \(threads) -> \(lists[1].count), letters \(shownLetters())")
+        check("compose: after the send the recipient, subject and body are wiped, their pixels zero, secure input off",
+              sheet.recipient.name == nil && zeroed(sheet.subject.model.text) && zeroed(sheet.body.model.text)
+                  && !buffers.contains(where: hasPixels) && secureInputOff() && !sheet.subject.hasFocus
+                  && !sheet.body.hasFocus)
+        sentSheet = sheet
+        let fetched = try? ekkoUser.session.sync()
+        check("compose: Ekko fetches the letter from the relay", fetched == 1, "\(String(describing: fetched))")
+        ekkoUser.session.brev.lock()
         composeCancelAndLock()
     }
 }
@@ -730,7 +817,7 @@ func composeSecondAndThird() {
         check("compose: a second sheet opens", false)
         finish()
     }
-    let ekkoName = Array("Ekko".utf16)
+    let ekkoName = Array("ekko".utf16)
     check("compose: the name the first sheet wiped was its own copy (the second sheet shows it again)",
           second.recipient.name.map { n in n.length == 4 && (0..<4).allSatisfy { n.units[$0] == ekkoName[$0] } } ?? false)
     let draft = fake(["Utkast"])
@@ -967,7 +1054,7 @@ func mailChecks() {
     check("no button action ran during the hold (a driver's AX presses)", events.isEmpty, "\(events)")
     check("two contacts, the first selected", lists.count == 2 && lists[0].count == 2 && lists[0].selected == 0)
     check("Ekko's two threads, the newest selected", lists[1].count == 2 && lists[1].selected == 0)
-    check("its letter and the echo are shown", shownLetters() == 2)
+    check("its letter is shown", shownLetters() == 1)
     // The shown letters are pixels in the protected layer's buffers. Neither
     // cacheDisplay (the layer tree) nor draw(_:) (print and PDF output)
     // gets any of them.
@@ -1048,16 +1135,19 @@ func mailChecks() {
 
 /// Only content views in sight hold pixel buffers (ContentView): the views
 /// shown at the top of the letter pane give their pools back, zeroed, once
-/// scrolled out of sight, and the last letter keeps one pool while it
-/// scrolls in from the pane's bottom edge, 10 pt per display pass.
+/// scrolled out of sight, and a view keeps one pool while it scrolls into
+/// sight, 10 pt per display pass. A thread holds one letter since Phase 3,
+/// so the view that leaves and comes back is the letter's header: the pane
+/// scrolls down until the header is out of sight, then back up.
 func checkScrolledPools(then next: @escaping () -> Void) {
     let clip = letters.enclosingScrollView!.contentView
     func inSight(_ v: ContentView) -> Bool { !v.visibleRect.intersection(v.bounds).isEmpty }
-    let last = all(SecureTextView.self, in: letters).last!
-    let start = last.frame.minY - clip.bounds.height + 10, steps = 30
-    let ys = [0, start] + (1...steps).map { start + CGFloat($0 * 10) }
-    var top: [ContentView] = [], pools: [[CVPixelBuffer]] = [], drawn = false, entering: CVPixelBuffer?
-    var kept = start > 0 && last.frame.maxY - clip.bounds.height >= ys.last!
+    let header = all(ContentView.self, in: letters).first { !($0 is SecureTextView) }!
+    let out = header.frame.maxY + 20, steps = 6
+    let ys = [0, out] + (1...steps).map { out - CGFloat($0 * 10) }
+    var top: [ContentView] = [], pools: [[CVPixelBuffer]] = [], drawn = false
+    var left: [(ContentView, [CVPixelBuffer])] = [], gone = false, entering: CVPixelBuffer?, kept = true
+    let room = letters.frame.height - clip.bounds.height >= out
     var i = 0
     // Each tick checks the frame the last scroll drew, then scrolls on.
     _ = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { timer in
@@ -1067,18 +1157,21 @@ func checkScrolledPools(then next: @escaping () -> Void) {
             top = all(ContentView.self, in: letters).filter(inSight)
             pools = top.map { $0.pool }
             drawn = !pools.isEmpty && pools.allSatisfy { $0.contains(where: hasPixels) }
-        case 2: entering = last.pool.first
-        default: kept = kept && entering != nil && inSight(last) && last.pool.first === entering
+        case 2:
+            left = zip(top, pools).filter { !inSight($0.0) }
+            gone = !left.isEmpty && left.allSatisfy { $0.0.pool.isEmpty && !$0.1.contains(where: hasPixels) }
+        default:
+            guard inSight(header) else { break }
+            if let entering { kept = kept && header.pool.first === entering } else { entering = header.pool.first }
         }
         guard i < ys.count else {
             timer.invalidate()
-            let left = zip(top, pools).filter { !inSight($0.0) }
             check("scrolled out of sight: a content view holds no pixel buffers, and its old ones are zero",
-                  drawn && !left.isEmpty && left.allSatisfy { $0.0.pool.isEmpty && !$0.1.contains(where: hasPixels) },
-                  "drawn=\(drawn), left \(left.count), holding \(left.filter { !$0.0.pool.isEmpty }.count), "
+                  room && drawn && gone,
+                  "room=\(room), drawn=\(drawn), left \(left.count), holding \(left.filter { !$0.0.pool.isEmpty }.count), "
                       + "with pixels \(left.filter { $0.1.contains(where: hasPixels) }.count)")
-            check("scrolling in: a letter keeps one pool", kept,
-                  "start \(start), letter \(last.frame), pane \(clip.bounds.size)")
+            check("scrolling in: a view keeps one pool", entering != nil && kept && inSight(header),
+                  "header \(header.frame), pane \(clip.bounds)")
             return next()
         }
         clip.scroll(to: NSPoint(x: 0, y: ys[i]))
@@ -1086,21 +1179,22 @@ func checkScrolledPools(then next: @escaping () -> Void) {
     }
 }
 
-/// A new thread with Ekko; its echo arrives with the next sync tick, and the
+/// Ekko sends a new letter; it arrives with the next sync tick, and the
 /// thread pane keeps its selection and the letter pane its scroll position.
 /// Then the lock sequence.
 func sendAndLock() {
     letters.scroll(NSPoint(x: 0, y: 200))
     let scrolled = letters.visibleRect.minY
     do {
-        try send(session, to: ekko, subject: fake(["Et nytt brev ", nil]), body: letterBody(2))
+        try ekkoUser.send(to: meAtEkko, subject: fake(["Et nytt brev ", nil]), body: letterBody(2))
     } catch {
-        check("the new letter is sent", false)
+        check("Ekko's new letter is sent", false)
     }
+    ekkoUser.session.brev.lock()
     DispatchQueue.main.asyncAfter(deadline: .now() + MailViewController.syncInterval + 1) {
         check("after sync: three threads, the selected one kept by id", lists[1].count == 3 && lists[1].selected == 1,
               "count=\(lists[1].count) selected=\(String(describing: lists[1].selected))")
-        check("the kept thread's letters are shown again", shownLetters() == 2)
+        check("the kept thread's letter is shown again", shownLetters() == 1)
         check("after sync: the letter pane keeps its scroll position",
               scrolled > 0 && letters.visibleRect.minY == scrolled, "\(scrolled) -> \(letters.visibleRect.minY)")
         snapshot(mail.view, "after-sync.png")

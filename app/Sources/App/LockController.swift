@@ -135,7 +135,8 @@ final class LockController: NSObject {
         ContentView.blankAll()
         // 4. Replace what Core Text keeps alive, after every text is wiped.
         GlyphFlush.flush()
-        // 5. Rust closes open texts, zeroes the three DEKs, scrubs stacks.
+        // 5. Rust closes open texts, forgets a letter being sent, zeroes the
+        //    DEK, scrubs stacks.
         session?.brev.lock()
         // 6. The lock screen replaces the mail window, which is released.
         if wasUnlocked { showLockScreen() }

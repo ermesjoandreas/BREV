@@ -5,7 +5,10 @@
 # with the patched bindings, the release archive and the heap scanner of the
 # CLI harness (app/Tests/scan.c), and uses no keychain and no Touch ID. As the
 # Verify build, it also compiles app/Sources/Verify/SelfScan.swift with
-# BREV_SELFSCAN, so its lock sequence runs SelfScan (docs/VERIFY.md V39).
+# BREV_SELFSCAN, so its lock sequence runs SelfScan (docs/VERIFY.md V39). Its
+# letters go through its own relay on 127.0.0.1: this script builds
+# core/target/release/brev-relay and names it in the app's Info.plist
+# (BrevRelayBinary), and the host starts and stops it.
 #
 # Usage: tools/viewhost/build.sh [output dir]   (default: core/target/viewhost)
 # Needs the archive and bindings from scripts/gen-bindings.sh (test.sh runs
@@ -27,6 +30,11 @@ for f in "$STATICLIB" "$BINDINGS"; do
 done
 # The arch the Rust archive was built for, as in scripts/test.sh.
 ARCH="$(lipo -archs "$STATICLIB")"
+# The relay, with test.sh's deployment target, so the shared SQLite build is
+# not redone (test.sh has built it already by the time it runs this).
+RELAY="$REPO_ROOT/core/target/release/brev-relay"
+MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --manifest-path "$REPO_ROOT/core/Cargo.toml" \
+  --target-dir "$REPO_ROOT/core/target" --release -p brev-relay --quiet
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/nb.lproj"
@@ -53,5 +61,6 @@ xcrun swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" -D BREV_SELFSCA
   "$REPO_ROOT/app/Sources/Verify/SelfScan.swift" \
   "$BINDINGS" "$REPO_ROOT/tools/viewhost/main.swift" "$OUT/scan.o" "$STATICLIB" \
   -o "$APP/Contents/MacOS/ViewHost"
+plutil -insert BrevRelayBinary -string "$RELAY" "$APP/Contents/Info.plist"
 codesign --force --sign - "$APP" >/dev/null 2>&1
 echo "$APP/Contents/MacOS/ViewHost"

@@ -57,6 +57,11 @@ enum L10n {
     static let composeSend = tr("compose.send")
     static let composeCancel = tr("compose.cancel")
     static let composeError = tr("compose.error")
+    static let composeSending = tr("compose.sending")
+    static let composeKeyChanged = tr("compose.keychanged")
+    static let composeRetry = tr("compose.retry")
+    static let sendReason = tr("send.reason")
+    static let netError = tr("net.error")
 
     static let menuAppTitle = tr("menu.app.title")
     static let menuAppLock = tr("menu.app.lock")

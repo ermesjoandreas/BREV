@@ -42,6 +42,9 @@ final class SecureComposeView: ContentView, NSTextInputTraits {
     var onCancel: () -> Void = {}
     /// Tab, ⇧Tab, and Return in the subject.
     var onOtherField: () -> Void = {}
+    /// False while the compose sheet sends a letter it has already sealed:
+    /// keys that would change the text do nothing (the caret still moves).
+    var isEditable = true
 
     private let layout = TextLayout(font: ContentView.contentFont)
     private let keys: KeyTranslator
@@ -167,13 +170,16 @@ final class SecureComposeView: ContentView, NSTextInputTraits {
         guard !InputFilter.isSynthetic(event), let flags = event.cgEvent?.flags else { return }
         let key = ComposeKey.of(keyCode: event.keyCode, flags: flags)
         if key == .text {
-            type(keyCode: event.keyCode, flags: flags, isRepeat: event.isARepeat)
+            if isEditable { type(keyCode: event.keyCode, flags: flags, isRepeat: event.isARepeat) }
             return
         }
         // Any other key drops a waiting dead key; Delete drops only that.
         let waiting = keys.hasDeadKey
         keys.reset()
         if waiting && key == .deleteBackward { return }
+        if !isEditable && (key == .deleteBackward || key == .deleteForward || (key == .newline && model.multiline)) {
+            return
+        }
         switch key {
         case .send: onSend()
         case .cancel: onCancel()

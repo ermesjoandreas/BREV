@@ -1,27 +1,34 @@
 // main.swift — the Swift heap-scan harness (docs/PHASE2_DESIGN.md §11).
 //
-// A CLI process: no AppKit, no window, no Secure Enclave, no prompt. It is
-// built from app/Sources/Shared, the patched bindings and libbrev_core.a,
-// drives the content path the app uses, and counts copies of secrets in its
-// own memory with scan.c. scripts/test.sh runs every case five times (the
-// content case at four sizes) under MallocScribble=1, as the app runs, plus
-// case 6's control without scribbling, with TMPDIR under core/target/harness.
+// A CLI process: no AppKit, no window, no Secure Enclave, no keychain, no
+// prompt. It is built from app/Sources/Shared, the patched bindings and
+// libbrev_core.a, drives the content path the app uses, and counts copies of
+// secrets in its own memory with scan.c. scripts/test.sh runs every case five
+// times (the content case at four sizes) under MallocScribble=1, as the app
+// runs, plus case 6's control without scribbling, with TMPDIR under
+// core/target/harness.
 //
 // usage: harness units | shell | compose | dek | content <units> [--no-scribble] | kept | control
-//        harness scribble [--no-scribble]
+//        harness scribble [--no-scribble] | network
 //        harness needles <file>     (the helper run that `dek` starts: ECIES needles)
 //        harness argdomain -NSTraceEvents YES -NSZombieEnabled YES
 //                                   (the helper run that `shell` starts)
+// content, kept and network need BREV_RELAY_URL: the relay scripts/test.sh
+// starts on 127.0.0.1 for the whole run (docs/PHASE3_DESIGN.md §8).
 //
 // Case numbers are those of §11; case 7 (SelfScan's scribble probe) came
-// with review round 1 (docs/DECISIONS.md D-0063). Case 2 has two parts: the app shell's
+// with review round 1 (docs/DECISIONS.md D-0063), case 8 (`network`, the
+// round trip through the relay) with Phase 3. Case 2 has two parts: the app shell's
 // (InputFilter, LockState, LaunchGuard, UnlockFailure) is `shell`, the compose core's
-// (EditModel, ComposeKey, KeyTranslator) is `compose`. Output is content-free: check
-// names and hit counts only.
+// (EditModel, ComposeKey, KeyTranslator) is `compose`. Since Phase 3 there are no
+// built-in contacts: every letter goes through the relay between two users made
+// here (software KEK and identity key; `Enclave.sign` signs the digests, as in
+// the app). Output is content-free: check names and hit counts only.
 
 import Carbon.HIToolbox
 import CoreGraphics
 import CoreText
+import CryptoKit
 import Foundation
 import LocalAuthentication
 import Security
@@ -119,18 +126,41 @@ func throwsLocked<R>(_ f: () throws -> R) -> Bool {
     do { _ = try f(); return false } catch BrevError.Locked { return true } catch { return false }
 }
 
-// MARK: - Sessions, as the app makes them (software KEK)
+// MARK: - Sessions, as the app makes them (software keys)
 
-let signingKey = Data(repeating: 4, count: 65)
-
-/// A new software P-256 key pair, as a SecKey (not in any keychain).
-func newSoftwareKEK() throws -> SecKey {
+/// A new software P-256 key pair, as a SecKey (not in any keychain): the
+/// stand-in for the KEK and for the identity key.
+func newSoftwareKey() throws -> SecKey {
     let attrs: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
                                 kSecAttrKeySizeInBits as String: 256]
     var err: Unmanaged<CFError>?
     guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &err)
     else { throw err.map { $0.takeRetainedValue() as Error } ?? Enclave.Failure.unknown }
     return key
+}
+
+/// The public key of `key` as `Brev.create` takes it (65 bytes, X9.63).
+func publicKeyBytes(_ key: SecKey) throws -> Data {
+    guard let pub = SecKeyCopyPublicKey(key) else { throw Enclave.Failure.unknown }
+    return try Enclave.publicKeyBytes(of: pub)
+}
+
+/// A relay URL that is never contacted: for a session that makes no request.
+let offlineRelay = "http://127.0.0.1:9"
+
+/// The relay scripts/test.sh started for this run.
+func relayURL() -> String {
+    guard let url = getenv("BREV_RELAY_URL").map({ String(cString: $0) }), !url.isEmpty else {
+        print("FAIL this case needs BREV_RELAY_URL (the relay scripts/test.sh starts)")
+        exit(2)
+    }
+    return url
+}
+
+/// An address no run used before: the relay lives through every run of
+/// test.sh, and an address is taken for good.
+func freshAddress(_ who: String) -> String {
+    "\(who)-\(getpid())-\(UInt32.random(in: 0...UInt32.max))"
 }
 
 /// A fresh directory in TMPDIR for one run's stores, removed afterwards.
@@ -173,18 +203,77 @@ func allZero(_ data: CFData) -> Bool {
     return UnsafeBufferPointer(start: p, count: 32).allSatisfy { $0 == 0 }
 }
 
-/// Onboarding steps 6 and 7 with a software KEK: a random DEK in a
-/// SecretBytes, wrapped, `Session.create` (which wipes it), then the unlock.
-func makeUnlockedSession(in dir: URL) throws -> Session {
-    let dek = SecretBytes(capacity: 64)
-    guard SecRandomCopyBytes(kSecRandomDefault, 32, dek.base) == errSecSuccess else { throw BrevError.Rng }
-    dek.setCount(32)
-    let kek = try newSoftwareKEK()
-    guard let kekPublic = SecKeyCopyPublicKey(kek) else { throw Enclave.Failure.unknown }
-    let wrapped = try Enclave.wrap(dek: dek, to: kekPublic)
-    let session = try Session.create(dir: dir.path, dek: dek, signingKey: signingKey)
-    try unlock(session, wrapped: wrapped, kek: kek)
-    return session
+/// One user, unlocked, as onboarding makes one with software keys: the
+/// KEK wraps the DEK (the unlock closure unwraps it), and the identity key
+/// signs digests through Enclave.sign, the code the app signs with
+/// (SignService adds only the keychain lookup and Touch ID).
+final class User {
+    let session: Session
+    let identity: SecKey
+
+    /// Onboarding steps 6 and 7 in `dir`: a random DEK in a SecretBytes,
+    /// wrapped, `Session.create` (which wipes it), then the unlock.
+    init(in dir: URL, relay: String) throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        identity = try newSoftwareKey()
+        let dek = SecretBytes(capacity: 64)
+        guard SecRandomCopyBytes(kSecRandomDefault, 32, dek.base) == errSecSuccess else { throw BrevError.Rng }
+        dek.setCount(32)
+        let kek = try newSoftwareKey()
+        guard let kekPublic = SecKeyCopyPublicKey(kek) else { throw Enclave.Failure.unknown }
+        let wrapped = try Enclave.wrap(dek: dek, to: kekPublic)
+        session = try Session.create(dir: dir.path, relay: relay, dek: dek, signingKey: try publicKeyBytes(identity))
+        try unlock(session, wrapped: wrapped, kek: kek)
+    }
+
+    /// Registers `address`, typed as the app passes it: the digest, the
+    /// signature, the post.
+    func register(_ address: String) throws {
+        let typed = secret(address)
+        defer { typed.wipe() }
+        let digest = try session.registerRequest(address: typed)
+        try session.register(signature: try Enclave.sign(digest: digest, key: identity))
+    }
+
+    /// Adds the contact with `address`; returns its local id.
+    func add(_ address: String) throws -> Data {
+        let typed = secret(address)
+        defer { typed.wipe() }
+        return try session.addContact(address: typed)
+    }
+
+    /// One letter in the app's steps (PHASE3 §3.2): prepare, seal, sign,
+    /// attach, submit. Returns the thread id. The caller wipes the texts.
+    func send(to contact: Data, subject: SecretText, body: SecretText) throws -> Data {
+        try session.prepareSend(contact: contact)
+        let digest = try session.signRequest(contact: contact, subject: subject, body: body)
+        try session.attachSignature(try Enclave.sign(digest: digest, key: identity))
+        return try session.submit()
+    }
+
+    func lock() { session.brev.lock() }
+}
+
+/// Two registered users who added each other.
+struct Pair {
+    let a: User, b: User
+    /// B's local id at A, and A's at B.
+    let aSeesB: Data, bSeesA: Data
+    let addressA: String, addressB: String
+}
+
+func makePair(in dir: URL, relay: String) throws -> Pair {
+    let a = try User(in: dir.appendingPathComponent("a"), relay: relay)
+    let b = try User(in: dir.appendingPathComponent("b"), relay: relay)
+    let addressA = freshAddress("a"), addressB = freshAddress("b")
+    try a.register(addressA)
+    try b.register(addressB)
+    return Pair(a: a, b: b, aSeesB: try a.add(addressB), bSeesA: try b.add(addressA),
+                addressA: addressA, addressB: addressB)
+}
+
+func throwsError<R>(_ expected: BrevError, _ f: () throws -> R) -> Bool {
+    do { _ = try f(); return false } catch let e as BrevError { return e == expected } catch { return false }
 }
 
 // MARK: - Case 1: units
@@ -342,7 +431,7 @@ func caseUnits() {
 }
 
 func caseEnclaveUnits() {
-    guard let kek = try? newSoftwareKEK(), let kekPublic = SecKeyCopyPublicKey(kek) else {
+    guard let kek = try? newSoftwareKey(), let kekPublic = SecKeyCopyPublicKey(kek) else {
         check("a software P-256 key can be made", false)
         return
     }
@@ -406,6 +495,23 @@ func caseEnclaveUnits() {
         check("Enclave.unwrap: Security's CFData is zeroed also when the body throws",
               failed && plain.map(allZero) == true)
     }
+
+    // sign: the signature over a digest is the message signature over the
+    // bytes it was made from (PHASE3 §3.1), in DER.
+    let message = Data("brev/v1/register\u{0}harness".utf8)
+    let digest = Data(SHA256.hash(data: message))
+    let signature = try? Enclave.sign(digest: digest, key: kek)
+    let verifies = signature.map { SecKeyVerifySignature(kekPublic, .ecdsaSignatureMessageX962SHA256, message as CFData,
+                                                         $0 as CFData, nil) } ?? false
+    check("Enclave.sign: a DER signature over the digest that verifies as the message signature",
+          verifies && signature?.first == 0x30 && (8...72).contains(signature?.count ?? 0))
+    var other = message
+    other[0] ^= 1
+    check("Enclave.sign: it does not verify for another message",
+          signature.map { !SecKeyVerifySignature(kekPublic, .ecdsaSignatureMessageX962SHA256, other as CFData,
+                                                  $0 as CFData, nil) } ?? false)
+    check("Enclave.sign: only a 32-byte digest is signed",
+          { do { _ = try Enclave.sign(digest: digest.prefix(31), key: kek); return false } catch Enclave.Failure.malformed { return true } catch { return false } }())
 }
 
 // MARK: - Case 2, the app shell's part: InputFilter, LockState, UnlockFailure, LaunchGuard
@@ -964,7 +1070,10 @@ func caseDEK() {
         check("baseline: the DEK is in its SecretBytes only (positive control); no ECIES secret",
               h.needle(0) == 1 && (1..<n).allSatisfy { h.needle($0) == 0 }, "\(h)")
         let session: Session
-        do { session = try Session.create(dir: dir.path, dek: dek, signingKey: signingKey) } catch {
+        do {
+            session = try Session.create(dir: dir.path, relay: offlineRelay, dek: dek,
+                                         signingKey: try publicKeyBytes(try newSoftwareKey()))
+        } catch {
             check("create", false, "\(error)")
             return
         }
@@ -1005,79 +1114,112 @@ func caseDEK() {
 
 // MARK: - Case 4 (and the no-scribble half of case 6): the content path
 
-func caseContent(units bodyUnits: Int, scribble: Bool) {
-    requireScribble(scribble)
-    let font = CTFontCreateWithName("Helvetica" as CFString, 13, nil)
-    setGlyphNeedle(font)
-    withStoreDir { dir in
-        var h = scan()
-        check("baseline: no marker, no glyph needle", h.u8 == 0 && h.u16 == 0 && h.glyph == 0, "\(h)")
-        let session = try! makeUnlockedSession(in: dir)
-        let contacts = try! session.contacts()
-        check("two contacts", contacts.count == 2)
+/// The letters' lines drawn as the letter view draws them, and a text typed
+/// and drawn after every keystroke as the compose view does.
+struct Drawing {
+    let layout: TextLayout
+    let ctx: CGContext
 
-        let subject = markerText(units: 32, emoji: false)
-        let body = markerText(units: bodyUnits, emoji: true)
-        let thread = try! session.send(to: contacts[0].id, subject: subject, body: body)
-        subject.wipe()
-        body.wipe()
-        let arrived = try! session.sync()
-        check("the echo arrives", arrived == 1, "\(arrived)")
+    init(font: CTFont) {
+        layout = TextLayout(font: font)
+        ctx = CGContext(data: nil, width: 800, height: 600, bitsPerComponent: 8, bytesPerRow: 0,
+                        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    }
 
-        let threads = try! session.threads(contact: contacts[0].id)
-        let msgs = try! session.messages(thread: thread)
-        check("one thread with the letter and its echo",
-              threads.count == 1 && msgs.count == 2 && msgs.contains { !$0.outgoing })
-        let letters = msgs.map { try! session.body(message: $0.id) }
-        check("both letters read back at full length", letters.allSatisfy { $0.length == bodyUnits + 2 })
+    func draw(_ t: SecretText) {
+        layout.layout(t, width: 600)
+        layout.draw(t, lines: 0..<layout.lines.count, in: ctx, x: 4, top: 0)
+    }
 
-        let layout = TextLayout(font: font)
-        let ctx = CGContext(data: nil, width: 800, height: 600, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        func drawAll(_ t: SecretText) {
-            layout.layout(t, width: 600)
-            layout.draw(t, lines: 0..<layout.lines.count, in: ctx, x: 4, top: 0)
-        }
-        letters.forEach(drawAll)
-        // What the compose view does: composed-range lookups (Delete, arrows)
-        // and a text laid out and drawn again after every keystroke.
+    /// Composed-range lookups (Delete, arrows) on `letter`, then 300 marker
+    /// units typed one by one into a new text, drawn after each. Returns
+    /// the typed text (the caller wipes it) and a sum that keeps the
+    /// lookups alive.
+    func edit(_ letter: SecretText) -> (typed: SecretText, sum: Int) {
         var sum = 0
-        for k in 0..<200 { sum &+= letters[0].composedRange(at: (k * 331) % letters[0].length).count }
+        for k in 0..<200 { sum &+= letter.composedRange(at: (k * 331) % letter.length).count }
         let typed = SecretText(maxUnits: 512)
         for i in 0..<300 {
             var unit = markerUnit(i)
             withUnsafePointer(to: &unit) { _ = typed.insert(UnsafeBufferPointer(start: $0, count: 1), at: typed.length) }
             unit = 0
-            drawAll(typed)
+            draw(typed)
         }
-        letters.forEach(drawAll)   // the letters' lines are the last ones drawn
-        h = scan()
-        check("while open: the text is in memory (positive control)", h.u16 > 0 && sum > 0, "\(h)")
-        // Core Text frees a line's glyphs as soon as it is drawn, and with
-        // scribbling nothing of them is left, even while a letter is shown. So
-        // the glyph needle's positive control scans with one line kept alive.
+        return (typed, sum)
+    }
+
+    /// A scan while one line of `letter` is alive as a CTLine. Core Text
+    /// frees a line's glyphs as soon as it is drawn, and with scribbling
+    /// nothing of them is left, even while a letter is shown. So the glyph
+    /// needle's positive control scans with one line kept alive.
+    func scanWithLiveLine(_ letter: SecretText, font: CTFont) -> Hits {
+        var h = scan()
         autoreleasepool {
-            let n = min(letters[0].length, TextLayout.maxLineUnits)
-            let s = CFStringCreateWithCharactersNoCopy(nil, letters[0].units, n, kCFAllocatorNull)!
+            let n = min(letter.length, TextLayout.maxLineUnits)
+            let s = CFStringCreateWithCharactersNoCopy(nil, letter.units, n, kCFAllocatorNull)!
             let attrs = [kCTFontAttributeName: font] as CFDictionary
             let line = CTLineCreateWithAttributedString(CFAttributedStringCreate(nil, s, attrs)!)
             h = scan()
             withExtendedLifetime(line) {}
         }
+        return h
+    }
+}
+
+func caseContent(units bodyUnits: Int, scribble: Bool) {
+    requireScribble(scribble)
+    let relay = relayURL()
+    let font = CTFontCreateWithName("Helvetica" as CFString, 13, nil)
+    setGlyphNeedle(font)
+    withStoreDir { dir in
+        var h = scan()
+        check("baseline: no marker, no glyph needle", h.u8 == 0 && h.u16 == 0 && h.glyph == 0, "\(h)")
+        let pair = try! makePair(in: dir, relay: relay)
+        let (a, b) = (pair.a, pair.b)
+        let contacts = try! a.session.contacts()
+        check("one contact, the other user", contacts.count == 1 && contacts[0].id == pair.aSeesB)
+
+        let subject = markerText(units: 32, emoji: false)
+        let body = markerText(units: bodyUnits, emoji: true)
+        let thread = try! a.send(to: pair.aSeesB, subject: subject, body: body)
+        subject.wipe()
+        body.wipe()
+        let arrived = try! b.session.sync()
+        check("the letter arrives through the relay", arrived == 1, "\(arrived)")
+
+        let aThreads = try! a.session.threads(contact: pair.aSeesB)
+        let bThreads = try! b.session.threads(contact: pair.bSeesA)
+        let sent = try! a.session.messages(thread: thread)
+        let received = bThreads.first.map { try! b.session.messages(thread: $0.id) } ?? []
+        check("one thread on each side with the same id: the sent copy and the received letter",
+              aThreads.count == 1 && bThreads.count == 1 && bThreads[0].id == thread
+                  && sent.count == 1 && sent[0].outgoing && received.count == 1 && !received[0].outgoing)
+        let letters = [try! a.session.body(message: sent[0].id), try! b.session.body(message: received[0].id)]
+        check("both letters read back at full length", letters.allSatisfy { $0.length == bodyUnits + 2 })
+
+        let drawing = Drawing(font: font)
+        letters.forEach(drawing.draw)
+        let (typed, sum) = drawing.edit(letters[0])
+        letters.forEach(drawing.draw)   // the letters' lines are the last ones drawn
+        h = scan()
+        check("while open: the text is in memory (positive control)", h.u16 > 0 && sum > 0, "\(h)")
+        h = drawing.scanWithLiveLine(letters[0], font: font)
         check("while a line of it is alive: the glyph needle sees it (positive control)", h.glyph > 0, "\(h)")
 
         // The lock sequence (§8.4): wipe every text, flush, lock.
         letters.forEach { $0.wipe() }
-        threads.forEach { $0.subject.wipe() }
+        (aThreads + bThreads).forEach { $0.subject.wipe() }
         contacts.forEach { $0.name.wipe() }
         typed.wipe()
         GlyphFlush.flush()
-        layout.reset()
-        session.brev.lock()
+        drawing.layout.reset()
+        a.lock()
+        b.lock()
         h = scan()
         if scribble {
             check("after wipe, flush and lock: no copy (UTF-8, UTF-16, glyphs)",
-                  h.u8 == 0 && h.u16 == 0 && h.glyph == 0 && session.brev.isLocked(), "\(h)")
+                  h.u8 == 0 && h.u16 == 0 && h.glyph == 0 && a.session.brev.isLocked() && b.session.brev.isLocked(),
+                  "\(h)")
         } else {
             check("without MallocScribble: glyph ids are left after lock (the needle works; scribbling clears them)",
                   h.glyph > 0, "\(h)")
@@ -1089,18 +1231,21 @@ func caseContent(units bodyUnits: Int, scribble: Bool) {
 
 func caseKept() {
     requireScribble(true)
+    let relay = relayURL()
     withStoreDir { dir in
-        let session = try! makeUnlockedSession(in: dir)
-        let rows = try! session.brev.contacts()   // names deliberately left open
+        let pair = try! makePair(in: dir, relay: relay)
+        let session = pair.a.session
+        let rows = try! session.brev.contacts()   // names (the other user's address) deliberately left open
         let subject = markerText(units: 16, emoji: false)
         let body = markerText(units: 64, emoji: false)
-        let thread = try! session.send(to: rows[0].id, subject: subject, body: body)
+        let thread = try! pair.a.send(to: pair.aSeesB, subject: subject, body: body)
         subject.wipe()
         body.wipe()
         let msg = try! session.messages(thread: thread)[0]
         let kept = try! session.brev.openBody(message: msg.id)   // deliberately not closed
         check("an open body has its length", kept.byteLen() == 64 && rows[0].name.byteLen() > 0)
         session.brev.lock()
+        pair.b.lock()
         check("after lock: a kept body throws Locked and is empty",
               throwsLocked { try kept.chunk(index: 0) } && kept.byteLen() == 0)
         check("after lock: a kept name throws Locked and is empty",
@@ -1149,6 +1294,117 @@ func caseScribble(scribble: Bool) {
     }
 }
 
+// MARK: - Case 8: the network round trip (docs/PHASE3_DESIGN.md §8)
+
+/// Two users register at the relay test.sh started, add each other and
+/// compare codes; a letter cancelled after signing goes nowhere; A sends a
+/// marker letter in the app's steps, B syncs and reads it (acknowledged, so
+/// a second sync gets nothing), B answers and A reads that. While the
+/// letters are open the scanner sees them (positive controls); after the
+/// wipe, the flush and both locks, nothing: no UTF-8, UTF-16 or glyph copy.
+func caseNetwork() {
+    requireScribble(true)
+    let relay = relayURL()
+    let font = CTFontCreateWithName("Helvetica" as CFString, 13, nil)
+    setGlyphNeedle(font)
+    withStoreDir { dir in
+        var h = scan()
+        check("baseline: no marker, no glyph needle", h.u8 == 0 && h.u16 == 0 && h.glyph == 0, "\(h)")
+        let a = try! User(in: dir.appendingPathComponent("a"), relay: relay)
+        let b = try! User(in: dir.appendingPathComponent("b"), relay: relay)
+        let before = try! a.session.me()
+        check("before registration: not registered, no address, a 35-byte code; sync is NotFound",
+              !before.registered && before.address.length == 0 && before.code.count == 35
+                  && throwsError(.NotFound) { try a.session.sync() })
+        before.address.wipe()
+        before.code.wipe()
+
+        let addressA = freshAddress("a"), addressB = freshAddress("b")
+        do {
+            try a.register(addressA)
+            try b.register(addressB)
+        } catch {
+            check("both users register", false, "\(error)")
+            return
+        }
+        let meA = try! a.session.me(), meB = try! b.session.me()
+        check("registered: the own address as typed", meA.registered && meB.registered
+                  && unitsOf(meA.address) == Array(addressA.utf16) && unitsOf(meB.address) == Array(addressB.utf16))
+        check("registering again is Duplicate", throwsError(.Duplicate) { try a.register(freshAddress("a")) })
+        let aSeesB = try! a.add(addressB), bSeesA = try! b.add(addressA)
+        check("adding a known address again is Duplicate, an unknown one NotFound",
+              throwsError(.Duplicate) { try a.add(addressB) } && throwsError(.NotFound) { try a.add(freshAddress("n")) })
+        let infoB = try! a.session.contactInfo(contact: aSeesB), infoA = try! b.session.contactInfo(contact: bSeesA)
+        let rowsA = try! a.session.contacts()
+        check("each pinned the other's own code, and no key changed",
+              infoB.code.withBytes { Array($0) } == meB.code.withBytes { Array($0) }
+                  && infoA.code.withBytes { Array($0) } == meA.code.withBytes { Array($0) }
+                  && infoB.newCode.count == 0 && unitsOf(infoB.address) == Array(addressB.utf16)
+                  && rowsA.count == 1 && !rowsA[0].keyChanged)
+        for t in [meA.address, meB.address, infoA.address, infoB.address] + rowsA.map(\.name) { t.wipe() }
+        for c in [meA.code, meB.code, infoA.code, infoB.code, infoA.newCode, infoB.newCode] { c.wipe() }
+
+        // A letter given up after it was signed goes nowhere.
+        let draft = secret("Utkast"), draftBody = secret("Et utkast som ikke sendes.")
+        var cancelled = false
+        do {
+            try a.session.prepareSend(contact: aSeesB)
+            let digest = try a.session.signRequest(contact: aSeesB, subject: draft, body: draftBody)
+            let der = try Enclave.sign(digest: digest, key: a.identity)
+            a.session.cancelSend()
+            cancelled = throwsError(.NotFound) { try a.session.attachSignature(der) }
+                && throwsError(.Malformed) { try a.session.signRequest(contact: aSeesB, subject: draft, body: draftBody) }
+                && throwsError(.NotFound) { try a.session.submit() }
+        } catch {
+            check("a letter up to its signature", false, "\(error)")
+        }
+        draft.wipe()
+        draftBody.wipe()
+        check("cancelSend forgets the letter: attach NotFound, no ticket left (Malformed), submit NotFound; nothing arrives",
+              cancelled && (try? b.session.sync()) == 0)
+
+        // A to B, then B to A: marker letters.
+        let subject = markerText(units: 32, emoji: false), body = markerText(units: 1000, emoji: true)
+        let thread = try? a.send(to: aSeesB, subject: subject, body: body)
+        let arrived = try? b.session.sync(), again = try? b.session.sync()
+        check("A's letter is sent and arrives at B once (acknowledged: the next sync gets nothing)",
+              thread != nil && arrived == 1 && again == 0, "\(String(describing: arrived)), \(String(describing: again))")
+        let reply = try? b.send(to: bSeesA, subject: subject, body: body)
+        subject.wipe()
+        body.wipe()
+        let back = try? a.session.sync()
+        check("B's answer is sent and arrives at A", reply != nil && back == 1)
+
+        let bThreads = try! b.session.threads(contact: bSeesA), aThreads = try! a.session.threads(contact: aSeesB)
+        let bRows = bThreads.flatMap { try! b.session.messages(thread: $0.id) }
+        let aRows = aThreads.flatMap { try! a.session.messages(thread: $0.id) }
+        check("B has A's letter and its own answer; A its letter and B's answer, in their threads",
+              bThreads.count == 2 && aThreads.count == 2 && bThreads.contains { $0.id == thread }
+                  && aThreads.contains { $0.id == reply } && bRows.filter { !$0.outgoing }.count == 1
+                  && aRows.filter { !$0.outgoing }.count == 1 && bRows.count == 2 && aRows.count == 2)
+        let letters = bRows.map { try! b.session.body(message: $0.id) } + aRows.map { try! a.session.body(message: $0.id) }
+        check("every letter reads back at full length", letters.count == 4 && letters.allSatisfy { $0.length == 1002 })
+
+        let drawing = Drawing(font: font)
+        letters.forEach(drawing.draw)
+        h = scan()
+        check("while open: the letters are in memory (positive control)", h.u16 > 0, "\(h)")
+        h = drawing.scanWithLiveLine(letters[0], font: font)
+        check("while a line of one is alive: the glyph needle sees it (positive control)", h.glyph > 0, "\(h)")
+
+        letters.forEach { $0.wipe() }
+        (aThreads + bThreads).forEach { $0.subject.wipe() }
+        GlyphFlush.flush()
+        drawing.layout.reset()
+        a.lock()
+        b.lock()
+        check("after lock: sync is Locked (no request)", throwsLocked { try a.session.sync() })
+        h = scan()
+        check("after wipe, flush and lock: no copy (UTF-8, UTF-16, glyphs)",
+              h.u8 == 0 && h.u16 == 0 && h.glyph == 0 && a.session.brev.isLocked() && b.session.brev.isLocked(), "\(h)")
+    }
+}
+
 // MARK: - Main
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -1178,9 +1434,10 @@ case ("scribble", 1), ("scribble", 2):
         exit(2)
     }
     caseScribble(scribble: args.count == 1)
+case ("network", 1): caseNetwork()
 default:
     print("usage: harness units | shell | compose | dek | content <units> [--no-scribble] | kept | control"
-          + " | scribble [--no-scribble] | needles <file>")
+          + " | scribble [--no-scribble] | network | needles <file>")
     exit(2)
 }
 print(failures == 0 ? "PASS" : "FAIL: \(failures) check(s)")

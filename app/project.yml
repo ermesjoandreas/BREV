@@ -85,15 +85,24 @@ targets:
         # LaunchGuard refuses to unlock without it.
         LSEnvironment:
           MallocScribble: "1"
+        # The relay (docs/PHASE3_DESIGN.md §5.1): the build setting
+        # BREV_RELAY_URL below. Rust accepts only http://127.0.0.1:<port>.
+        # No NSAppTransportSecurity key: ATS governs URLSession, which Brev
+        # never uses (reqwest opens BSD sockets; §5.5).
+        BrevRelayURL: $(BREV_RELAY_URL)
         NSHumanReadableCopyright: "© 2026 Brev. Alle rettigheter forbeholdt."
         NSHighResolutionCapable: true
 
     # Entitlements are generated from this block into Brev.entitlements and wired
     # into CODE_SIGN_ENTITLEMENTS. App Sandbox ON (CLAUDE.md §3.2). The one
     # keychain access group holds the two Secure Enclave keys and the wrapped
-    # DEK (§3.2, §3.3; docs/DECISIONS.md D-0035); the provisioning profile
-    # authorises it, and Xcode adds application-identifier and
-    # team-identifier from the profile. network.client arrives in Phase 3.
+    # DEK (§3.2, §3.3; docs/DECISIONS.md D-0035); it follows the bundle id
+    # (AV26DNQ5SC.no.brev.app for Brev, AV26DNQ5SC.no.brev.app.b for Brev B;
+    # docs/PHASE3_DESIGN.md §7), as KeyStore.accessGroup does. The
+    # provisioning profile authorises it, and Xcode adds
+    # application-identifier and team-identifier from the profile.
+    # network.client lets Brev reach the relay on 127.0.0.1 (a sandboxed app
+    # cannot connect without it; PHASE3 §0, §5.5); never network.server.
     # Never add cs.disable-library-validation, cs.allow-jit,
     # cs.allow-unsigned-executable-memory, cs.allow-dyld-environment-variables,
     # cs.debugger, get-task-allow, iCloud (keychain sharing with iCloud
@@ -103,13 +112,16 @@ targets:
       path: Brev.entitlements
       properties:
         com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
         keychain-access-groups:
-          - $(AppIdentifierPrefix)no.brev.app
+          - $(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)
 
     settings:
       base:
         PRODUCT_NAME: Brev
         PRODUCT_BUNDLE_IDENTIFIER: no.brev.app
+        # The relay Brev talks to (Info.plist BrevRelayURL; PHASE3 §5.1).
+        BREV_RELAY_URL: "http://127.0.0.1:8787"
         # Swift 5 language mode (D-0006). Quoted so YAML keeps "5.0" a string.
         SWIFT_VERSION: "5.0"
         # Optional-but-wanted strictness; "complete" is a later-phase item.

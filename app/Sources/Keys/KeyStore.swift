@@ -5,24 +5,26 @@
 // docs/DECISIONS.md D-0035 (docs/PHASE2_DESIGN.md §5.1, §5.2):
 // - Keychain: the identity key and the KEK are permanent Secure Enclave
 //   SecKeys, and the wrapped DEK is a generic-password item, all three in
-//   the data protection keychain under the access group
-//   AV26DNQ5SC.no.brev.app. The keychain binds them to Brev's signing
+//   the data protection keychain under the access group AV26DNQ5SC.<bundle
+//   id>: AV26DNQ5SC.no.brev.app for Brev, AV26DNQ5SC.no.brev.app.b for the
+//   second instance "Brev B" (docs/PHASE3_DESIGN.md §7). The bundle id is
+//   covered by the code signature. The keychain binds them to Brev's signing
 //   identity, so no other program can use, read or replace them, on a Mac
 //   that does not hold Brev's team signing key: on one that does, any
 //   same-user process can sign itself into that identity (CLAUDE.md §2;
 //   docs/DECISIONS.md D-0062). Creating, finding, reading and deleting
-//   never prompts: every query that does not unwrap carries an LAContext
-//   that forbids interaction, so it fails instead of showing UI. Only
-//   UnlockService's unwrap prompts.
+//   never prompts: every query that does not unwrap or sign carries an
+//   LAContext that forbids interaction, so it fails instead of showing UI.
+//   Only UnlockService's unwrap and SignService's signature prompt.
 // - Install marker: Brev is installed when the wrapped-DEK item exists. It
 //   is written last, after the first Touch ID unlock (design §2.10; D-0039
 //   in the shifted numbering), so a crash before that leaves Brev
 //   uninstalled, and the next attempt starts with the known-name cleanup.
-// - Folder: ~/Library/Containers/no.brev.app/Data/Library/Application
+// - Folder: ~/Library/Containers/<bundle id>/Data/Library/Application
 //   Support/Brev, mode 0700, excluded from backups (D-0040). It holds the
-//   three stores, `biometry.state` (the enrolled-fingers hash, a hint) and
+//   store `brev.db`, `biometry.state` (the enrolled-fingers hash, a hint) and
 //   `.lock`, held with O_EXLOCK for the process lifetime so a second Brev
-//   cannot run onboarding or open the stores at the same time.
+//   cannot run onboarding or open the store at the same time.
 // Nothing secret is ever held here; the wrapped DEK is not secret.
 // Not final: the lock probe (app/Tests/Lock) overrides the keychain calls
 // to run UnlockService without the keychain.
@@ -32,9 +34,11 @@ import LocalAuthentication
 import Security
 
 class KeyStore {
-    /// The keychain access group of all three items (D-0035). The
-    /// entitlement names the same group through $(AppIdentifierPrefix).
-    static let accessGroup = "AV26DNQ5SC.no.brev.app"
+    /// The keychain access group of all three items (D-0035): the team
+    /// prefix and the bundle id, as the entitlement names it through
+    /// $(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER). A process without
+    /// a bundle id gets a group that holds nothing.
+    static let accessGroup = "AV26DNQ5SC." + (Bundle.main.bundleIdentifier ?? "")
     static let identityTag = Data("no.brev.app.identity".utf8)
     static let kekTag = Data("no.brev.app.kek".utf8)
     static let wrappedService = "no.brev.app"
@@ -43,8 +47,7 @@ class KeyStore {
     /// Every file Brev writes in `dir`, except `.lock`: the only names the
     /// cleanup ever deletes (design §5.2's rule; its list, which still names
     /// the key files, is replaced by D-0035).
-    static let knownFiles = ["brev.db", "brev.db-journal", "peer-1.db", "peer-1.db-journal",
-                             "peer-2.db", "peer-2.db-journal", "biometry.state", "biometry.state.tmp"]
+    static let knownFiles = ["brev.db", "brev.db-journal", "biometry.state", "biometry.state.tmp"]
 
     let dir: URL
 
@@ -143,10 +146,20 @@ class KeyStore {
     /// The KEK, looked up with `context`: the LAContext its unwrap will
     /// prompt with (UnlockService). Finding it does not prompt.
     func kek(context: LAContext) throws -> SecKey {
+        try privateKey(tag: Self.kekTag, context: context)
+    }
+
+    /// The identity key, looked up with `context`: the LAContext its
+    /// signature will prompt with (SignService). Finding it does not prompt.
+    func identityKey(context: LAContext) throws -> SecKey {
+        try privateKey(tag: Self.identityTag, context: context)
+    }
+
+    private func privateKey(tag: Data, context: LAContext) throws -> SecKey {
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-            kSecAttrApplicationTag as String: Self.kekTag,
+            kSecAttrApplicationTag as String: tag,
             kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
             kSecUseDataProtectionKeychain as String: true,
             kSecAttrAccessGroup as String: Self.accessGroup,
@@ -164,7 +177,7 @@ class KeyStore {
     // MARK: - The wrapped DEK
 
     /// Install (design §5.3 step 8): adds the wrapped-DEK item. Only after
-    /// the first Touch ID unlock of the new stores succeeded.
+    /// the first Touch ID unlock of the new store succeeded.
     func storeWrapped(_ wrapped: Data) throws {
         guard wrapped.count == Enclave.wrappedLength else { throw Enclave.Failure.malformed }
         var item = wrappedQuery()
@@ -205,7 +218,7 @@ class KeyStore {
     /// Brev counts as uninstalled from here on, then both keys, then the
     /// known files. Nothing else is ever deleted, and `.lock` stays. Runs
     /// before every onboarding attempt and for a confirmed reset. With backup
-    /// exclusion on, only a local APFS snapshot can still hold the old stores;
+    /// exclusion on, only a local APFS snapshot can still hold the old store;
     /// the keys existed only in this Mac's Secure Enclave and are gone.
     func deleteKnownNames() throws {
         try deleteItems([kSecClass as String: kSecClassGenericPassword,

@@ -2,7 +2,8 @@
   Localizable.strings — Brev, Norwegian bokmål (nb), UTF-8.
 
   Every user-visible string in the app lives here (CLAUDE.md §3.2), read
-  through App/L10n.swift. The texts are those of docs/PHASE2_DESIGN.md §5.6.
+  through App/L10n.swift. The texts are those of docs/PHASE2_DESIGN.md §5.6
+  and docs/PHASE3_DESIGN.md §6.6.
   None of these strings may ever be derived from message content (§1.5).
 */
 
@@ -68,6 +69,12 @@
 "compose.send" = "Send";
 "compose.cancel" = "Avbryt";
 "compose.error" = "Brevet ble ikke sendt. Prøv igjen.";
+/* Sending a letter (docs/PHASE3_DESIGN.md §6.5, §6.6). send.reason completes macOS's sentence «Brev» prøver å … in the Touch ID dialog. compose.retry sends the letter already signed again, without Touch ID. */
+"send.reason" = "sende brevet";
+"compose.sending" = "Sender …";
+"compose.keychanged" = "Sikkerhetskoden til mottakeren er endret. Brevet ble ikke sendt.";
+"compose.retry" = "Prøv igjen";
+"net.error" = "Fikk ikke kontakt med Brev-tjenesten. Prøv igjen.";
 
 /* Title of the application menu. AppKit replaces it with the bundle name at runtime; this is the fallback. */
 "menu.app.title" = "Brev";

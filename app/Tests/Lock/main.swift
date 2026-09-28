@@ -5,9 +5,12 @@
 // prompt, no keychain, no posted event. It is built from
 // app/Sources/{Shared,App,UI,Keys}, the patched bindings and the release
 // archive, never linked into Brev.app. The DEK is wrapped to a software P-256
-// key, as in the heap-scan harness (app/Tests/main.swift). It runs the real
-// LockController and UnlockService, and checks what the harness (Shared/
-// only) and the view host (a window, never run by test.sh) cannot:
+// key and the identity key is a software key too, as in the heap-scan
+// harness (app/Tests/main.swift). The letters on the mail screen come from a
+// second user through the relay scripts/test.sh starts (BREV_RELAY_URL). It
+// runs the real LockController and UnlockService, and checks what the
+// harness (Shared/ only) and the view host (a window, never run by test.sh)
+// cannot:
 // - a successful unlock that LockController discards (Brev not the active
 //   app, or a lock meanwhile) leaves Rust locked (design §5.4 step 3);
 // - the lock sequence on the mail screen wipes it, zeroes every content
@@ -21,7 +24,7 @@
 // screen; each content view draws its visible part into its pixel buffers
 // as AppKit's display pass would make it. Output is check names only.
 //
-// usage: lock-probe
+// usage: BREV_RELAY_URL=http://127.0.0.1:<port> lock-probe
 
 import AppKit
 import LocalAuthentication
@@ -82,11 +85,15 @@ func text(_ s: String) -> SecretText {
     return t
 }
 
-// MARK: - A session, as the app makes it, with a software KEK
+// MARK: - A session, as the app makes it, with software keys
 
 _ = BrevApplication.shared
 _ = NSApp.setActivationPolicy(.prohibited)
 
+guard let relay = getenv("BREV_RELAY_URL").map({ String(cString: $0) }), !relay.isEmpty else {
+    print("FAIL the lock probe needs BREV_RELAY_URL (the relay scripts/test.sh starts)")
+    exit(2)
+}
 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("brev-lock-probe-\(getpid())")
 try? FileManager.default.removeItem(at: dir)
 try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -96,17 +103,57 @@ func finish() -> Never {
     exit(failures == 0 ? 0 : 1)
 }
 
-let kekAttrs: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-                               kSecAttrKeySizeInBits as String: 256]
-let softwareKEK = SecKeyCreateRandomKey(kekAttrs as CFDictionary, nil)!
-let wrappedDEK: Data
-let session: Session
-do {
+func softwareKey() -> SecKey {
+    let attrs: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+                                kSecAttrKeySizeInBits as String: 256]
+    return SecKeyCreateRandomKey(attrs as CFDictionary, nil)!
+}
+
+/// A store in `sub` under a random DEK wrapped to `kek`, locked; returns
+/// the session and the wrapped DEK.
+func makeSession(_ sub: String, kek: SecKey, identity: SecKey) throws -> (Session, Data) {
+    let path = dir.appendingPathComponent(sub)
+    try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
     let dek = SecretBytes(capacity: 64)
     guard SecRandomCopyBytes(kSecRandomDefault, 32, dek.base) == errSecSuccess else { throw BrevError.Rng }
     dek.setCount(32)
-    wrappedDEK = try Enclave.wrap(dek: dek, to: SecKeyCopyPublicKey(softwareKEK)!)
-    session = try Session.create(dir: dir.path, dek: dek, signingKey: Data(repeating: 4, count: 65))
+    let wrapped = try Enclave.wrap(dek: dek, to: SecKeyCopyPublicKey(kek)!)
+    let signingKey = try Enclave.publicKeyBytes(of: SecKeyCopyPublicKey(identity)!)
+    return (try Session.create(dir: path.path, relay: relay, dek: dek, signingKey: signingKey), wrapped)
+}
+
+/// A fresh address: the relay lives through the whole test.sh run.
+func freshAddress(_ who: String) -> String { "\(who)-\(getpid())-\(UInt32.random(in: 0...UInt32.max))" }
+
+/// Registers `address`, typed as the app passes it.
+func register(_ s: Session, _ identity: SecKey, _ address: String) throws {
+    let typed = text(address)
+    defer { typed.wipe() }
+    try s.register(signature: try Enclave.sign(digest: try s.registerRequest(address: typed), key: identity))
+}
+
+/// Adds the contact with `address`; returns its local id.
+func add(_ s: Session, _ address: String) throws -> Data {
+    let typed = text(address)
+    defer { typed.wipe() }
+    return try s.addContact(address: typed)
+}
+
+/// One letter in the app's steps (prepare, seal, sign, attach, submit).
+func send(_ s: Session, _ identity: SecKey, to contact: Data, subject: String, body: String) throws {
+    let st = text(subject), bt = text(body)
+    defer { st.wipe(); bt.wipe() }
+    try s.prepareSend(contact: contact)
+    try s.attachSignature(try Enclave.sign(digest: try s.signRequest(contact: contact, subject: st, body: bt),
+                                           key: identity))
+    _ = try s.submit()
+}
+
+let softwareKEK = softwareKey(), identity = softwareKey()
+let wrappedDEK: Data
+let session: Session
+do {
+    (session, wrappedDEK) = try makeSession("a", kek: softwareKEK, identity: identity)
 } catch {
     check("a session with a software KEK", false, "\(error)")
     finish()
@@ -144,13 +191,23 @@ guard unlockRust() else {
     finish()
 }
 do {
-    let ekko = try session.contacts()[0]
-    _ = try session.send(to: ekko.id, subject: text("Et testbrev"),
-                         body: text("Hei!\n\nDette er et testbrev fra låseprøven, med æ, ø og å.\n\nHilsen"))
-    ekko.name.wipe()
-    _ = try session.sync()
+    // A second user, and a letter each way through the relay.
+    let peerKEK = softwareKey(), peerIdentity = softwareKey()
+    let (peer, peerWrapped) = try makeSession("b", kek: peerKEK, identity: peerIdentity)
+    try Enclave.unwrap(peerWrapped, with: peerKEK) { try peer.brev.unlock(dek: $0) }
+    let me = freshAddress("a"), other = freshAddress("b")
+    try register(session, identity, me)
+    try register(peer, peerIdentity, other)
+    let peerAtMe = try add(session, other), meAtPeer = try add(peer, me)
+    try send(session, identity, to: peerAtMe, subject: "Et testbrev",
+             body: "Hei!\n\nDette er et testbrev fra låseprøven, med æ, ø og å.\n\nHilsen")
+    try send(peer, peerIdentity, to: meAtPeer, subject: "Et svar",
+             body: "Hei igjen!\n\nDette er svaret, gjennom reléet.\n\nHilsen")
+    peer.brev.lock()
+    let arrived = try session.sync()
+    check("a letter each way through the relay", arrived == 1, "\(arrived)")
 } catch {
-    check("a letter and its echo", false, "\(error)")
+    check("a letter each way through the relay", false, "\(error)")
     finish()
 }
 let window = MainWindow(contentSize: NSSize(width: 900, height: 600))   // never ordered onto the screen

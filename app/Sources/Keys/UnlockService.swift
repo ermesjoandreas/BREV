@@ -9,7 +9,8 @@
 // to `Brev.unlock` on the same thread without a copy, and zero it in place
 // when that returns. Any error locks the session again. Brev never calls
 // this on its own: only a human click on the lock screen or onboarding's
-// first-unlock page starts it.
+// first-unlock page starts it. The store is made and opened with the relay
+// URL from Info.plist (`relayURL`).
 
 import Foundation
 import LocalAuthentication
@@ -26,11 +27,19 @@ final class UnlockService {
         self.keyStore = keyStore
     }
 
+    /// The relay, from Info.plist `BrevRelayURL` (the build setting
+    /// BREV_RELAY_URL, default http://127.0.0.1:8787; docs/PHASE3_DESIGN.md
+    /// §5.1). Rust refuses anything but `http://127.0.0.1:<port>`, so a
+    /// missing key fails the store's create and open instead of falling back.
+    static var relayURL: String {
+        Bundle.main.object(forInfoDictionaryKey: "BrevRelayURL") as? String ?? ""
+    }
+
     // MARK: - Onboarding (§5.3 steps 3 to 6)
 
     /// Deletes the known names, creates both Secure Enclave keys, saves the
     /// fingers hint, makes a fresh DEK, wraps it to the KEK and creates the
-    /// three stores under it. The DEK is wiped before this returns. On
+    /// store under it. The DEK is wiped before this returns. On
     /// success, main gets the session (locked) and the wrapped DEK, which is
     /// not secret and is stored in the keychain only after the first unlock.
     func create(_ completion: @escaping (Result<(session: Session, wrapped: Data), Error>) -> Void) {
@@ -51,7 +60,7 @@ final class UnlockService {
         dek.setCount(32)
         let wrapped = try Enclave.wrap(dek: dek, to: keys.kekPublic)
         let signingKey = try Enclave.publicKeyBytes(of: keys.identityPublic)
-        let session = try Session.create(dir: keyStore.dir.path, dek: dek, signingKey: signingKey)
+        let session = try Session.create(dir: keyStore.dir.path, relay: relayURL, dek: dek, signingKey: signingKey)
         return (session, wrapped)
     }
 
