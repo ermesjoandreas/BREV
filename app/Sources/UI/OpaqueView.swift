@@ -20,7 +20,9 @@
 // with tools/viewhost: 3 subject lines left after the lock sequence). Drawn
 // into a bitmap, a line's glyphs exist only while Core Text draws it
 // (CLAUDE.md §2; docs/PHASE2_DESIGN.md §6.4; D-0047 in the shifted
-// numbering). The protected content layer (WP11; CLAUDE.md §3.2,
+// numbering), so a shown letter leaves no live glyph ids, and V39's glyph
+// control is SelfScan's own line of the marker (docs/VERIFY.md, "Changes
+// from the design"). The protected content layer (WP11; CLAUDE.md §3.2,
 // docs/DECISIONS.md D-0034) takes the same bitmap into a pixel buffer behind
 // an AVSampleBufferDisplayLayer, and only this class changes. No tooltips,
 // popovers or other AppKit-made windows over content (capture spike).
@@ -111,12 +113,5 @@ class ContentView: OpaqueView {
         ctx.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         ctx.textPosition = CGPoint(x: x, y: baseline)
         CTLineDraw(CTLineCreateWithAttributedString(a), ctx)
-    }
-
-    /// The width of `text` in the metadata font.
-    static func metaWidth(_ text: String) -> CGFloat {
-        let attrs = [kCTFontAttributeName: metaFont] as CFDictionary
-        guard let a = CFAttributedStringCreate(nil, text as CFString, attrs) else { return 0 }
-        return CGFloat(CTLineGetTypographicBounds(CTLineCreateWithAttributedString(a), nil, nil, nil))
     }
 }

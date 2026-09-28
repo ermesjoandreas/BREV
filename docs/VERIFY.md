@@ -115,7 +115,7 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 | V36 | Onboarding | the four rules texts (`touchid`, `nobackup`, `fingers`, `prompt`) appear in bokmål, plus `onboarding.rules.gone` if D-0055 chose the warning; *Opprett nøkler* stays disabled until *Jeg forstår …* is ticked | H | per D-0055 |
 | V37 | Crash during onboarding | `kill -9` after *Opprett nøkler*, before the first unlock: relaunch shows onboarding; only fresh files exist after the next attempt | A + H | – |
 | V38 | Damaged and reset | Brev quit, move `brev.db` out of `$D`, launch: `unlock.error.damaged` with only *Slett alt og start på nytt*; files unchanged after *Avbryt* in `ConfirmSheet`; after *Slett alt* onboarding starts and `$D` holds only `.lock`; quit and launch again: onboarding (the wrapped-DEK item is gone too) | H + A | – |
-| V39 | Heap residue in the real app | Verify build: send and read a marker letter to Ekko, lock; log `selfscan u8=0 u16=0 glyph=0`. `glyph` counts the marker's glyph ids in `GlyphFlush.attrs`'s font (stored XORed, as in harness case 4); it is the only count that sees the residue `MallocScribble` and `GlyphFlush` remove. Control: a scan while the letter is open shows u16 > 0 and glyph > 0 | H + A | per D-0057 (M) |
+| V39 | Heap residue in the real app | Verify build: send and read a marker letter to Ekko, lock; log `selfscan u8=0 u16=0 glyph=0`. `glyph` counts the marker's glyph ids in `GlyphFlush.attrs`'s font (stored XORed, as in harness case 4); it is the only count that sees the residue `MallocScribble` and `GlyphFlush` remove. Control: the `selfscan control` line (at the start of the lock, the letter still open) shows u16 > 0 and needle > 0; its glyph is 0 (see "Changes from the design") | H + A | per D-0057 (M) |
 | V40 | Key storage | no key file: `$D` holds only `.lock` (0 B), `biometry.state` (32 B, if written) and the three stores; all files 0600, the directory 0700; `security find-generic-password -s no.brev.app` finds nothing (the keys and the wrapped DEK are in the data protection keychain, which `security` cannot list; a copy in a file keychain would be a bug); `xattr`/`tmutil isexcluded` shows the folder excluded | A | – |
 | V41 | Nothing else written | no `Saved Application State`; only §5.1's files in Application Support. Run after onboarding, again after V44's quit, and again after V20's crash | A | – |
 | V42 | Echo | the three panes show Ekko and Speil, the threads and the letters; a letter to Ekko and one to Speil show as sent; each echo arrives within 3 s in the same thread | H | – |
@@ -214,7 +214,7 @@ pgrep -x Brev
 ioreg -l -w 0 | grep kCGSSessionSecureInputPID             # that PID only while a compose field has focus
 
 # V39 (Verify build; from the V19 stream)
-grep -o 'selfscan .*' "$R/stream.log"                      # after the lock: selfscan u8=0 u16=0 glyph=0; the control scan: u16 > 0 and glyph > 0
+grep -o 'selfscan .*' "$R/stream.log"                      # after the lock: selfscan u8=0 u16=0 glyph=0; the control line: u16 > 0 and needle > 0
 
 # V40
 stat -f '%Sp %z %N' "$D" "$D/.lock" "$D"/*                 # drwx------; files -rw-------; sizes as in the row
@@ -351,6 +351,17 @@ fail, or the D-entry that accepts it.
   are already 0 after lock and only glyph ids remain (§0), so without the
   glyph count V39 could not fail when `MallocScribble` or `GlyphFlush` does
   not work in the real app.
+- V39's control (WP7): content views draw each line into a bitmap of their
+  own and give AppKit only the image (`ContentView`), because AppKit's
+  display list kept the glyph ids of drawn lines until after the lock. So no
+  glyph id of a shown letter stays live, and the design's control
+  "glyph > 0 while the letter is open" can never pass: `glyph` is 0 at the
+  start of the lock too. `SelfScan`'s control line adds `needle`, the glyph
+  count while it holds a CTLine of the marker in the same font, which proves
+  that the needle is set and seen in the process; the lock sequence clears
+  that line like any other. `tools/viewhost --scan` runs the same control and
+  the real lock sequence. WP12 records this with design D-0044 and D-0057
+  (D-0047 and D-0060 after the renumbering).
 - V21: the design's `mdfind BREV-SECRET-BODY` finds this repo's own docs, so
   the row could never pass. It now ignores the checkout, has a control, and
   checks the binary for the Spotlight donation APIs.

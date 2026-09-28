@@ -9,11 +9,14 @@
 // Every letter carries the test marker of app/Tests/scan.c, built from its
 // XORed bytes, so no String copy of it exists here.
 //
-// Timeline: ready → (hold) → checks, a wider window, a posted ↓ key, a new
+// Timeline: ready → (hold) → checks, a wider window, a divider dragged right
+// and a narrow window, a posted ↓ key, the letter pane scrolled down, a new
 // letter → the sync timer shows its echo → the real lock sequence → exit.
 // Output is check names and counts only; "ready pid=<n> window=<n>
 // frame=<x,y,w,h>" tells a driver when to run an AX dump, AX presses or a
-// capture against the window during the hold.
+// capture against the window during the hold. SelfScan is compiled in with
+// BREV_SELFSCAN, as in the Verify build: the lock sequence runs it, and
+// --scan counts with it.
 //
 // usage: ViewHost [--hold <s>] [--snapshot <dir>] [--capturable] [--scan] [--post]
 //   --hold <s>      seconds to wait after ready before the checks (default 3)
@@ -22,12 +25,12 @@
 //   --capturable    sharingType .readOnly, so screencapture can see the fake
 //                   letters (the default keeps Hardening's .none)
 //   --scan          scan this process for the marker before and after the
-//                   lock (run with MallocScribble=1, as Brev runs)
+//                   lock, with SelfScan's needle control while the letters
+//                   are shown (run with MallocScribble=1, as Brev runs)
 //   --post          post a ↓ key to this process (CGEventPostToPid): the
 //                   input filter must drop it
 
 import AppKit
-import CoreText
 import Security
 
 setvbuf(stdout, nil, _IOLBF, 0)
@@ -147,24 +150,6 @@ func snapshot(_ view: NSView, _ name: String) {
     }
 }
 
-func scanCounts() -> (u8: UInt64, u16: UInt64, glyph: UInt64) {
-    var r = brev_scan_result()
-    brev_scan(&r)
-    return (r.utf8_hits, r.utf16_hits, r.glyph_hits)
-}
-
-/// The marker's glyph ids in the content font, XORed, as SelfScan does.
-func setGlyphNeedle() {
-    var chars = [UInt16](repeating: 0, count: 16), glyphs = [CGGlyph](repeating: 0, count: 16)
-    for i in 0..<16 { chars[i] = UInt16(markerX[i] ^ 0x5A) }
-    _ = CTFontGetGlyphsForCharacters(ContentView.contentFont, chars, &glyphs, 16)
-    var x = glyphs.map { $0 ^ 0x5A5A }
-    brev_scan_set_glyphs(x, 16)
-    _ = chars.withUnsafeMutableBytes { memset_s($0.baseAddress!, 32, 0, 32) }
-    _ = glyphs.withUnsafeMutableBytes { memset_s($0.baseAddress!, 32, 0, 32) }
-    _ = x.withUnsafeMutableBytes { memset_s($0.baseAddress!, 32, 0, 32) }
-}
-
 // MARK: - Main
 
 let application = BrevApplication.shared
@@ -256,9 +241,13 @@ DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
     check("Ekko's two threads, the newest selected", lists[1].count == 2 && lists[1].selected == 0)
     check("its letter and the echo are shown", shownLetters() == 2)
     if scanning {
-        setGlyphNeedle()
-        let h = scanCounts()
+        // The letters' own glyph ids are not live while shown (ContentView
+        // draws through a bitmap), so the glyph needle's control is
+        // SelfScan's CTLine of the marker, as in V39.
+        let h = SelfScan.scan(), needle = SelfScan.needleControl()
         check("while shown: the marker is in memory (positive control)", h.u16 > 0, "\(h)")
+        check("while shown: the glyph needle sees a live line of the marker (positive control)", needle > 0,
+              "needle=\(needle)")
     }
     // Wider window: only the letter pane grows, and every document view
     // follows its scroll view's width.
@@ -269,6 +258,34 @@ DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
     check("resize: the lists keep their width, the documents follow their scroll views",
           lists.map { $0.frame.width } == before && fits && letters.frame.width == lettersBefore + 200,
           "lists \(before) -> \(lists.map { $0.frame.width }), letters \(lettersBefore) -> \(letters.frame.width)")
+    // A divider dragged to the right edge, then a window narrower than the
+    // panes: no pane gets narrower than its minimum, the window grows back
+    // to their sum, and no letter is laid out narrower than SecureTextView's
+    // minimum (at width 1 every unit is a line of its own: seconds per
+    // resize step for a long letter).
+    let split = all(NSSplitView.self, in: mail.view).first!
+    func paneWidths() -> [CGFloat] { split.subviews.map { $0.frame.width } }
+    func atLeastMinimum(_ w: [CGFloat]) -> Bool { zip(w, MailViewController.minPaneWidths).allSatisfy { $0 >= $1 } }
+    let placed = paneWidths()
+    split.setPosition(split.bounds.width, ofDividerAt: 1)
+    let dragged = paneWidths()
+    window.setContentSize(NSSize(width: 480, height: 640))
+    window.layoutIfNeeded()
+    let narrow = paneWidths(), narrowWindow = window.contentView!.frame.width
+    let minWindow = MailViewController.minPaneWidths.reduce(0, +) + 2 * split.dividerThickness
+    check("a divider dragged right, a narrow window: every pane keeps its minimum width, the window their sum",
+          atLeastMinimum(dragged) && atLeastMinimum(narrow) && narrowWindow >= minWindow,
+          "dragged \(dragged), narrow \(narrow), window \(narrowWindow)")
+    let probe = SecureTextView()
+    probe.show(fake([String(repeating: paragraph, count: 3)]))
+    let atMinimum = probe.height(forWidth: SecureTextView.minTextWidth + 2 * SecureTextView.inset)
+    check("SecureTextView: a narrower width lays out at the minimum text width",
+          probe.height(forWidth: 1) == atMinimum, "\(probe.height(forWidth: 1)) vs \(atMinimum)")
+    probe.clear()
+    window.setContentSize(NSSize(width: 1100, height: 640))
+    split.setPosition(placed[0], ofDividerAt: 0)
+    split.setPosition(placed[0] + split.dividerThickness + placed[1], ofDividerAt: 1)
+    window.layoutIfNeeded()
     guard posting else { return sendAndLock() }
     window.makeFirstResponder(lists[1])
     guard CGPreflightPostEventAccess(), let down = CGEvent(keyboardEventSource: nil, virtualKey: 125, keyDown: true),
@@ -285,8 +302,11 @@ DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
 }
 
 /// A new thread with Ekko; its echo arrives with the next sync tick, and the
-/// thread pane keeps its selection. Then the lock sequence.
+/// thread pane keeps its selection and the letter pane its scroll position.
+/// Then the lock sequence.
 func sendAndLock() {
+    letters.scroll(NSPoint(x: 0, y: 200))
+    let scrolled = letters.visibleRect.minY
     do {
         try send(session, to: ekko, subject: fake(["Et nytt brev ", nil]), body: letterBody(2))
     } catch {
@@ -296,6 +316,8 @@ func sendAndLock() {
         check("after sync: three threads, the selected one kept by id", lists[1].count == 3 && lists[1].selected == 1,
               "count=\(lists[1].count) selected=\(String(describing: lists[1].selected))")
         check("the kept thread's letters are shown again", shownLetters() == 2)
+        check("after sync: the letter pane keeps its scroll position",
+              scrolled > 0 && letters.visibleRect.minY == scrolled, "\(scrolled) -> \(letters.visibleRect.minY)")
         snapshot(mail.view, "after-sync.png")
         lock.lock(.manual)
         check("lock: lists and letters wiped", lists.allSatisfy { $0.count == 0 } && letters.isEmpty)
@@ -303,8 +325,9 @@ func sendAndLock() {
         check("lock: the lock screen replaced the mail screen", window.root.child is NoticeViewController)
         // Brev releases the mail screen at the end of this run-loop turn;
         // this host keeps its views alive, which makes the scan stricter.
+        // The lock sequence ran SelfScan's needle control at its start.
         if scanning {
-            let h = scanCounts()
+            let h = SelfScan.scan()
             check("after lock: no copy (UTF-8, UTF-16, glyphs)", h.u8 == 0 && h.u16 == 0 && h.glyph == 0, "\(h)")
         }
         snapshot(window.contentView!, "locked.png")

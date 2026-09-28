@@ -14,6 +14,10 @@ import AppKit
 final class SecureTextView: ContentView {
     /// Left and right margin of the text.
     static let inset: CGFloat = 16
+    /// Lines are never broken narrower than this; a narrower view clips
+    /// them. Narrower, each line holds a few units and costs a CTLine over
+    /// up to 448 (at 1 pt, seconds for a long letter on every width change).
+    static let minTextWidth: CGFloat = 200
 
     private let layout = TextLayout(font: ContentView.contentFont)
     private var text: SecretText?
@@ -31,7 +35,7 @@ final class SecureTextView: ContentView {
     func height(forWidth width: CGFloat) -> CGFloat {
         guard let text else { return 0 }
         if width != laidOutWidth {
-            layout.layout(text, width: max(width - 2 * Self.inset, 1))
+            layout.layout(text, width: max(width - 2 * Self.inset, Self.minTextWidth))
             laidOutWidth = width
             needsDisplay = true
         }

@@ -18,11 +18,15 @@
 import AppKit
 import os
 
-final class MailViewController: NSViewController, ContentHolder, MailActions, NSMenuItemValidation,
-                                 NSSplitViewDelegate {
+final class MailViewController: NSViewController, ContentHolder, MailActions, NSMenuItemValidation {
     private static let log = Logger(subsystem: "no.brev.app", category: "mail")
     /// Seconds between two `sync()` calls (§9).
     static let syncInterval: TimeInterval = 3
+    /// The narrowest the contacts, threads and letter panes get, by divider
+    /// or window. A letter laid out much narrower puts a few units on each
+    /// line, and every line costs a CTLine (TextLayout), again at every
+    /// width change: seconds per resize step for a long letter.
+    static let minPaneWidths: [CGFloat] = [150, 200, 300]
 
     /// A human pressed Lås.
     var onLock: () -> Void = {}
@@ -84,10 +88,17 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
 
         split.isVertical = true
         split.dividerStyle = .thin
-        split.delegate = self
         split.addSubview(Self.scrollView(contactList, background: .controlBackgroundColor))
         split.addSubview(Self.scrollView(threadList, background: .controlBackgroundColor))
         split.addSubview(letterPane())
+        // Each pane keeps its minimum width, by divider or window (auto
+        // layout carries their sum up to the window's minimum). A change in
+        // width goes to the letter pane first, then the threads, then the
+        // contacts (the lowest holding priority gives first).
+        for (i, pane) in split.subviews.enumerated() {
+            pane.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.minPaneWidths[i]).isActive = true
+            split.setHoldingPriority(NSLayoutConstraint.Priority(252 - Float(i)), forSubviewAt: i)
+        }
 
         for v in [bar, split] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -104,7 +115,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         ])
 
         contactList.onSelect = { [weak self] _ in self?.showThreads(keeping: nil) }
-        threadList.onSelect = { [weak self] _ in self?.showLetters(keepScroll: false) }
+        threadList.onSelect = { [weak self] _ in self?.showLetters(scrolledTo: .zero) }
         contactList.nextKeyView = threadList
         threadList.nextKeyView = contactList
         view = root
@@ -151,11 +162,6 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         split.setPosition(200 + split.dividerThickness + 280, ofDividerAt: 1)
     }
 
-    /// When the window resizes, only the letter pane changes width.
-    func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
-        view === splitView.subviews.last
-    }
-
     // MARK: - Reading and showing
 
     /// After unlock: contacts, the first contact's newest thread and its
@@ -179,13 +185,16 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
 
     /// Reads the selected contact's threads (the old subjects and letters
     /// are wiped first) and selects `threadID` if it is still there,
-    /// otherwise the newest thread.
+    /// otherwise the newest thread. A kept thread keeps the letter pane
+    /// where it was; the position is read before `clear()` shrinks the
+    /// document, which moves it to the top.
     private func showThreads(keeping threadID: Data?) {
+        let origin = letterScroll.contentView.bounds.origin
         threads = []
         threadList.clear()
         letters.clear()
         updateButtons()
-        guard let contact = selectedContact, let session else { return showLetters(keepScroll: false) }
+        guard let contact = selectedContact, let session else { return showLetters(scrolledTo: .zero) }
         do {
             threads = Array(try session.threads(contact: contact.id).reversed())
         } catch {
@@ -194,14 +203,12 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         let kept = threadID.flatMap { id in threads.firstIndex { $0.id == id } }
         threadList.setRows(threads.map { SecureListView.Row(text: $0.subject, meta: date($0.createdAt)) },
                            selected: kept ?? (threads.isEmpty ? nil : 0))
-        showLetters(keepScroll: kept != nil)
+        showLetters(scrolledTo: kept != nil ? origin : .zero)
     }
 
-    /// Reads the selected thread's letters (the old bodies are wiped first).
-    /// `keepScroll` keeps the letter pane where it was (a reload of the same
-    /// thread); otherwise it shows the first letter.
-    private func showLetters(keepScroll: Bool) {
-        let origin = letterScroll.contentView.bounds.origin
+    /// Reads the selected thread's letters (the old bodies are wiped first)
+    /// and scrolls the letter pane to `origin`: .zero shows the first letter.
+    private func showLetters(scrolledTo origin: NSPoint) {
         letters.clear()
         defer { noLetters.isHidden = !letters.isEmpty }
         guard let i = threadList.selected, threads.indices.contains(i), let session else { return }
@@ -218,7 +225,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
             return
         }
         letters.show(shown)
-        letters.scroll(keepScroll ? origin : .zero)
+        letters.scroll(origin)
     }
 
     private var selectedContact: ContactItem? {

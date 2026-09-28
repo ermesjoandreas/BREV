@@ -6,9 +6,14 @@
 // configuration (EXCLUDED_SOURCE_FILE_NAMES in Debug and Release), and only
 // Verify defines BREV_SELFSCAN, under which LockController calls it: once
 // when a lock starts, while a letter may still be open (the control), and
-// once when the lock sequence has finished. It logs counts only. The marker
-// is "BREV-SECRET-BODY", as in scan.c; its glyph ids in the content font are
-// the scanner's glyph needle, stored XORed, as in harness case 4.
+// once when the lock sequence has finished. tools/viewhost compiles it the
+// same way. It logs counts only. The marker is "BREV-SECRET-BODY", as in
+// scan.c; its glyph ids in the content font are the scanner's glyph needle,
+// stored XORed, as in harness case 4. A shown letter leaves no live glyph
+// ids (ContentView draws each line into a bitmap, and Core Text frees a
+// line's glyphs once it is drawn), so the control also holds a CTLine of the
+// marker and counts its glyphs (`needle`): proof that the needle is set and
+// seen in this process.
 
 import CoreText
 import os
@@ -19,14 +24,48 @@ enum SelfScan {
     private static let markerX: [UInt8] = [0x18, 0x08, 0x1f, 0x0c, 0x77, 0x09, 0x1f, 0x19,
                                            0x08, 0x1f, 0x0e, 0x77, 0x18, 0x15, 0x1e, 0x03]
 
-    /// Logs `selfscan control u8=… u16=… glyph=…` at the start of a lock,
-    /// and `selfscan u8=… u16=… glyph=…` at its end.
+    /// Logs `selfscan control u8=… u16=… glyph=… needle=…` at the start of a
+    /// lock, and `selfscan u8=… u16=… glyph=…` at its end.
     static func run(control: Bool) {
+        let h = scan()
+        if control {
+            let needle = needleControl()
+            log.notice("selfscan control u8=\(h.u8, privacy: .public) u16=\(h.u16, privacy: .public) glyph=\(h.glyph, privacy: .public) needle=\(needle, privacy: .public)")
+        } else {
+            log.notice("selfscan u8=\(h.u8, privacy: .public) u16=\(h.u16, privacy: .public) glyph=\(h.glyph, privacy: .public)")
+        }
+    }
+
+    /// The marker's copies in this process: as UTF-8, as UTF-16 and as glyph
+    /// ids (0 until a text has been laid out: there is no font yet).
+    static func scan() -> (u8: UInt64, u16: UInt64, glyph: UInt64) {
         setGlyphNeedle()
         var r = brev_scan_result()
         brev_scan(&r)
-        let tag = control ? "control " : ""
-        log.notice("selfscan \(tag, privacy: .public)u8=\(r.utf8_hits, privacy: .public) u16=\(r.utf16_hits, privacy: .public) glyph=\(r.glyph_hits, privacy: .public)")
+        return (r.utf8_hits, r.utf16_hits, r.glyph_hits)
+    }
+
+    /// The glyph count while a CTLine of the marker in GlyphFlush's content
+    /// font is alive: the glyph needle's positive control. Made as TextLayout
+    /// makes a line, from a buffer wiped afterwards; the lock sequence's
+    /// GlyphFlush and scribbling clear it like any other line. 0 without a
+    /// font.
+    static func needleControl() -> UInt64 {
+        guard let attrs = GlyphFlush.attrs else { return 0 }
+        setGlyphNeedle()
+        var chars = [UInt16](repeating: 0, count: 16)
+        for i in 0..<16 { chars[i] = UInt16(markerX[i] ^ 0x5A) }
+        var r = brev_scan_result()
+        chars.withUnsafeBufferPointer { p in
+            autoreleasepool {
+                let s = CFStringCreateWithCharactersNoCopy(nil, p.baseAddress, 16, kCFAllocatorNull)!
+                let line = CTLineCreateWithAttributedString(CFAttributedStringCreate(nil, s, attrs)!)
+                brev_scan(&r)
+                withExtendedLifetime(line) {}
+            }
+        }
+        _ = chars.withUnsafeMutableBytes { memset_s($0.baseAddress!, 32, 0, 32) }
+        return r.glyph_hits
     }
 
     /// The marker's 16 glyph ids in GlyphFlush's content font, XORed. Until

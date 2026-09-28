@@ -3,7 +3,9 @@
 # AX dumps and the in-process checks in tools/viewhost/main.swift. A test
 # app only, never linked into Brev.app. It compiles app/Sources/{Shared,App,UI}
 # with the patched bindings, the release archive and the heap scanner of the
-# CLI harness (app/Tests/scan.c), and uses no keychain and no Touch ID.
+# CLI harness (app/Tests/scan.c), and uses no keychain and no Touch ID. As the
+# Verify build, it also compiles app/Sources/Verify/SelfScan.swift with
+# BREV_SELFSCAN, so its lock sequence runs SelfScan (docs/VERIFY.md V39).
 #
 # Usage: tools/viewhost/build.sh [output dir]   (default: core/target/viewhost)
 # Needs the archive and bindings from scripts/gen-bindings.sh (test.sh runs
@@ -45,9 +47,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 
 xcrun clang -O2 -Wall -target "$ARCH-apple-macos14.0" -c "$REPO_ROOT/app/Tests/scan.c" -o "$OUT/scan.o"
-xcrun swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" \
+xcrun swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" -D BREV_SELFSCAN \
   -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
   "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/App/*.swift "$REPO_ROOT"/app/Sources/UI/*.swift \
+  "$REPO_ROOT/app/Sources/Verify/SelfScan.swift" \
   "$BINDINGS" "$REPO_ROOT/tools/viewhost/main.swift" "$OUT/scan.o" "$STATICLIB" \
   -o "$APP/Contents/MacOS/ViewHost"
 codesign --force --sign - "$APP" >/dev/null 2>&1
