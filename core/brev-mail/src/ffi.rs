@@ -6,7 +6,9 @@
 //! `ForeignBytes`) and comes out only through [`OpenText::chunk`], in chunks
 //! of exactly [`CHUNK`] bytes. No `String` carries content in either
 //! direction (the only ones are the store directory and the relay URL),
-//! errors are unit variants, and records carry ids, codes and metadata only.
+//! errors are unit variants but `Environment` (the names of report fields),
+//! and records carry ids, codes, metadata and the app's environment report
+//! only.
 //!
 //! No call that takes content does network I/O, and no network call takes
 //! content (§3.2). Every network call runs with the session mutex released,
@@ -16,6 +18,11 @@
 //! An unlock takes effect only with `confirm_active`, and the session locks
 //! itself when idle (docs/VAULT_SPLIT_PLAN.md §5d, §5e): its timer thread,
 //! or the first call to take the session mutex after the deadline, wipes.
+//!
+//! A letter goes out only in environment class A, from the app's report of
+//! its own defences (`report_environment`, docs/VAULT_SPLIT_PLAN.md §6). The
+//! report is the app's own word: until attestation it catches bugs in the
+//! app, not attackers (CLAUDE.md §2).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,7 +30,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use brev_proto::body::{self, is_valid_address, ADDRESS_MAX};
-use brev_vault::{Holder, Text, Timer};
+use brev_vault::{classify, failed_fields, EnvironmentClass, Holder, Platform, Text, Timer};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -43,8 +50,27 @@ pub const MAX_BODY: usize = 64 * 1024;
 /// Longest idle time `unlock` takes, in seconds.
 const MAX_IDLE_SECS: u32 = 3600;
 
-/// Errors across the FFI. Unit variants only, so nothing but a variant
-/// index ever crosses. Each is the [`Error`] of the same name.
+/// The lowest environment class that may send a letter: A. A test archive
+/// built with the cargo feature allow-software-keys (for the Swift harness,
+/// the lock probe and the view host, which have software keys and no Touch
+/// ID) lowers it to C. The app's archive never has that feature:
+/// scripts/gen-bindings.sh and the build phase in app/project.yml fail on
+/// its marker (docs/VAULT_SPLIT_PLAN.md §6).
+const SEND_THRESHOLD: EnvironmentClass = if cfg!(feature = "allow-software-keys") {
+    EnvironmentClass::C
+} else {
+    EnvironmentClass::A
+};
+
+/// The mark of allow-software-keys in the archive, for the release checks
+/// above; scripts/test.sh checks that the test archive has it.
+#[cfg(feature = "allow-software-keys")]
+#[used]
+static SOFTWARE_KEYS_MARKER: [u8; 26] = *b"BREV-ALLOW-SOFTWARE-KEYS-1";
+
+/// Errors across the FFI. Unit variants, but `Environment`, which carries
+/// the names of report fields, so nothing but a variant index and those
+/// names ever crosses. Each unit variant is the [`Error`] of the same name.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum BrevError {
     /// The session is locked, or a text was closed, or a lock came while
@@ -104,6 +130,14 @@ pub enum BrevError {
     /// safe to decrypt in (a `DYLD_*` variable, no `MallocScribble=1`).
     #[error("unsafe")]
     Unsafe,
+    /// `prepare_send`: the app's environment report since the unlock is
+    /// below the class sending needs (A), so nothing was sent.
+    #[error("environment")]
+    Environment {
+        /// The report's fields short of class A, in field order; empty if
+        /// there was no report since the unlock.
+        failed: Vec<ReportField>,
+    },
 }
 
 impl From<Error> for BrevError {
@@ -134,6 +168,115 @@ impl From<NetError> for BrevError {
     fn from(e: NetError) -> Self {
         Error::from(e).into()
     }
+}
+
+/// Where the identity key lives, as the app reports it (brev-vault's
+/// `KeyOrigin`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum KeyOrigin {
+    /// In the Secure Enclave.
+    SecureEnclave,
+    /// In a TPM.
+    Tpm,
+    /// In software.
+    Software,
+    /// Not known.
+    Unknown,
+}
+
+impl From<KeyOrigin> for brev_vault::KeyOrigin {
+    fn from(o: KeyOrigin) -> Self {
+        match o {
+            KeyOrigin::SecureEnclave => brev_vault::KeyOrigin::SecureEnclave,
+            KeyOrigin::Tpm => brev_vault::KeyOrigin::Tpm,
+            KeyOrigin::Software => brev_vault::KeyOrigin::Software,
+            KeyOrigin::Unknown => brev_vault::KeyOrigin::Unknown,
+        }
+    }
+}
+
+/// The app's report on its own defences, made right before `prepare_send`
+/// (brev-vault's `EnvironmentReport`). Flags only, no content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct EnvironmentReport {
+    /// Where the identity key lives.
+    pub key_origin: KeyOrigin,
+    /// This unlock unwrapped the DEK with Touch ID.
+    pub biometric_used: bool,
+    /// Every window is excluded from capture and every content layer
+    /// prevents capture.
+    pub capture_excluded: bool,
+    /// Secure event input is on.
+    pub secure_input_active: bool,
+    /// The app drops synthetic input.
+    pub synthetic_input_rejected: bool,
+    /// The content views expose nothing to accessibility.
+    pub accessibility_opaque: bool,
+    /// No Copy, Cut or Paste reaches content.
+    pub pasteboard_disabled: bool,
+}
+
+impl From<EnvironmentReport> for brev_vault::EnvironmentReport {
+    fn from(r: EnvironmentReport) -> Self {
+        brev_vault::EnvironmentReport {
+            key_origin: r.key_origin.into(),
+            biometric_used: r.biometric_used,
+            capture_excluded: r.capture_excluded,
+            secure_input_active: r.secure_input_active,
+            synthetic_input_rejected: r.synthetic_input_rejected,
+            accessibility_opaque: r.accessibility_opaque,
+            pasteboard_disabled: r.pasteboard_disabled,
+        }
+    }
+}
+
+/// A field of [`EnvironmentReport`], as `BrevError::Environment` names it
+/// (brev-vault's `ReportField`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ReportField {
+    /// `key_origin`: not the Secure Enclave (or a TPM).
+    KeyOrigin,
+    /// `biometric_used`.
+    BiometricUsed,
+    /// `capture_excluded`.
+    CaptureExcluded,
+    /// `secure_input_active`.
+    SecureInputActive,
+    /// `synthetic_input_rejected`.
+    SyntheticInputRejected,
+    /// `accessibility_opaque`.
+    AccessibilityOpaque,
+    /// `pasteboard_disabled`.
+    PasteboardDisabled,
+}
+
+impl From<brev_vault::ReportField> for ReportField {
+    fn from(f: brev_vault::ReportField) -> Self {
+        use brev_vault::ReportField as V;
+        match f {
+            V::KeyOrigin => ReportField::KeyOrigin,
+            V::BiometricUsed => ReportField::BiometricUsed,
+            V::CaptureExcluded => ReportField::CaptureExcluded,
+            V::SecureInputActive => ReportField::SecureInputActive,
+            V::SyntheticInputRejected => ReportField::SyntheticInputRejected,
+            V::AccessibilityOpaque => ReportField::AccessibilityOpaque,
+            V::PasteboardDisabled => ReportField::PasteboardDisabled,
+        }
+    }
+}
+
+/// The app's report, as the platform the vault classifies.
+struct Reported(brev_vault::EnvironmentReport);
+
+impl Platform for Reported {
+    fn environment_report(&self) -> brev_vault::EnvironmentReport {
+        self.0
+    }
+}
+
+/// Whether class `c` reaches `threshold`.
+fn may_send(c: EnvironmentClass, threshold: EnvironmentClass) -> bool {
+    c.rank() >= threshold.rank()
 }
 
 /// The content limits and chunk size, so the app sizes its fixed buffers
@@ -267,14 +410,17 @@ struct Session {
     /// Bumped by every lock. A call that released the mutex for the network
     /// and finds another epoch when it takes it again stores nothing.
     epoch: u64,
-    /// The contact `prepare_send` found with its pinned key just now; used
-    /// once by `sign_request`.
-    ticket: Option<ContactId>,
+    /// The contact `prepare_send` found with its pinned key just now, and
+    /// the environment class it was allowed in; used once by
+    /// `sign_request`.
+    ticket: Option<(ContactId, EnvironmentClass)>,
     /// The one letter being sent (ciphertext only): sealed by
     /// `sign_request`, signed by `attach_signature`, stored by `submit`.
     letter: Option<Letter>,
     /// The registration being made: its unsigned body and the address.
     registration: Option<Registering>,
+    /// The app's last environment report since the unlock.
+    report: Option<Reported>,
 }
 
 struct Registering {
@@ -550,27 +696,43 @@ impl Brev {
         Ok(s.register(body))
     }
 
+    /// The app's report on its own defences (key origin, Touch ID, capture
+    /// exclusion, secure input, synthetic-input rejection, accessibility
+    /// opacity, no pasteboard), made right before `prepare_send`. Kept until
+    /// the next report or a lock. `Locked` while locked.
+    pub fn report_environment(&self, report: EnvironmentReport) -> Result<(), BrevError> {
+        let mut s = self.session()?;
+        if s.me.is_locked() {
+            return Err(BrevError::Locked);
+        }
+        s.report = Some(Reported(report.into()));
+        Ok(())
+    }
+
     /// Step 0 of a letter (docs/PHASE3_DESIGN.md §3.2), without content:
     /// looks the contact's address up at the relay. The pinned key gives
     /// the send ticket for this contact (and clears a pending change); any
     /// other key is kept as pending and gives `KeyChanged`. `NotFound` if
     /// the relay has no such address or this user is not registered;
-    /// `Network`, `Refused`.
+    /// `Network`, `Refused`. Before any request, the environment report
+    /// since the unlock must reach class A (docs/VAULT_SPLIT_PLAN.md §6):
+    /// `Environment` otherwise, also without a report.
     pub fn prepare_send(&self, contact: Vec<u8>) -> Result<(), BrevError> {
         let contact = ContactId(id(&contact)?);
-        let (caller, token, address, epoch) = {
+        let (caller, token, address, epoch, class) = {
             let mut s = self.session()?;
             s.ticket = None;
             let (caller, token) = s.credentials()?;
+            let class = s.send_class()?;
             let address = Zeroizing::new(s.me.contact_address(contact)?.to_vec());
-            (caller, token, address, s.epoch)
+            (caller, token, address, s.epoch, class)
         };
         let found = self.net.lookup(&caller, &token, &address);
         drop((token, address));
         let found = found?.ok_or(BrevError::NotFound)?;
         let mut s = self.resume(epoch)?;
         s.me.check_key(contact, &found)?;
-        s.ticket = Some(contact);
+        s.ticket = Some((contact, class));
         Ok(())
     }
 
@@ -581,7 +743,8 @@ impl Brev {
     /// `KeyChanged` while the contact's key change waits; `Malformed`
     /// without the ticket of a `prepare_send` for this contact (the ticket
     /// is used up either way). No I/O. Keeps the sealed letter (ciphertext
-    /// only) and returns the digest the identity key signs.
+    /// only), with the ticket's environment class, and returns the digest
+    /// the identity key signs.
     pub fn sign_request(
         &self,
         contact: Vec<u8>,
@@ -598,10 +761,11 @@ impl Brev {
         if s.me.pending_bundle(contact)?.is_some() {
             return Err(BrevError::KeyChanged);
         }
-        if s.ticket.take() != Some(contact) {
+        let Some((_, class)) = s.ticket.take().filter(|&(c, _)| c == contact) else {
             return Err(BrevError::Malformed);
-        }
-        let letter = s.me.seal_letter(contact, subject, body)?;
+        };
+        let mut letter = s.me.seal_letter(contact, subject, body)?;
+        letter.class = Some(class);
         let digest = letter.digest();
         s.letter = Some(letter);
         Ok(digest.to_vec())
@@ -704,6 +868,7 @@ impl Brev {
             ticket: None,
             letter: None,
             registration: None,
+            report: None,
         }));
         match Timer::spawn(Arc::downgrade(&s), clock) {
             Ok(timer) => Ok(Brev { timer, s, net }),
@@ -857,8 +1022,28 @@ impl Session {
         self.ticket = None;
         self.letter = None;
         self.registration = None;
+        self.report = None;
         self.epoch = self.epoch.wrapping_add(1);
         self.me.lock();
+    }
+
+    /// The class of the environment report since the unlock (C without
+    /// one), if it reaches [`SEND_THRESHOLD`]; otherwise `Environment` with
+    /// the report's fields short of class A.
+    fn send_class(&self) -> Result<EnvironmentClass, BrevError> {
+        let report = self.report.as_ref().map(Platform::environment_report);
+        let class = report.as_ref().map_or(EnvironmentClass::C, classify);
+        if may_send(class, SEND_THRESHOLD) {
+            return Ok(class);
+        }
+        Err(BrevError::Environment {
+            failed: report
+                .as_ref()
+                .map_or_else(Vec::new, failed_fields)
+                .into_iter()
+                .map(ReportField::from)
+                .collect(),
+        })
     }
 
     /// The own id and relay token for a token-authenticated request. Gated,

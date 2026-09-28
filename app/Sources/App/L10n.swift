@@ -4,7 +4,8 @@
 // §1.5 (docs/PHASE2_DESIGN.md §5.6): every string here is fixed interface
 // text. None is ever built from content, and none takes an address, a
 // name or an identity code (docs/PHASE3_DESIGN.md §6.4, §6.6); the only
-// argument is a date (metadata).
+// arguments are a date (metadata) and the names of failed checks, which are
+// strings from this file.
 
 import Foundation
 
@@ -70,6 +71,13 @@ enum L10n {
     static let composeSending = tr("compose.sending")
     static let composeKeyChanged = tr("compose.keychanged")
     static let composeRetry = tr("compose.retry")
+    /// "Brevet ble ikke sendt: <the checks that failed>." for
+    /// BrevError.Environment (docs/VAULT_SPLIT_PLAN.md §6, owner answer Q6).
+    /// No check named means Rust got no report since the unlock.
+    static func composeEnvironment(_ checks: [ReportField]) -> String {
+        let names = checks.isEmpty ? [tr("environment.noreport")] : checks.map(environmentCheck)
+        return String(format: tr("compose.environment"), names.joined(separator: ", "))
+    }
     static let sendReason = tr("send.reason")
     static let netError = tr("net.error")
 
@@ -101,6 +109,18 @@ enum L10n {
     static let menuFileNew = tr("menu.file.new")
 
     static let windowMainTitle = tr("window.main.title")
+
+    private static func environmentCheck(_ check: ReportField) -> String {
+        switch check {
+        case .keyOrigin: return tr("environment.keyorigin")
+        case .biometricUsed: return tr("environment.biometric")
+        case .captureExcluded: return tr("environment.capture")
+        case .secureInputActive: return tr("environment.secureinput")
+        case .syntheticInputRejected: return tr("environment.synthetic")
+        case .accessibilityOpaque: return tr("environment.accessibility")
+        case .pasteboardDisabled: return tr("environment.pasteboard")
+        }
+    }
 
     private static func tr(_ key: String) -> String {
         Bundle.main.localizedString(forKey: key, value: nil, table: nil)

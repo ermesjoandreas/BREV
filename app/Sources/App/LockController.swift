@@ -52,6 +52,15 @@ final class LockController: NSObject {
 
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var idleTimer: Timer?
+    /// The generation whose unlock unwrapped the DEK with Touch ID.
+    private var touchIDGeneration: UInt64?
+
+    /// Whether this unlock used Touch ID (UnlockService), for the
+    /// environment report (EnvironmentProbe): gone with the next lock, which
+    /// starts a new generation.
+    var unlockUsedTouchID: Bool {
+        state.unlocked && touchIDGeneration == state.generation
+    }
 
     /// Brev's is `LockState()`; the lock probe passes one with the U4 switch
     /// in the other position.
@@ -110,8 +119,9 @@ final class LockController: NSObject {
     /// Called on main when the unlock closure returns. True means show
     /// mail; on false after a successful unlock the session is locked again
     /// (a lock happened meanwhile, or Brev is not the active app, or Rust
-    /// found the confirmation too late).
-    func endUnlock(_ started: UInt64, succeeded: Bool) -> Bool {
+    /// found the confirmation too late). `touchID`: the unlock unwrapped the
+    /// DEK with Touch ID (UnlockService), kept for this generation.
+    func endUnlock(_ started: UInt64, succeeded: Bool, touchID: Bool = false) -> Bool {
         guard state.endUnlock(started, succeeded: succeeded, appActive: NSApp.isActive) else {
             if succeeded { session?.brev.lock() }
             return false
@@ -122,6 +132,7 @@ final class LockController: NSObject {
             lock(.unlockExpired)
             return false
         }
+        touchIDGeneration = touchID ? state.generation : nil
         idleTimer?.invalidate()
         idleTimer = commonModeTimer(every: LockState.idleCheckInterval) { [weak self] in
             guard let self else { return }

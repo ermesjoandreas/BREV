@@ -94,6 +94,21 @@ class ContentView: OpaqueView {
         live.allObjects.forEach { $0.blank() }
     }
 
+    /// For the environment report (EnvironmentProbe): every content view
+    /// alive shows its pixels only through a layer that prevents capture.
+    static var allPreventCapture: Bool {
+        live.allObjects.allSatisfy { $0.protectedLayer.preventsCapture }
+    }
+
+    /// For the environment report: every content view alive is no
+    /// accessibility element and has no value, text or children for it.
+    static var allOpaque: Bool {
+        live.allObjects.allSatisfy {
+            !$0.isAccessibilityElement() && $0.accessibilityValue() == nil && $0.accessibilitySelectedText() == nil
+                && $0.accessibilityNumberOfCharacters() == 0 && ($0.accessibilityChildren() ?? []).isEmpty
+        }
+    }
+
     /// True between `hideAll` and `showAll`: every content view, also one
     /// made meanwhile, shows a blank frame instead of drawing.
     private(set) static var hidden = false

@@ -11,8 +11,11 @@
 // draws through the protected layer.
 // Send (a HumanButton, or ⌘↩ in a field) sends in the three steps of
 // PHASE3 §3.2, with "Sender …" shown, the buttons disabled and the fields
-// read-only meanwhile: `prepareSend` on `Session.net` (no content; a
-// changed key shows compose.keychanged and keeps the letter), then on main
+// read-only meanwhile: on main Brev's report on its own defences
+// (EnvironmentProbe; docs/VAULT_SPLIT_PLAN.md §6, §8), then `prepareSend` on
+// `Session.net` (no content; a changed key shows compose.keychanged and keeps
+// the letter; a report below Rust's environment class A shows
+// compose.environment, which names the checks that failed), then on main
 // `signRequest` (the content, no I/O), the one Touch ID prompt through the
 // signer (SignService; Avbryt there returns to editing), `attachSignature`,
 // and `submit` on `Session.net`, which closes the sheet. When the relay
@@ -66,8 +69,13 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
     private let keyChanged = InterfaceText(L10n.composeKeyChanged, width: messageWidth, alignment: .left)
     private let netFailure = InterfaceText(L10n.netError, width: messageWidth, alignment: .left)
     private let sending = InterfaceText(L10n.composeSending, width: messageWidth, alignment: .left)
+    /// compose.environment with the checks that failed: made for each
+    /// refusal, in the place of the texts above.
+    private var environmentFailure: InterfaceText?
+    private var buttonRow: NSStackView?
     private weak var session: Session?
     private let contact: Data
+    private let keys: () -> EnvironmentProbe.Keys
     private let signer: Signer
     private var step = Step.editing
     /// Bumped by `wipeAll` (every close and the lock sequence): a result of
@@ -77,14 +85,16 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
     private(set) var sentThread: Data?
 
     /// Shows a new letter to `contact` on `parent`, with the subject
-    /// focused. `completion` gets the new thread's id after a send, and nil
-    /// after Avbryt or Escape. A lock is not reported: the lock sequence
-    /// ends the sheet with `endSheet(_:)` (code .stop) while Rust is still
-    /// unlocked, and nothing may be read then (§1.10).
+    /// focused. `keys` says what the keys did for this unlock, for the
+    /// environment report of a send. `completion` gets the new thread's id
+    /// after a send, and nil after Avbryt or Escape. A lock is not reported:
+    /// the lock sequence ends the sheet with `endSheet(_:)` (code .stop)
+    /// while Rust is still unlocked, and nothing may be read then (§1.10).
     @discardableResult
-    static func present(on parent: NSWindow, to contact: ContactItem, session: Session, signer: @escaping Signer,
+    static func present(on parent: NSWindow, to contact: ContactItem, session: Session,
+                        keys: @escaping () -> EnvironmentProbe.Keys, signer: @escaping Signer,
                         completion: @escaping (Data?) -> Void) -> ComposeSheet {
-        let sheet = ComposeSheet(contact: contact, session: session, signer: signer, limits: limits())
+        let sheet = ComposeSheet(contact: contact, session: session, keys: keys, signer: signer, limits: limits())
         parent.beginSheet(sheet) { code in
             if sheet.sentThread == nil { session.cancelSend() }
             sheet.wipeAll()
@@ -96,11 +106,13 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         return sheet
     }
 
-    private init(contact: ContactItem, session: Session, signer: @escaping Signer, limits: Limits) {
+    private init(contact: ContactItem, session: Session, keys: @escaping () -> EnvironmentProbe.Keys,
+                 signer: @escaping Signer, limits: Limits) {
         subject = SecureComposeView(maxBytes: Int(limits.maxSubject), multiline: false)
         body = SecureComposeView(maxBytes: Int(limits.maxBody), multiline: true)
         self.contact = contact.id
         self.session = session
+        self.keys = keys
         self.signer = signer
         super.init(contentRect: NSRect(origin: .zero, size: Self.contentSize), styleMask: [.titled],
                    backing: .buffered, defer: false)
@@ -135,6 +147,7 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         sendButton = send
         let buttons = NSStackView(views: [cancel, retry, send])
         buttons.spacing = 12
+        buttonRow = buttons
         let messages = [failure, keyChanged, netFailure, sending]
         for v in [to, about, recipient, subjectField, bodyField, buttons] + messages as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -193,7 +206,9 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         step = next
         let busy = next == .sending || next == .signing
         let shown = busy ? sending : message
-        for m in [failure, keyChanged, netFailure, sending] { m.isHidden = m !== shown }
+        for m in [failure, keyChanged, netFailure, sending] + [environmentFailure].compactMap({ $0 }) {
+            m.isHidden = m !== shown
+        }
         sendButton?.isHidden = next == .retry
         sendButton?.isEnabled = next == .editing
         retryButton?.isHidden = next != .retry
@@ -214,9 +229,15 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
     }
 
     /// Step 0 on `Session.net`: the contact's key at the relay. No content.
+    /// Right before it, on main, Brev reports its defences to Rust.
     func send() {
         guard step == .editing, sentThread == nil, let session, sheetParent != nil else { return }
         show(.sending)
+        do {
+            try session.reportEnvironment(EnvironmentProbe.report(keys()))
+        } catch {
+            return failed(error)
+        }
         let contact = contact, started = epoch
         Session.net.async {
             let result = Result { try session.prepareSend(contact: contact) }
@@ -293,8 +314,24 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         switch error {
         case BrevError.KeyChanged: show(.editing, keyChanged)
         case BrevError.Network: show(.editing, netFailure)
+        case BrevError.Environment(let checks): show(.editing, environmentText(checks))
         default: show(.editing, failure)
         }
+    }
+
+    /// compose.environment naming `checks`, in the place of the other texts.
+    private func environmentText(_ checks: [ReportField]) -> InterfaceText {
+        environmentFailure?.removeFromSuperview()
+        let text = InterfaceText(L10n.composeEnvironment(checks), width: Self.messageWidth, alignment: .left)
+        environmentFailure = text
+        guard let root = contentView, let buttons = buttonRow else { return text }
+        text.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(text)
+        NSLayoutConstraint.activate([
+            text.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.margin),
+            text.centerYAnchor.constraint(equalTo: buttons.centerYAnchor),
+        ])
+        return text
     }
 
     @objc private func cancel(_ sender: Any?) {

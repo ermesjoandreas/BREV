@@ -26,8 +26,9 @@
 // key (key codes found with KeyTranslator). The ways in that must fail are
 // tried (events with a source PID, ⌘C ⌘X ⌘A ⌘V ⌘Z, ⌃V, insertText, a click
 // made in code, an AX press, and with --post keys posted to this process),
-// and secure event input is checked → ready → (hold) → ⌘↩ sends through the
-// relay → Ekko fetches it → Escape discards a second letter → the lock
+// and secure event input is checked → ready → (hold) → the environment
+// report (EnvironmentProbe) is checked → ⌘↩ sends through the relay → Ekko
+// fetches it → Escape discards a second letter → the lock
 // sequence discards a third → exit.
 // With --triggers: the real lock triggers (LockController.start) and the
 // real unlock bookkeeping, with this app active; switch: an unlock in
@@ -285,9 +286,17 @@ final class User {
         return try session.addContact(address: typed)
     }
 
+    /// What the keys did: a software identity key, no Touch ID.
+    var keys: EnvironmentProbe.Keys {
+        EnvironmentProbe.Keys(identityKey: EnvironmentProbe.origin(of: identity), touchID: false)
+    }
+
     /// One letter in the app's steps, all on this thread; wipes the texts.
+    /// The environment report says a software key and no Touch ID: the test
+    /// archive (allow-software-keys) sends in class C.
     func send(to contact: Data, subject: SecretText, body: SecretText) throws {
         defer { subject.wipe(); body.wipe() }
+        try session.reportEnvironment(EnvironmentProbe.report(keys))
         try session.prepareSend(contact: contact)
         let digest = try session.signRequest(contact: contact, subject: subject, body: body)
         try session.attachSignature(try Enclave.sign(digest: digest, key: identity))
@@ -706,7 +715,7 @@ weak var sentSheet: ComposeSheet?
 func wireCompose() {
     mail.onNewLetter = { contact in
         let id = contact.id
-        ComposeSheet.present(on: window, to: contact, session: session, signer: me.sign) { thread in
+        ComposeSheet.present(on: window, to: contact, session: session, keys: { me.keys }, signer: me.sign) { thread in
             composeEvents.append(thread == nil ? "closed" : "sent")
             if let thread { mail.showSent(thread: thread, contact: id) } else { mail.reloadContacts(selecting: id) }
         }
@@ -872,6 +881,18 @@ func composeAfterHold(_ sheet: ComposeSheet) {
         let h = SelfScan.scan()
         check("compose: the typed marker is in memory (positive control)", h.u16 > 0, "\(h)")
     }
+    // The report ⌘↩ makes (EnvironmentProbe), in a real window: a software
+    // key and no Touch ID, so class C, which the test archive sends in; the
+    // other checks as this run set them up.
+    let report = EnvironmentProbe.report(me.keys)
+    check("compose: the environment report: a software key, no Touch ID; capture excluded unless "
+            + "--capturable, --unprotected or --control; secure input as above; BrevApplication; opaque; "
+            + "no Copy, Cut or Paste",
+          report.keyOrigin == .software && !report.biometricUsed
+              && report.captureExcluded == !(capturable || unprotected || control)
+              && report.secureInputActive == wanted
+              && report.syntheticInputRejected && report.accessibilityOpaque && report.pasteboardDisabled,
+          "\(report)")
     let threads = lists[1].count
     let buffers = views.flatMap { $0.pool }
     deliver(hardwareKey(36, .maskCommand), to: sheet)

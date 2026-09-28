@@ -26,8 +26,8 @@ mod transport;
 pub use brev_proto::Envelope;
 pub use brev_vault::Plaintext;
 pub use ffi::{
-    limits, Brev, BrevError, ContactInfo, ContactRow, Limits, MeInfo, MessageRow, OpenText,
-    ThreadRow, CHUNK, MAX_BODY, MAX_SUBJECT,
+    limits, Brev, BrevError, ContactInfo, ContactRow, EnvironmentReport, KeyOrigin, Limits, MeInfo,
+    MessageRow, OpenText, ReportField, ThreadRow, CHUNK, MAX_BODY, MAX_SUBJECT,
 };
 pub use store::{
     Contact, ContactId, Core, IdentityId, Letter, Message, MessageId, PublicBundle, Thread,

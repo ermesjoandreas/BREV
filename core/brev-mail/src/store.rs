@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use brev_proto::body::{self, is_valid_address};
 use brev_proto::{identity_code, sig, IDENTITY_CODE_LEN, SIG_LEN};
-use brev_vault::{check_path, Clock, DekSlot, Text, Vault, VaultConfig};
+use brev_vault::{check_path, Clock, DekSlot, EnvironmentClass, Text, Vault, VaultConfig};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use zeroize::Zeroizing;
 
@@ -29,10 +29,12 @@ use crate::{Envelope, Error};
 
 /// "BREV" in the SQLite header's application_id field.
 const APPLICATION_ID: i32 = 0x4252_4556;
-/// 3: local contact ids, the keyed contact tag, sealed addresses and
-/// `pending`, the relay token in `identity.keys` (docs/PHASE3_DESIGN.md
-/// §6.1). A version 2 store opens as `Corrupt`.
-const SCHEMA_VERSION: i32 = 3;
+/// 4: version 3 (local contact ids, the keyed contact tag, sealed
+/// addresses and `pending`, the relay token in `identity.keys`;
+/// docs/PHASE3_DESIGN.md §6.1) plus `messages.env_class`
+/// (docs/VAULT_SPLIT_PLAN.md §6). A version 2 or 3 store opens as
+/// `Corrupt`; there is no migration.
+const SCHEMA_VERSION: i32 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE identity (
@@ -59,7 +61,8 @@ CREATE TABLE messages (
     created_at INTEGER NOT NULL,           -- pt
     outgoing   INTEGER NOT NULL,           -- pt: 1 = sent by me
     read       INTEGER NOT NULL,           -- pt
-    body       BLOB NOT NULL               -- ct
+    body       BLOB NOT NULL,              -- ct
+    env_class  INTEGER                     -- pt: environment class a sent letter went out in (1 = A); NULL otherwise
 ) STRICT;
 CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
 ";
@@ -198,6 +201,10 @@ pub struct Letter {
     subject: Vec<u8>,
     body: Vec<u8>,
     envelope: Envelope,
+    /// The environment class the app reported for this letter
+    /// (docs/VAULT_SPLIT_PLAN.md §6): set by the FFI's `sign_request`,
+    /// stored by [`Core::store_sent`]. None from [`Core::seal_letter`].
+    pub(crate) class: Option<EnvironmentClass>,
 }
 
 impl Letter {
@@ -641,6 +648,7 @@ impl Core {
             subject,
             body,
             envelope,
+            class: None,
         })
     }
 
@@ -654,7 +662,8 @@ impl Core {
 
     /// Stores the own copy of a signed letter the relay has accepted: its
     /// thread and message rows, sealed by [`Core::seal_letter`], in one
-    /// transaction. An unsigned letter gives `Malformed`.
+    /// transaction, with the letter's environment class in `env_class`
+    /// (plaintext; NULL without one). An unsigned letter gives `Malformed`.
     pub fn store_sent(&mut self, letter: &Letter) -> Result<ThreadId, Error> {
         self.dek()?;
         if !letter.is_signed() {
@@ -671,12 +680,13 @@ impl Core {
             ],
         )?;
         tx.execute(
-            "INSERT INTO messages (id, thread_id, created_at, outgoing, read, body) VALUES (?1, ?2, ?3, 1, 1, ?4)",
+            "INSERT INTO messages (id, thread_id, created_at, outgoing, read, body, env_class) VALUES (?1, ?2, ?3, 1, 1, ?4, ?5)",
             params![
                 &letter.message[..],
                 &letter.thread[..],
                 letter.created_at,
-                letter.body
+                letter.body,
+                letter.class.map(EnvironmentClass::code)
             ],
         )?;
         tx.commit()?;
@@ -986,6 +996,12 @@ impl Core {
     #[cfg(test)]
     pub(crate) fn open_texts_for_test(&self) -> &[Weak<Text>] {
         self.v.open_texts_for_test()
+    }
+
+    /// Test only: the connection, for the session's tests.
+    #[cfg(test)]
+    pub(crate) fn db_for_test(&self) -> &Connection {
+        self.db()
     }
 }
 

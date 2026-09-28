@@ -34,10 +34,25 @@ fn tmp() -> Tmp {
 /// The idle time of the test sessions: long enough that no timer fires.
 const TEST_IDLE: u32 = 3600;
 
-/// Unlocks `b` and confirms it, as the app does once it shows the mail.
+/// The report of an app with every defence in place: class A.
+fn class_a() -> EnvironmentReport {
+    EnvironmentReport {
+        key_origin: KeyOrigin::SecureEnclave,
+        biometric_used: true,
+        capture_excluded: true,
+        secure_input_active: true,
+        synthetic_input_rejected: true,
+        accessibility_opaque: true,
+        pasteboard_disabled: true,
+    }
+}
+
+/// Unlocks `b` and confirms it, as the app does once it shows the mail,
+/// and reports class A, as the app does before a letter.
 fn unlock_active(b: &Brev, dek: &[u8]) {
     b.unlock(dek, TEST_IDLE).unwrap();
     b.confirm_active().unwrap();
+    b.report_environment(class_a()).unwrap();
 }
 
 fn len32(n: usize) -> u32 {
@@ -824,4 +839,104 @@ fn folder_and_file_modes_are_checked() {
     ));
     chmod(&path, 0o600);
     unlock_active(&Brev::open(arg, NO_RELAY.into()).unwrap(), &dek);
+}
+
+/// A letter needs environment class A: a report of class B or C, or none
+/// since the unlock, gives `Environment` with the fields short of class A,
+/// before any request, and leaves no ticket. Class A sends.
+#[cfg(not(feature = "allow-software-keys"))]
+#[test]
+fn prepare_send_needs_class_a() {
+    let net = net();
+    let (a, _b, b_at_a, _) = pair(&net);
+    let class_b = EnvironmentReport {
+        capture_excluded: false,
+        secure_input_active: false,
+        ..class_a()
+    };
+    let class_c = EnvironmentReport {
+        key_origin: KeyOrigin::Software,
+        ..class_a()
+    };
+    let before = net.server.requests();
+    for (report, want) in [
+        (
+            Some(class_b),
+            vec![ReportField::CaptureExcluded, ReportField::SecureInputActive],
+        ),
+        (Some(class_c), vec![ReportField::KeyOrigin]),
+        (None, vec![]),
+    ] {
+        // A lock forgets the last report; the unlock makes none.
+        a.b.lock();
+        a.b.unlock(&a.dek, TEST_IDLE).unwrap();
+        a.b.confirm_active().unwrap();
+        if let Some(r) = report {
+            a.b.report_environment(r).unwrap();
+        }
+        match a.b.prepare_send(b_at_a.clone()) {
+            Err(BrevError::Environment { failed }) => assert_eq!(failed, want, "{report:?}"),
+            other => panic!("{report:?}: {other:?}"),
+        }
+        assert!(guard(&a.b.s).ticket.is_none());
+        assert!(matches!(
+            sign_request(&a, &b_at_a),
+            Err(BrevError::Malformed)
+        ));
+    }
+    assert_eq!(net.server.requests(), before, "the relay saw no request");
+    // Control: class A sends.
+    a.b.report_environment(class_a()).unwrap();
+    send(&a, &b_at_a, b"s", b"x");
+    assert_eq!(net.server.requests(), before + 2, "lookup and submit");
+}
+
+/// The threshold compares ranks: A sends at A; everything sends at C.
+#[test]
+fn may_send_compares_ranks() {
+    use EnvironmentClass::{A, B, C};
+    assert!(may_send(A, A) && !may_send(B, A) && !may_send(C, A));
+    assert!(may_send(A, C) && may_send(B, C) && may_send(C, C));
+}
+
+/// The sent letter's row keeps the class it went out in (1 = A); the
+/// received row has none.
+#[test]
+fn the_sent_row_keeps_its_environment_class() {
+    let net = net();
+    let (a, b, b_at_a, _) = pair(&net);
+    send(&a, &b_at_a, b"s", b"x");
+    assert_eq!(b.b.sync().unwrap(), 1);
+    let classes = |u: &User| -> Vec<Option<i64>> {
+        let s = guard(&u.b.s);
+        let mut stmt =
+            s.me.db_for_test()
+                .prepare("SELECT env_class FROM messages")
+                .unwrap();
+        let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+        rows.collect::<Result<_, _>>().unwrap()
+    };
+    assert_eq!(classes(&a), [Some(1)]);
+    assert_eq!(classes(&b), [None]);
+}
+
+/// The report is taken only through the gate, and a lock forgets it.
+#[test]
+fn a_report_needs_the_gate_and_a_lock_forgets_it() {
+    let u = locked_user(NO_RELAY);
+    let b = &u.b;
+    assert!(matches!(
+        b.report_environment(class_a()),
+        Err(BrevError::Locked)
+    ));
+    b.unlock(&u.dek, TEST_IDLE).unwrap();
+    assert!(
+        matches!(b.report_environment(class_a()), Err(BrevError::Locked)),
+        "armed"
+    );
+    b.confirm_active().unwrap();
+    b.report_environment(class_a()).unwrap();
+    assert!(guard(&b.s).report.is_some());
+    b.lock();
+    assert!(guard(&b.s).report.is_none());
 }

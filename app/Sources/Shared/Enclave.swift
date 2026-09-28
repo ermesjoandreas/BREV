@@ -124,6 +124,14 @@ enum Enclave {
         return signature
     }
 
+    /// Whether `key` says it lives in the Secure Enclave: its own
+    /// kSecAttrTokenID (docs/VAULT_SPLIT_PLAN.md §8). A software key has
+    /// none. No prompt: reading a key's attributes does not use it.
+    static func isInSecureEnclave(_ key: SecKey) -> Bool {
+        let attributes = SecKeyCopyAttributes(key) as? [String: Any]
+        return attributes?[kSecAttrTokenID as String] as? String == kSecAttrTokenIDSecureEnclave as String
+    }
+
     /// Whether Touch ID is set up and usable. No prompt.
     static func touchIDAvailable() -> Bool {
         LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)

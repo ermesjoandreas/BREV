@@ -155,6 +155,13 @@ class KeyStore {
         try privateKey(tag: Self.identityTag, context: context)
     }
 
+    /// The identity key for the environment report (EnvironmentProbe), found
+    /// with a context that forbids interaction, so it never prompts; nil if
+    /// it is not found.
+    func identityKeyWithoutPrompt() -> SecKey? {
+        try? privateKey(tag: Self.identityTag, context: Self.noInteraction())
+    }
+
     private func privateKey(tag: Data, context: LAContext) throws -> SecKey {
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,

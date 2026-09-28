@@ -221,7 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch result {
             case .success:
                 self.pendingWrapped = nil
-                if self.lock.endUnlock(started, succeeded: true) {
+                if self.lock.endUnlock(started, succeeded: true, touchID: self.unlocker.unlockedWithTouchID) {
                     Self.appLog.notice("unlocked")
                     self.showMail()
                 } else {
@@ -276,13 +276,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mail.onNewLetter = { [weak self, weak mail] contact in
             guard let self, let window = self.mainWindow, let session = self.session else { return }
             let id = contact.id
-            ComposeSheet.present(on: window, to: contact, session: session,
-                                 signer: self.touchIDSigner(reason: L10n.sendReason)) { thread in
+            ComposeSheet.present(on: window, to: contact, session: session, keys: { [weak self] in
+                self?.environmentKeys() ?? EnvironmentProbe.Keys(identityKey: .unknown, touchID: false)
+            }, signer: self.touchIDSigner(reason: L10n.sendReason)) { thread in
                 if let thread { mail?.showSent(thread: thread, contact: id) } else { mail?.reloadContacts(selecting: id) }
             }
         }
         present(mail)
         mail.start()
+    }
+
+    /// What the keys did for this unlock, for a letter's environment report
+    /// (EnvironmentProbe): the identity key's origin, read from the key,
+    /// which is found without a prompt, and whether this unlock used Touch
+    /// ID.
+    private func environmentKeys() -> EnvironmentProbe.Keys {
+        EnvironmentProbe.Keys(identityKey: EnvironmentProbe.origin(of: keyStore.identityKeyWithoutPrompt()),
+                              touchID: lock.unlockUsedTouchID)
     }
 
     /// A signer for `reason` (send.reason or register.reason): the identity

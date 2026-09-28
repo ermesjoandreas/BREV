@@ -343,7 +343,7 @@ fn older_store_is_refused() {
             Err(BrevError::Corrupt)
         ));
     }
-    raw.pragma_update(None, "user_version", 3).unwrap();
+    raw.pragma_update(None, "user_version", 4).unwrap();
     Brev::open(dir.arg(), "http://127.0.0.1:9".into())
         .unwrap()
         .unlock(&dek, TEST_IDLE)

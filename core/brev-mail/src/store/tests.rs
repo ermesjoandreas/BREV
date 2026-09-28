@@ -199,7 +199,7 @@ fn schema_v3_pragmas() {
     assert_eq!(q("fullfsync"), "Integer(1)");
     assert_eq!(q("trusted_schema"), "Integer(0)");
     assert_eq!(q("application_id"), format!("Integer({APPLICATION_ID})"));
-    assert_eq!(q("user_version"), "Integer(3)");
+    assert_eq!(q("user_version"), "Integer(4)");
     assert!(core
         .db()
         .db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
@@ -224,7 +224,15 @@ fn schema_v3_pragmas() {
     );
     assert_eq!(
         columns("messages"),
-        ["id", "thread_id", "created_at", "outgoing", "read", "body"]
+        [
+            "id",
+            "thread_id",
+            "created_at",
+            "outgoing",
+            "read",
+            "body",
+            "env_class"
+        ]
     );
 }
 
@@ -270,13 +278,69 @@ CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
     assert_eq!(fs::read(&path).unwrap(), before);
     drop(Cleanup(path));
 
-    // A v3 store relabelled as version 2.
+    // A v4 store relabelled as version 2.
     let p = party();
     drop(p.core);
     let raw = Connection::open(&p.path).unwrap();
     raw.pragma_update(None, "user_version", 2).unwrap();
     assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
+    raw.pragma_update(None, "user_version", 4).unwrap();
+    drop(Core::open(&p.path).unwrap());
+}
+
+/// A real Phase 3 store before the environment class (schema v3: no
+/// `messages.env_class`) and a v4 store relabelled as version 3 are both
+/// refused, unchanged: there is no migration (docs/VAULT_SPLIT_PLAN.md Q4).
+#[test]
+fn v3_store_is_refused() {
+    const V3_SCHEMA: &str = "
+CREATE TABLE identity (
+    id         BLOB PRIMARY KEY,           -- pt: own identity id
+    keys       BLOB NOT NULL,              -- ct: X25519 secret || X25519 public || signing key (65) || relay token (32)
+    address    BLOB NOT NULL               -- ct: own address; empty until registered
+) STRICT;
+CREATE TABLE contacts (
+    id         BLOB PRIMARY KEY,           -- pt: 16 random bytes, local; kept when the key changes
+    tag        BLOB NOT NULL UNIQUE,       -- pt: keyed tag of the pinned identity id (finds the sender)
+    bundle     BLOB NOT NULL,              -- ct: pinned bundle
+    address    BLOB NOT NULL,              -- ct: the address, also shown as the name
+    pending    BLOB NOT NULL               -- ct: empty, or the other bundle the relay returned
+) STRICT;
+CREATE TABLE threads (
+    id         BLOB PRIMARY KEY,           -- pt: 16 random bytes, shared with peer
+    contact_id BLOB NOT NULL REFERENCES contacts(id),
+    created_at INTEGER NOT NULL,           -- pt: unix seconds
+    subject    BLOB NOT NULL               -- ct
+) STRICT;
+CREATE TABLE messages (
+    id         BLOB PRIMARY KEY,           -- pt: 16 random bytes, chosen by sender
+    thread_id  BLOB NOT NULL REFERENCES threads(id),
+    created_at INTEGER NOT NULL,           -- pt
+    outgoing   INTEGER NOT NULL,           -- pt: 1 = sent by me
+    read       INTEGER NOT NULL,           -- pt
+    body       BLOB NOT NULL               -- ct
+) STRICT;
+CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
+";
+    let path = temp_path();
+    let raw = Connection::open(&path).unwrap();
+    raw.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    raw.execute_batch(V3_SCHEMA).unwrap();
     raw.pragma_update(None, "user_version", 3).unwrap();
+    drop(raw);
+    let before = fs::read(&path).unwrap();
+    assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
+    assert_eq!(fs::read(&path).unwrap(), before);
+    drop(Cleanup(path));
+
+    // A v4 store relabelled as version 3.
+    let p = party();
+    drop(p.core);
+    let raw = Connection::open(&p.path).unwrap();
+    raw.pragma_update(None, "user_version", 3).unwrap();
+    assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
+    raw.pragma_update(None, "user_version", 4).unwrap();
     drop(Core::open(&p.path).unwrap());
 }
 

@@ -11,7 +11,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use brev_core::{Brev, OpenText, CHUNK};
+use brev_core::{Brev, EnvironmentReport, KeyOrigin, OpenText, CHUNK};
 use brev_relay::{parse_listen, Open, Policy, Relay, Server};
 use p256::ecdsa::signature::hazmat::PrehashSigner;
 use p256::ecdsa::signature::Signer;
@@ -36,10 +36,25 @@ pub fn len32(n: usize) -> u32 {
 /// The idle time of the test sessions: long enough that no timer fires.
 pub const TEST_IDLE: u32 = 3600;
 
-/// Unlocks `b` and confirms it, as the app does once it shows the mail.
+/// The report of an app with every defence in place: class A.
+pub fn class_a() -> EnvironmentReport {
+    EnvironmentReport {
+        key_origin: KeyOrigin::SecureEnclave,
+        biometric_used: true,
+        capture_excluded: true,
+        secure_input_active: true,
+        synthetic_input_rejected: true,
+        accessibility_opaque: true,
+        pasteboard_disabled: true,
+    }
+}
+
+/// Unlocks `b` and confirms it, as the app does once it shows the mail,
+/// and reports class A, as the app does before a letter.
 pub fn unlock_active(b: &Brev, dek: &[u8]) {
     b.unlock(dek, TEST_IDLE).unwrap();
     b.confirm_active().unwrap();
+    b.report_environment(class_a()).unwrap();
 }
 
 /// A fresh directory with mode 0700 under the system temp dir (a store

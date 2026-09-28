@@ -38,7 +38,12 @@
 //   Brev.unlock succeeded (installing the wrapped DEK fails);
 // - an unlock opens Rust only with confirmActive, which must come within
 //   2 s: the time from Brev.unlock to the completion on main is noted
-//   (docs/VAULT_SPLIT_PLAN.md R4).
+//   (docs/VAULT_SPLIT_PLAN.md R4);
+// - the app's environment report (EnvironmentProbe) says what this process
+//   is: a software key and no Touch ID, BrevApplication, content views that
+//   expose nothing to accessibility, no Copy, Cut or Paste; its letters go
+//   out with it, since the test archive sends in class C
+//   (allow-software-keys; docs/VAULT_SPLIT_PLAN.md §6, §8).
 // The mail screen lives in a MainWindow that is never ordered onto the
 // screen; each content view draws its visible part into its pixel buffers
 // as AppKit's display pass would make it. Output is check names only.
@@ -207,10 +212,17 @@ func add(_ s: Session, _ address: String) throws -> Data {
     return try s.addContact(address: typed)
 }
 
-/// One letter in the app's steps (prepare, seal, sign, attach, submit).
+/// What the keys of this process did: a software identity key, no Touch ID.
+func softwareKeys(_ identity: SecKey) -> EnvironmentProbe.Keys {
+    EnvironmentProbe.Keys(identityKey: EnvironmentProbe.origin(of: identity), touchID: false)
+}
+
+/// One letter in the app's steps (the environment report, prepare, seal,
+/// sign, attach, submit).
 func send(_ s: Session, _ identity: SecKey, to contact: Data, subject: String, body: String) throws {
     let st = text(subject), bt = text(body)
     defer { st.wipe(); bt.wipe() }
+    try s.reportEnvironment(EnvironmentProbe.report(softwareKeys(identity)))
     try s.prepareSend(contact: contact)
     try s.attachSignature(try Enclave.sign(digest: try s.signRequest(contact: contact, subject: st, body: bt),
                                            key: identity))
@@ -322,6 +334,12 @@ check("control: the header shows both addresses and codes, as pixels in their bu
           && header.codes.lines.allSatisfy { $0?.length == 35 } && !header.showsKeyChange)
 check("draw(_:) of every content view in sight draws nothing (print and PDF output)",
       !inSight.isEmpty && inSight.allSatisfy { !drawInks($0, $0.visibleRect.intersection($0.bounds)) })
+let report = EnvironmentProbe.report(softwareKeys(identity))
+check("the environment report with the mail screen up: a software key, no Touch ID, BrevApplication, "
+        + "content views opaque, no Copy, Cut or Paste",
+      report.keyOrigin == .software && !report.biometricUsed && report.syntheticInputRejected
+          && report.accessibilityOpaque && report.pasteboardDisabled,
+      "\(report)")
 
 lock.lock(.manual)
 check("lock: every pixel buffer of every content view is zero, also those of letters it removed",
@@ -403,7 +421,7 @@ check("control: the next frame draws the header again", headerLines.allSatisfy {
 var reports: [String] = []
 composing.onNewLetter = { [weak composing] contact in
     let id = contact.id
-    ComposeSheet.present(on: window, to: contact, session: session,
+    ComposeSheet.present(on: window, to: contact, session: session, keys: { softwareKeys(identity) },
                          signer: { _, done in done(.failure(BrevError.Signing)) }) { thread in
         reports.append(lock.state.unlocked ? "unlocked" : "locking")
         if let thread { composing?.showSent(thread: thread, contact: id) } else { composing?.reloadContacts(selecting: id) }

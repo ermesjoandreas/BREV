@@ -3,8 +3,9 @@
 # AX dumps and the in-process checks in tools/viewhost/main.swift. A test
 # app only, never linked into Brev.app. It compiles app/Sources/{Shared,App,UI}
 # with the patched bindings, the test archive (the release build of brev-mail
-# without the launch guard, which this script builds in
-# core/target/test-archive, as scripts/test.sh does) and the heap scanner of
+# without the launch guard and with allow-software-keys, so its letters go
+# out with software keys; this script builds it in core/target/test-archive,
+# as scripts/test.sh does) and the heap scanner of
 # the CLI harness (app/Tests/scan.c), and uses no keychain and no Touch ID. As the
 # Verify build, it also compiles app/Sources/Verify/SelfScan.swift with
 # BREV_SELFSCAN, so its lock sequence runs SelfScan (docs/VERIFY.md V39). Its
@@ -39,7 +40,8 @@ RELAY="$REPO_ROOT/core/target/release/brev-relay"
 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --manifest-path "$REPO_ROOT/core/Cargo.toml" \
   --target-dir "$REPO_ROOT/core/target" --release -p brev-relay --quiet
 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --manifest-path "$REPO_ROOT/core/Cargo.toml" \
-  --target-dir "$REPO_ROOT/core/target/test-archive" --release -p brev-mail --no-default-features --quiet
+  --target-dir "$REPO_ROOT/core/target/test-archive" --release -p brev-mail --no-default-features \
+  --features allow-software-keys --quiet
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/nb.lproj"

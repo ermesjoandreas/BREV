@@ -118,6 +118,33 @@ targets:
         keychain-access-groups:
           - $(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)
 
+    # Before anything is compiled, in every configuration: the Rust archive
+    # this target links must not be a test archive. brev-mail's feature
+    # allow-software-keys lets a letter go out in environment class C
+    # (software keys, no Touch ID; docs/VAULT_SPLIT_PLAN.md §6) and compiles a
+    # marker into the archive, which fails the build here. That covers
+    # Release and Archive from the IDE and the Verify build of
+    # tools/verify/build.sh; scripts/gen-bindings.sh checks the same after its
+    # build. The app never links the test archive (core/target/test-archive).
+    preBuildScripts:
+      - name: Rust archive has no test features
+        shell: /bin/sh
+        inputFiles:
+          - $(SRCROOT)/../core/target/release/libbrev_core.a
+        outputFiles:
+          - $(DERIVED_FILE_DIR)/rust-archive-checked
+        script: |
+          status=0
+          /usr/bin/grep -aq BREV-ALLOW-SOFTWARE-KEYS "$SCRIPT_INPUT_FILE_0" || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "error: $SCRIPT_INPUT_FILE_0 was built with allow-software-keys (a test archive); run scripts/gen-bindings.sh" >&2
+            exit 1
+          elif [ "$status" -ne 1 ]; then
+            echo "error: $SCRIPT_INPUT_FILE_0 could not be read; run scripts/gen-bindings.sh" >&2
+            exit 1
+          fi
+          /usr/bin/touch "$SCRIPT_OUTPUT_FILE_0"
+
     settings:
       base:
         PRODUCT_NAME: Brev
@@ -175,8 +202,9 @@ targets:
         CODE_SIGN_IDENTITY: "Apple Development"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: AV26DNQ5SC
-        # Build-phase scripts (none today) run sandboxed, so a future script phase
-        # cannot silently read or write outside the declared inputs (§1.1 hygiene).
+        # Build-phase scripts (the archive check above) run sandboxed, so a
+        # script phase cannot silently read or write outside its declared
+        # inputs and outputs (§1.1 hygiene).
         ENABLE_USER_SCRIPT_SANDBOXING: "YES"
         # Smaller binary, less to audit (§5 Phase 5 reproducibility).
         DEAD_CODE_STRIPPING: "YES"

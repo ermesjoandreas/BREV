@@ -87,6 +87,16 @@
 "compose.keychanged" = "Sikkerhetskoden til mottakeren er endret. Brevet ble ikke sendt.";
 "compose.retry" = "Prøv igjen";
 "net.error" = "Fikk ikke kontakt med Brev-tjenesten. Prøv igjen.";
+/* A letter Rust refused because Brev's report on its own defences was not complete (docs/VAULT_SPLIT_PLAN.md §6, owner answer Q6). %@ is a list of the environment.* texts below, joined by ", ". */
+"compose.environment" = "Brevet ble ikke sendt: %@.";
+"environment.keyorigin" = "nøkkelen er ikke i Secure Enclave";
+"environment.biometric" = "ikke låst opp med Touch ID";
+"environment.capture" = "opptaksvern av";
+"environment.secureinput" = "sikker inntasting av";
+"environment.synthetic" = "vern mot kunstig inndata av";
+"environment.accessibility" = "skjerming mot tilgjengelighetsverktøy av";
+"environment.pasteboard" = "sperre mot utklippstavlen av";
+"environment.noreport" = "Brev sjekket ikke vernet sitt først";
 
 /* Adding a contact by address (docs/PHASE3_DESIGN.md §6.2, §6.5). */
 "contact.title" = "Legg til kontakt";

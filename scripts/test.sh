@@ -4,9 +4,10 @@
 # every later step sees the current core. Then Rust formatting, clippy,
 # tests (without the launch guard) and the launch guard's own test, the
 # zeroize, allocator and crate-feature checks, the launch-guard feature and
-# its cfg sites, brev-vault's dependency whitelist, the check that no
-# production code makes a P-256 signing key, the FFI surface and
-# patch-marker checks (macOS), the test archive and its bindings (macOS),
+# its cfg sites, the cfg sites of allow-software-keys, brev-vault's
+# dependency whitelist, the check that no production code makes a P-256
+# signing key, the FFI surface and patch-marker checks (macOS), the test
+# archive, its allow-software-keys marker and its bindings (macOS),
 # the forbidden-API grep, the check that
 # AVFoundation, CoreMedia and CoreVideo stay in the protected layer, the
 # check that the Xcode minimum is stated alike, the dependency audit, a relay
@@ -205,6 +206,20 @@ if [[ "$(grep -c . <<<"$GUARD_SITES")" != 2 ]]; then
   exit 1
 fi
 
+# brev-mail's allow-software-keys lets a letter go out in environment class
+# C (software keys, no Touch ID; docs/VAULT_SPLIT_PLAN.md §6). Only the test
+# archive has it: its marker is checked below, in gen-bindings.sh and in
+# app/project.yml's build phase. Like the launch guard's, its cfg sites are
+# counted (R7): a new one fails here until it is reviewed and the count
+# updated.
+echo "==> allow-software-keys: its cfg sites"
+SOFT_SITES="$(cd "$REPO_ROOT" && grep -rn 'feature = "allow-software-keys"' core/*/src || true)"
+if [[ "$(grep -c . <<<"$SOFT_SITES")" != 3 ]]; then
+  echo "error: expected 3 cfg sites of allow-software-keys (the send threshold and the marker in ffi.rs, the refusal test in ffi/tests.rs), found:" >&2
+  echo "$SOFT_SITES" >&2
+  exit 1
+fi
+
 # brev-vault takes only the dependencies docs/VAULT_SPLIT_PLAN.md §4 lists:
 # no network, no UniFFI, no mail crypto. The script checks its own control.
 echo "==> brev-vault dependency whitelist"
@@ -283,14 +298,26 @@ if [[ "$DARWIN" == yes ]]; then
   fi
 
   # The test archive: brev-mail without its default features, so without
-  # the launch guard, in its own target dir so it never replaces the app's
-  # archive (docs/VAULT_SPLIT_PLAN.md §4, N4). The harness, the lock probe
-  # and the view host link it, since some of their runs have no
-  # MallocScribble (the lock probe, the harness's controls). Features must
-  # not change the FFI: its bindings, patched, are the app's.
-  echo "==> test archive (no launch guard) and its bindings"
+  # the launch guard, and with allow-software-keys, in its own target dir so
+  # it never replaces the app's archive (docs/VAULT_SPLIT_PLAN.md §4, §6,
+  # N4). The harness, the lock probe and the view host link it, since some
+  # of their runs have no MallocScribble (the lock probe, the harness's
+  # controls), and they send letters with software keys and no Touch ID
+  # (environment class C). The control of the marker checks: the test
+  # archive has the marker, the app's does not. Features must not change
+  # the FFI: its bindings, patched, are the app's.
+  echo "==> test archive (no launch guard, allow-software-keys), its marker and its bindings"
   TEST_ARCHIVE_DIR="$TARGET_DIR/test-archive"
-  cargo build --manifest-path "$MANIFEST" --target-dir "$TEST_ARCHIVE_DIR" --release -p brev-mail --no-default-features
+  cargo build --manifest-path "$MANIFEST" --target-dir "$TEST_ARCHIVE_DIR" --release -p brev-mail \
+    --no-default-features --features allow-software-keys
+  if ! grep -aq BREV-ALLOW-SOFTWARE-KEYS "$TEST_ARCHIVE_DIR/release/libbrev_core.a"; then
+    echo "error: the allow-software-keys marker is not in the test archive; fix the checks in scripts/gen-bindings.sh and app/project.yml" >&2
+    exit 1
+  fi
+  if grep -aq BREV-ALLOW-SOFTWARE-KEYS "$STATICLIB"; then
+    echo "error: the app's archive $STATICLIB has the allow-software-keys marker" >&2
+    exit 1
+  fi
   TEST_BINDINGS="$TEST_ARCHIVE_DIR/bindings"
   rm -rf "$TEST_BINDINGS"
   mkdir -p "$TEST_BINDINGS"
@@ -428,7 +455,7 @@ fi
 # The Swift heap-scan harness (docs/PHASE2_DESIGN.md §11): a CLI process, so
 # no window and no prompt, built from app/Sources/Shared, the patched
 # bindings and the test archive (the release build without the launch
-# guard). Every case runs five times and every run
+# guard, with allow-software-keys). Every case runs five times and every run
 # must pass: under MallocScribble=1, as the app runs (Info.plist
 # LSEnvironment), except the two controls without scribbling. Case 6's
 # proves that the glyph needle works and that scribbling is what clears the
@@ -490,8 +517,8 @@ fi
 # LockController, UnlockService and content views, which the harness
 # (Shared/ only) cannot reach. A CLI process built from
 # app/Sources/{Shared,App,UI,Keys} and the test archive: no window on
-# screen, no prompt, no keychain (software keys; UnlockService gets a
-# KeyStore subclass), and no
+# screen, no prompt, no keychain (software keys, which it reports to Rust as
+# they are; UnlockService gets a KeyStore subclass), and no
 # event posted but to itself. Its letters come through the relay above. It
 # checks that a synthetic key BrevApplication drops does not move the idle
 # clock (in sendEvent, and in nextEvent with a key posted to itself; that

@@ -160,6 +160,13 @@ final class Session {
 
     // MARK: - A letter (docs/PHASE3_DESIGN.md §3.2)
 
+    /// Before step 0, on main: Brev's report on its own defences
+    /// (EnvironmentProbe in the app). Rust sends only in environment class A
+    /// (docs/VAULT_SPLIT_PLAN.md §6). Flags only, no content.
+    func reportEnvironment(_ report: EnvironmentReport) throws {
+        try brev.reportEnvironment(report: report)
+    }
+
     /// Step 0, without content: checks the contact's key at the relay and
     /// takes the send ticket (network: `Session.net`).
     func prepareSend(contact: Data) throws {

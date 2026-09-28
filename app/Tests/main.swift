@@ -250,9 +250,21 @@ final class User {
         return try session.addContact(address: typed)
     }
 
-    /// One letter in the app's steps (PHASE3 §3.2): prepare, seal, sign,
-    /// attach, submit. Returns the thread id. The caller wipes the texts.
+    /// What this process can say of itself (docs/VAULT_SPLIT_PLAN.md §8):
+    /// its identity key's origin, as the key says, and no Touch ID, no
+    /// window, no secure input and no BrevApplication. Class C, which the
+    /// test archive (allow-software-keys) sends in.
+    var report: EnvironmentReport {
+        EnvironmentReport(keyOrigin: Enclave.isInSecureEnclave(identity) ? .secureEnclave : .software,
+                          biometricUsed: false, captureExcluded: false, secureInputActive: false,
+                          syntheticInputRejected: false, accessibilityOpaque: false, pasteboardDisabled: false)
+    }
+
+    /// One letter in the app's steps (PHASE3 §3.2): the environment report,
+    /// prepare, seal, sign, attach, submit. Returns the thread id. The
+    /// caller wipes the texts.
     func send(to contact: Data, subject: SecretText, body: SecretText) throws -> Data {
+        try session.reportEnvironment(report)
         try session.prepareSend(contact: contact)
         let digest = try session.signRequest(contact: contact, subject: subject, body: body)
         try session.attachSignature(try Enclave.sign(digest: digest, key: identity))
@@ -1419,7 +1431,9 @@ func caseNetwork() {
         // A letter given up after it was signed goes nowhere.
         let draft = secret("Utkast"), draftBody = secret("Et utkast som ikke sendes.")
         var cancelled = false
+        check("the identity key is a software key, and reports so", a.report.keyOrigin == .software)
         do {
+            try a.session.reportEnvironment(a.report)
             try a.session.prepareSend(contact: aSeesB)
             let digest = try a.session.signRequest(contact: aSeesB, subject: draft, body: draftBody)
             let der = try Enclave.sign(digest: digest, key: a.identity)

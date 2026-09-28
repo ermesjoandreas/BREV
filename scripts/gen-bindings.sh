@@ -89,6 +89,16 @@ if grep -Eq "$TEST_HOOKS" <<<"$ARCHIVE_SYMS"; then
   echo "error: libbrev_core.a has test hooks ($TEST_HOOKS): brev-mail was built with test-hooks" >&2
   exit 1
 fi
+# brev-mail's `allow-software-keys` (docs/VAULT_SPLIT_PLAN.md §6) lets a
+# letter go out in environment class C (software keys, no Touch ID); it is
+# for the test archive only. The feature compiles a marker into the archive,
+# and the app's must not have it. app/project.yml's build phase checks the
+# archive Xcode links the same way; scripts/test.sh checks that the test
+# archive has the marker.
+if grep -aq BREV-ALLOW-SOFTWARE-KEYS "$TARGET_DIR/release/libbrev_core.a"; then
+  echo "error: libbrev_core.a was built with allow-software-keys, which the app must never have" >&2
+  exit 1
+fi
 
 # swift-format is optional; without --no-format bindgen prints a warning when
 # it is missing. A plain string (not an array) keeps this valid under `set -u`

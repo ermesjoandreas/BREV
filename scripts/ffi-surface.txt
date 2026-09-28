@@ -41,6 +41,7 @@ uniffi_brev_core_fn_method_brev_open_body
 uniffi_brev_core_fn_method_brev_prepare_send
 uniffi_brev_core_fn_method_brev_register
 uniffi_brev_core_fn_method_brev_register_request
+uniffi_brev_core_fn_method_brev_report_environment
 uniffi_brev_core_fn_method_brev_sign_request
 uniffi_brev_core_fn_method_brev_submit
 uniffi_brev_core_fn_method_brev_sync
@@ -51,7 +52,8 @@ uniffi_brev_core_fn_method_opentext_chunk
 uniffi_brev_core_fn_method_opentext_close
 
 # The converter types and uniffi's protocols for them. No sequence, option or
-# map but the three row lists.
+# map but the three row lists and BrevError.Environment's list of report
+# fields.
 fileprivate protocol FfiConverter {
 fileprivate protocol FfiConverterPrimitive: FfiConverter where FfiType == SwiftType { }
 fileprivate protocol FfiConverterRustBuffer: FfiConverter where FfiType == RustBuffer {}
@@ -66,14 +68,18 @@ fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
 fileprivate struct FfiConverterSequenceTypeContactRow: FfiConverterRustBuffer {
 fileprivate struct FfiConverterSequenceTypeMessageRow: FfiConverterRustBuffer {
 fileprivate struct FfiConverterSequenceTypeThreadRow: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceTypeReportField: FfiConverterRustBuffer {
 public struct FfiConverterTypeBrev: FfiConverter {
 public struct FfiConverterTypeBrevError: FfiConverterRustBuffer {
 public struct FfiConverterTypeContactInfo: FfiConverterRustBuffer {
 public struct FfiConverterTypeContactRow: FfiConverterRustBuffer {
+public struct FfiConverterTypeEnvironmentReport: FfiConverterRustBuffer {
+public struct FfiConverterTypeKeyOrigin: FfiConverterRustBuffer {
 public struct FfiConverterTypeLimits: FfiConverterRustBuffer {
 public struct FfiConverterTypeMeInfo: FfiConverterRustBuffer {
 public struct FfiConverterTypeMessageRow: FfiConverterRustBuffer {
 public struct FfiConverterTypeOpenText: FfiConverter {
+public struct FfiConverterTypeReportField: FfiConverterRustBuffer {
 public struct FfiConverterTypeThreadRow: FfiConverterRustBuffer {
 public func FfiConverterTypeBrev_lift(_ handle: UInt64) throws -> Brev {
 public func FfiConverterTypeBrev_lower(_ value: Brev) -> UInt64 {
@@ -83,6 +89,10 @@ public func FfiConverterTypeContactInfo_lift(_ buf: RustBuffer) throws -> Contac
 public func FfiConverterTypeContactInfo_lower(_ value: ContactInfo) -> RustBuffer {
 public func FfiConverterTypeContactRow_lift(_ buf: RustBuffer) throws -> ContactRow {
 public func FfiConverterTypeContactRow_lower(_ value: ContactRow) -> RustBuffer {
+public func FfiConverterTypeEnvironmentReport_lift(_ buf: RustBuffer) throws -> EnvironmentReport {
+public func FfiConverterTypeEnvironmentReport_lower(_ value: EnvironmentReport) -> RustBuffer {
+public func FfiConverterTypeKeyOrigin_lift(_ buf: RustBuffer) throws -> KeyOrigin {
+public func FfiConverterTypeKeyOrigin_lower(_ value: KeyOrigin) -> RustBuffer {
 public func FfiConverterTypeLimits_lift(_ buf: RustBuffer) throws -> Limits {
 public func FfiConverterTypeLimits_lower(_ value: Limits) -> RustBuffer {
 public func FfiConverterTypeMeInfo_lift(_ buf: RustBuffer) throws -> MeInfo {
@@ -91,6 +101,8 @@ public func FfiConverterTypeMessageRow_lift(_ buf: RustBuffer) throws -> Message
 public func FfiConverterTypeMessageRow_lower(_ value: MessageRow) -> RustBuffer {
 public func FfiConverterTypeOpenText_lift(_ handle: UInt64) throws -> OpenText {
 public func FfiConverterTypeOpenText_lower(_ value: OpenText) -> UInt64 {
+public func FfiConverterTypeReportField_lift(_ buf: RustBuffer) throws -> ReportField {
+public func FfiConverterTypeReportField_lower(_ value: ReportField) -> RustBuffer {
 public func FfiConverterTypeThreadRow_lift(_ buf: RustBuffer) throws -> ThreadRow {
 public func FfiConverterTypeThreadRow_lower(_ value: ThreadRow) -> RustBuffer {
 return try FfiConverterTypeBrev.lift(handle)
@@ -101,6 +113,10 @@ return try FfiConverterTypeContactInfo.lift(buf)
 return FfiConverterTypeContactInfo.lower(value)
 return try FfiConverterTypeContactRow.lift(buf)
 return FfiConverterTypeContactRow.lower(value)
+return try FfiConverterTypeEnvironmentReport.lift(buf)
+return FfiConverterTypeEnvironmentReport.lower(value)
+return try FfiConverterTypeKeyOrigin.lift(buf)
+return FfiConverterTypeKeyOrigin.lower(value)
 return try FfiConverterTypeLimits.lift(buf)
 return FfiConverterTypeLimits.lower(value)
 return try FfiConverterTypeMeInfo.lift(buf)
@@ -109,6 +125,8 @@ return try FfiConverterTypeMessageRow.lift(buf)
 return FfiConverterTypeMessageRow.lower(value)
 return try FfiConverterTypeOpenText.lift(handle)
 return FfiConverterTypeOpenText.lower(value)
+return try FfiConverterTypeReportField.lift(buf)
+return FfiConverterTypeReportField.lower(value)
 return try FfiConverterTypeThreadRow.lift(buf)
 return FfiConverterTypeThreadRow.lower(value)
 
@@ -244,3 +262,29 @@ seq.append(try FfiConverterTypeMessageRow.read(from: &buf))
 FfiConverterTypeMessageRow.write(item, into: &buf)
 seq.append(try FfiConverterTypeThreadRow.read(from: &buf))
 FfiConverterTypeThreadRow.write(item, into: &buf)
+
+# The environment report (docs/VAULT_SPLIT_PLAN.md §6, §8), app to Rust:
+# reportEnvironment's EnvironmentReport, which is a KeyOrigin and six flags,
+# read and written field by field. Rust to app: BrevError.Environment's list
+# of ReportField, the names of the failed fields. Flags and names only, no
+# content.
+open func reportEnvironment(report: EnvironmentReport)throws   {try rustCallWithError(FfiConverterTypeBrevError_lift) {
+FfiConverterTypeEnvironmentReport_lower(report),uniffiCallStatus
+keyOrigin: FfiConverterTypeKeyOrigin.read(from: &buf),
+FfiConverterTypeKeyOrigin.write(value.keyOrigin, into: &buf)
+biometricUsed: FfiConverterBool.read(from: &buf),
+FfiConverterBool.write(value.biometricUsed, into: &buf)
+captureExcluded: FfiConverterBool.read(from: &buf),
+FfiConverterBool.write(value.captureExcluded, into: &buf)
+secureInputActive: FfiConverterBool.read(from: &buf),
+FfiConverterBool.write(value.secureInputActive, into: &buf)
+syntheticInputRejected: FfiConverterBool.read(from: &buf),
+FfiConverterBool.write(value.syntheticInputRejected, into: &buf)
+accessibilityOpaque: FfiConverterBool.read(from: &buf),
+FfiConverterBool.write(value.accessibilityOpaque, into: &buf)
+pasteboardDisabled: FfiConverterBool.read(from: &buf)
+FfiConverterBool.write(value.pasteboardDisabled, into: &buf)
+failed: try FfiConverterSequenceTypeReportField.read(from: &buf)
+FfiConverterSequenceTypeReportField.write(failed, into: &buf)
+seq.append(try FfiConverterTypeReportField.read(from: &buf))
+FfiConverterTypeReportField.write(item, into: &buf)

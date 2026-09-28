@@ -22,6 +22,12 @@ final class UnlockService {
 
     private let queue = DispatchQueue(label: "no.brev.unlock")
     private let keyStore: KeyStore
+    /// Main thread: whether the last unlock unwrapped the DEK with a Secure
+    /// Enclave KEK, whose access control needs Touch ID (.biometryCurrentSet).
+    /// Set right before that unlock's completion runs, false after a failed
+    /// one; LockController keeps it for the unlock's generation, for the
+    /// environment report (docs/VAULT_SPLIT_PLAN.md §8).
+    private(set) var unlockedWithTouchID = false
 
     init(keyStore: KeyStore) {
         self.keyStore = keyStore
@@ -74,8 +80,9 @@ final class UnlockService {
         let keyStore = keyStore
         queue.async {
             let result: Result<Void, UnlockFailure>
+            var touchID = false
             do {
-                try Self.unlock(session, install: install, keyStore: keyStore)
+                touchID = try Self.unlock(session, install: install, keyStore: keyStore)
                 Self.saveFingersHint(keyStore)
                 result = .success(())
             } catch {
@@ -86,13 +93,18 @@ final class UnlockService {
                 Self.log.notice("unlock failed class=\(failure.rawValue, privacy: .public) errors=[\(codes, privacy: .public)]")
                 result = .failure(failure)
             }
-            DispatchQueue.main.async { completion(result) }
+            DispatchQueue.main.async { [weak self] in
+                self?.unlockedWithTouchID = touchID
+                completion(result)
+            }
         }
     }
 
     /// The closure of §5.4, on the unlock queue. The KEK lookup does not
     /// prompt; the unwrap does, with `ctx`'s texts and no password button.
-    private static func unlock(_ session: Session, install: Data?, keyStore: KeyStore) throws {
+    /// Returns whether the KEK is in the Secure Enclave, so the unwrap
+    /// needed Touch ID.
+    private static func unlock(_ session: Session, install: Data?, keyStore: KeyStore) throws -> Bool {
         let ctx = LAContext()
         ctx.localizedFallbackTitle = ""
         ctx.localizedCancelTitle = L10n.unlockCancel
@@ -108,6 +120,7 @@ final class UnlockService {
             try keyStore.storeWrapped(install)
             log.notice("installed")
         }
+        return Enclave.isInSecureEnclave(kek)
     }
 
     // MARK: - The fingers hint (biometry.state)

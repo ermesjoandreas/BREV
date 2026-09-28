@@ -8,8 +8,9 @@
 //! launch guard ([`launch_check`], feature `launch-guard`), the two-step
 //! unlock and the idle deadline with their [`Timer`] ([`Clock`]), the
 //! length-hiding padding ([`padding`]), decrypted values that wipe
-//! themselves ([`Plaintext`], [`Text`]), the stack scrubs, and the zeroing
-//! global allocator (feature `zeroing-allocator`).
+//! themselves ([`Plaintext`], [`Text`]), the stack scrubs, the zeroing
+//! global allocator (feature `zeroing-allocator`), and the environment class
+//! of a platform's report ([`classify`]).
 //!
 //! What a store holds is the caller's: the file name, `application_id`,
 //! schema and schema version come in a [`VaultConfig`], and the rows are
@@ -33,6 +34,7 @@ mod dirlock;
 mod error;
 mod launch;
 pub mod padding;
+mod platform;
 mod store;
 mod text;
 
@@ -43,6 +45,9 @@ pub use crypto::{
 };
 pub use error::Error;
 pub use launch::launch_check;
+pub use platform::{
+    classify, failed_fields, EnvironmentClass, EnvironmentReport, KeyOrigin, Platform, ReportField,
+};
 pub use store::{check_path, DekSlot, Vault, VaultConfig};
 pub use text::{Text, CHUNK};
 
