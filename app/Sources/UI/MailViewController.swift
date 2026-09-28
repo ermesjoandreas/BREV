@@ -1,0 +1,297 @@
+// MailViewController.swift — the unlocked screen: contacts, threads, letters.
+//
+// Upholds CLAUDE.md §1.2, §1.10 and §3.2 (docs/PHASE2_DESIGN.md §7.2, §9).
+// A bar with Nytt brev and Lås (HumanButtons) above an NSSplitView with
+// three panes: contacts (SecureListView), the contact's threads, newest
+// first (SecureListView), and the selected thread's letters, oldest first
+// (LetterStackView). `start()` reads the contacts and selects the first,
+// then its newest thread, then that thread's letters. A 3-second timer in
+// the common run-loop modes (D-0052 in the shifted numbering) calls `sync()`
+// while unlocked, which moves the echo peers' letters; when letters
+// arrive, the thread and letter panes are read again (their old texts
+// wiped) and keep the selected thread by id. Every text read here is a
+// SecretText owned by a list or letter view; a new selection wipes what it
+// replaces, and `wipeAll()` (lock sequence §8.4 step 3) wipes everything and
+// stops the timer. The controller holds the Session weakly, never an
+// OpenText. Logs carry counts and error names only (§6.3 rule 7).
+
+import AppKit
+import os
+
+final class MailViewController: NSViewController, ContentHolder, MailActions, NSMenuItemValidation,
+                                 NSSplitViewDelegate {
+    private static let log = Logger(subsystem: "no.brev.app", category: "mail")
+    /// Seconds between two `sync()` calls (§9).
+    static let syncInterval: TimeInterval = 3
+
+    /// A human pressed Lås.
+    var onLock: () -> Void = {}
+    /// A human asked for a new letter to the selected contact (Nytt brev,
+    /// ⌘N). Set by the compose sheet's owner (WP8); while nil, Nytt brev is
+    /// disabled.
+    var onNewLetter: ((ContactItem) -> Void)? {
+        didSet { updateButtons() }
+    }
+
+    private weak var session: Session?
+    private var contacts: [ContactItem] = []
+    /// The selected contact's threads, newest first, as the list shows them.
+    private var threads: [ThreadItem] = []
+    private var syncTimer: Timer?
+
+    private let contactList = SecureListView(rowHeight: 32)
+    private let threadList = SecureListView(rowHeight: 48)
+    private let letters = LetterStackView()
+    private let letterScroll = NSScrollView()
+    private let split = NSSplitView()
+    private let noLetters = InterfaceText(L10n.mailNoThreads, width: 260)
+    private var newButton: HumanButton?
+    private var dividersPlaced = false
+
+    private let dates: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "nb_NO")
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+
+    init(session: Session) {
+        self.session = session
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    deinit {
+        syncTimer?.invalidate()
+    }
+
+    // MARK: - Views
+
+    override func loadView() {
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+
+        let new = HumanButton(title: L10n.mailNew, target: self, action: #selector(newLetter(_:)))
+        let lock = HumanButton(title: L10n.mailLock, target: self, action: #selector(lockPressed(_:)))
+        newButton = new
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let bar = NSStackView(views: [new, spacer, lock])
+        bar.orientation = .horizontal
+
+        split.isVertical = true
+        split.dividerStyle = .thin
+        split.delegate = self
+        split.addSubview(Self.scrollView(contactList, background: .controlBackgroundColor))
+        split.addSubview(Self.scrollView(threadList, background: .controlBackgroundColor))
+        split.addSubview(letterPane())
+
+        for v in [bar, split] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            bar.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
+            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            split.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 8),
+            split.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            split.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            split.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+        ])
+
+        contactList.onSelect = { [weak self] _ in self?.showThreads(keeping: nil) }
+        threadList.onSelect = { [weak self] _ in self?.showLetters(keepScroll: false) }
+        contactList.nextKeyView = threadList
+        threadList.nextKeyView = contactList
+        view = root
+        updateButtons()
+    }
+
+    /// The letters' scroll view, with "Ingen brev ennå" over it while no
+    /// thread is selected.
+    private func letterPane() -> NSView {
+        let pane = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 500))
+        Self.configure(letterScroll, letters, background: .textBackgroundColor)
+        letterScroll.frame = pane.bounds
+        letterScroll.autoresizingMask = [.width, .height]
+        pane.addSubview(letterScroll)
+        noLetters.translatesAutoresizingMaskIntoConstraints = false
+        pane.addSubview(noLetters)
+        NSLayoutConstraint.activate([
+            noLetters.centerXAnchor.constraint(equalTo: pane.centerXAnchor),
+            noLetters.centerYAnchor.constraint(equalTo: pane.centerYAnchor),
+        ])
+        return pane
+    }
+
+    private static func scrollView(_ document: NSView, background: NSColor) -> NSScrollView {
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 200, height: 500))
+        configure(scroll, document, background: background)
+        return scroll
+    }
+
+    private static func configure(_ scroll: NSScrollView, _ document: NSView, background: NSColor) {
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        scroll.backgroundColor = background
+        scroll.documentView = document
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        // Contacts about 200 pt, threads about 280 pt, letters the rest.
+        guard !dividersPlaced, split.bounds.width > 520 else { return }
+        dividersPlaced = true
+        split.setPosition(200, ofDividerAt: 0)
+        split.setPosition(200 + split.dividerThickness + 280, ofDividerAt: 1)
+    }
+
+    /// When the window resizes, only the letter pane changes width.
+    func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
+        view === splitView.subviews.last
+    }
+
+    // MARK: - Reading and showing
+
+    /// After unlock: contacts, the first contact's newest thread and its
+    /// letters, then the sync timer.
+    func start() {
+        let rows: [ContactItem]
+        do {
+            rows = try session?.contacts() ?? []
+        } catch {
+            Self.log.error("contacts failed: \(Self.name(error), privacy: .public)")
+            rows = []
+        }
+        contacts = rows
+        contactList.setRows(rows.map { SecureListView.Row(text: $0.name, meta: nil) },
+                            selected: rows.isEmpty ? nil : 0)
+        showThreads(keeping: nil)
+        syncTimer?.invalidate()
+        syncTimer = commonModeTimer(every: Self.syncInterval) { [weak self] in self?.syncNow() }
+        view.window?.makeFirstResponder(contactList)
+    }
+
+    /// Reads the selected contact's threads (the old subjects and letters
+    /// are wiped first) and selects `threadID` if it is still there,
+    /// otherwise the newest thread.
+    private func showThreads(keeping threadID: Data?) {
+        threads = []
+        threadList.clear()
+        letters.clear()
+        updateButtons()
+        guard let contact = selectedContact, let session else { return showLetters(keepScroll: false) }
+        do {
+            threads = Array(try session.threads(contact: contact.id).reversed())
+        } catch {
+            Self.log.error("threads failed: \(Self.name(error), privacy: .public)")
+        }
+        let kept = threadID.flatMap { id in threads.firstIndex { $0.id == id } }
+        threadList.setRows(threads.map { SecureListView.Row(text: $0.subject, meta: date($0.createdAt)) },
+                           selected: kept ?? (threads.isEmpty ? nil : 0))
+        showLetters(keepScroll: kept != nil)
+    }
+
+    /// Reads the selected thread's letters (the old bodies are wiped first).
+    /// `keepScroll` keeps the letter pane where it was (a reload of the same
+    /// thread); otherwise it shows the first letter.
+    private func showLetters(keepScroll: Bool) {
+        let origin = letterScroll.contentView.bounds.origin
+        letters.clear()
+        defer { noLetters.isHidden = !letters.isEmpty }
+        guard let i = threadList.selected, threads.indices.contains(i), let session else { return }
+        var shown: [LetterStackView.Letter] = []
+        do {
+            for m in try session.messages(thread: threads[i].id) {
+                let when = date(m.createdAt)
+                shown.append(LetterStackView.Letter(header: m.outgoing ? L10n.mailSent(when) : L10n.mailReceived(when),
+                                                    body: try session.body(message: m.id)))
+            }
+        } catch {
+            Self.log.error("letters failed: \(Self.name(error), privacy: .public)")
+            shown.forEach { $0.body.wipe() }
+            return
+        }
+        letters.show(shown)
+        letters.scroll(keepScroll ? origin : .zero)
+    }
+
+    private var selectedContact: ContactItem? {
+        contactList.selected.flatMap { contacts.indices.contains($0) ? contacts[$0] : nil }
+    }
+
+    private func date(_ seconds: Int64) -> String {
+        dates.string(from: Date(timeIntervalSince1970: TimeInterval(seconds)))
+    }
+
+    // MARK: - Sync (§9)
+
+    /// Moves the echo peers' letters. When some arrived, the thread and
+    /// letter panes are read again. A locked session stops the timer.
+    private func syncNow() {
+        guard let session else { return stopSync() }
+        do {
+            let arrived = try session.sync()
+            guard arrived > 0 else { return }
+            Self.log.notice("sync arrived=\(arrived, privacy: .public)")
+            let kept = threadList.selected.flatMap { threads.indices.contains($0) ? threads[$0].id : nil }
+            showThreads(keeping: kept)
+        } catch BrevError.Locked {
+            stopSync()
+        } catch {
+            Self.log.error("sync failed: \(Self.name(error), privacy: .public)")
+        }
+    }
+
+    private func stopSync() {
+        syncTimer?.invalidate()
+        syncTimer = nil
+    }
+
+    // MARK: - ContentHolder (lock sequence §8.4 step 3)
+
+    func wipeAll() {
+        stopSync()
+        contactList.clear()
+        threadList.clear()
+        letters.clear()
+        contacts = []
+        threads = []
+        noLetters.isHidden = false
+        updateButtons()
+    }
+
+    // MARK: - Actions (HumanButton: human input only; ⌘N from the menu)
+
+    @objc func newLetter(_ sender: Any?) {
+        guard let contact = selectedContact, let onNewLetter else { return }
+        onNewLetter(contact)
+    }
+
+    @objc private func lockPressed(_ sender: Any?) {
+        onLock()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(newLetter(_:)) { return canWriteNewLetter }
+        return true
+    }
+
+    private var canWriteNewLetter: Bool {
+        onNewLetter != nil && selectedContact != nil
+    }
+
+    private func updateButtons() {
+        newButton?.isEnabled = canWriteNewLetter
+    }
+
+    /// A BrevError's variant name; never an error's message.
+    private static func name(_ error: Error) -> String {
+        (error as? BrevError).map { "\($0)" } ?? "other"
+    }
+}

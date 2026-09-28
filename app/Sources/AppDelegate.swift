@@ -206,10 +206,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The unlocked screen. A placeholder with no content until WP7's
-    /// MailViewController replaces it.
+    /// The unlocked screen: contacts, threads and letters, and the sync
+    /// timer (docs/PHASE2_DESIGN.md §7.2). Nytt brev stays disabled until
+    /// the compose sheet (WP8) sets `onNewLetter`.
     private func showMail() {
-        present(NoticeViewController(L10n.mailNoThreads))
+        guard let session else { return }
+        let mail = MailViewController(session: session)
+        mail.onLock = { [weak self] in self?.lock.lockNow(nil) }
+        present(mail)
+        mail.start()
     }
 
     // MARK: - Reset (§5.5)

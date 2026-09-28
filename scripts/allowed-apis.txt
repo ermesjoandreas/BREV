@@ -16,3 +16,5 @@
 # The reason must not contain "|". test.sh also fails when a listed line no
 # longer exists, so review this file whenever a listed line changes.
 
+app/Sources/UI/OpaqueView.swift | the signature of the Services override that returns nil, so content views offer nothing to Services (CLAUDE.md §1.4; design §7.1); no pasteboard is touched | override func validRequestor(forSendType sendType: NSPasteboard.PasteboardType?,
+app/Sources/UI/OpaqueView.swift | the second line of the same Services override (returns nil) | returnType: NSPasteboard.PasteboardType?) -> Any? { nil }

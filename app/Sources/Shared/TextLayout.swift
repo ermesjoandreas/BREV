@@ -88,17 +88,36 @@ final class TextLayout {
     /// flipped view), with the first line's top at `top`.
     func draw(_ text: SecretText, lines range: Range<Int>, in ctx: CGContext, x: CGFloat, top: CGFloat) {
         let descent = CTFontGetDescent(font)
-        ctx.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         for i in range where i >= 0 && i < lines.count {
-            let l = lines[i]
-            guard l.length > 0 else { continue }
-            autoreleasepool {
-                let s = CFStringCreateWithCharactersNoCopy(nil, text.units + l.start, l.length, kCFAllocatorNull)!
-                let a = CFAttributedStringCreate(nil, s, attrs)!
-                ctx.textPosition = CGPoint(x: x, y: top + CGFloat(i + 1) * lineHeight - descent - 1)
-                CTLineDraw(CTLineCreateWithAttributedString(a), ctx)
-            }
+            drawLine(text, lines[i], in: ctx, x: x, baseline: top + CGFloat(i + 1) * lineHeight - descent - 1)
         }
+    }
+
+    /// Draws the one line `l` with its baseline at `baseline`, into a
+    /// context whose y grows downward. It need not be one of `lines`: list
+    /// rows draw `firstLine` and clip it (docs/PHASE2_DESIGN.md §7.2).
+    func drawLine(_ text: SecretText, _ l: LineRef, in ctx: CGContext, x: CGFloat, baseline: CGFloat) {
+        guard l.length > 0, l.length <= Self.maxLineUnits, l.start >= 0, l.start + l.length <= text.length
+        else { return }
+        ctx.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+        autoreleasepool {
+            let s = CFStringCreateWithCharactersNoCopy(nil, text.units + l.start, l.length, kCFAllocatorNull)!
+            let a = CFAttributedStringCreate(nil, s, attrs)!
+            ctx.textPosition = CGPoint(x: x, y: baseline)
+            CTLineDraw(CTLineCreateWithAttributedString(a), ctx)
+        }
+    }
+
+    /// The first line of `text` without wrapping: up to the first U+000A,
+    /// at most 448 units, never ending on a lead surrogate. What a list row
+    /// shows of a name or a subject.
+    static func firstLine(_ text: SecretText) -> LineRef {
+        let u = text.units
+        let n = min(text.length, maxLineUnits)
+        var end = 0
+        while end < n && u[end] != 0x0A { end += 1 }
+        if end == maxLineUnits, end < text.length, UTF16.isLeadSurrogate(u[end - 1]) { end -= 1 }
+        return LineRef(start: 0, length: end)
     }
 
     /// The caret's x before unit `index` on line `i`, from the line's start

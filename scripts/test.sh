@@ -4,7 +4,8 @@
 # every later step sees the current core. Then Rust formatting, clippy,
 # tests, the zeroize and allocator checks, the FFI surface and patch-marker
 # checks (macOS), the forbidden-API grep, the dependency audit, the Swift
-# heap-scan harness (macOS) and an Xcode compile check (macOS with xcodegen).
+# heap-scan harness (macOS), a compile check of the view host (macOS) and an
+# Xcode compile check (macOS with xcodegen).
 # Exits non-zero on the first failure.
 #
 # Usage: scripts/test.sh
@@ -278,6 +279,17 @@ if [[ "$DARWIN" == yes ]]; then
   done
 else
   echo "==> Swift harness skipped: not macOS ($(uname -s))"
+fi
+
+# The view host (tools/viewhost): Brev's mail window with fake letters, for
+# screenshots, AX dumps and its own checks. Compiled here so it keeps up
+# with app/Sources; never run here (it opens a window), never linked into
+# Brev.app.
+if [[ "$DARWIN" == yes ]]; then
+  echo "==> view host (tools/viewhost, compile only)"
+  "$REPO_ROOT/tools/viewhost/build.sh" >/dev/null
+else
+  echo "==> view host skipped: not macOS ($(uname -s))"
 fi
 
 # Compile check of the Swift app: the project xcodegen generated above, the

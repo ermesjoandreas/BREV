@@ -307,6 +307,34 @@ func caseUnits() {
     }
     check("TextLayout: an empty paragraph is an empty line", layout.lines.contains { $0.length == 0 && $0.start == wordsEnd + 1 })
 
+    // TextLayout.firstLine and drawLine: what a list row shows (§7.2)
+    func firstLength(_ s: String) -> Int { TextLayout.firstLine(secret(s)).length }
+    let head = TextLayout.firstLine(text)
+    check("TextLayout.firstLine: a long first paragraph gives 448 units from the start",
+          head.start == 0 && head.length == TextLayout.maxLineUnits)
+    check("TextLayout.firstLine: stops at the first line break", firstLength("Ekko\nSpeil") == 4)
+    check("TextLayout.firstLine: empty text and a leading line break give an empty line",
+          firstLength("") == 0 && firstLength("\nx") == 0)
+    check("TextLayout.firstLine: never ends on the lead surrogate of a pair",
+          firstLength(String(repeating: "x", count: 447) + "\u{1F600}") == 447)
+    let row = CGContext(data: nil, width: 200, height: 20, bitsPerComponent: 8, bytesPerRow: 0,
+                        space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+    func inked(_ draw: () -> Void) -> Int {
+        row.setFillColor(gray: 0, alpha: 1)
+        row.fill(CGRect(x: 0, y: 0, width: 200, height: 20))
+        row.setFillColor(gray: 1, alpha: 1)
+        draw()
+        let p = row.data!.assumingMemoryBound(to: UInt8.self)
+        return (0..<(row.bytesPerRow * row.height)).filter { p[$0] != 0 }.count
+    }
+    let name = secret("Ekko\nSpeil")
+    check("TextLayout.drawLine: draws the first line", inked {
+        layout.drawLine(name, TextLayout.firstLine(name), in: row, x: 2, baseline: 15)
+    } > 0)
+    check("TextLayout.drawLine: a line outside the text draws nothing", inked {
+        layout.drawLine(name, LineRef(start: 6, length: 8), in: row, x: 2, baseline: 15)
+    } == 0)
+
     // Enclave: ECIES wrap and unwrap with a software KEK
     caseEnclaveUnits()
 }

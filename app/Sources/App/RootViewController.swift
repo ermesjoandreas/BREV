@@ -47,8 +47,8 @@ final class RootViewController: NSViewController {
 }
 
 /// One short interface text in the middle of the window, never content:
-/// launch.error.unsafe, and a screen's title where its controller does not
-/// exist yet.
+/// launch.error.unsafe, and unlock.error.damaged when the folder, the
+/// instance lock or the keychain is unusable.
 final class NoticeViewController: NSViewController {
     private let text: String
 
