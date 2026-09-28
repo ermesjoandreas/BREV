@@ -45,7 +45,7 @@ still open for the human run.
 | V4 | – | – | deferred to human |
 | V5 | `$T/capture-probe --screencapture` on the onboarding window | `-x`, `-R` and `-V 3`: window excluded (the probe's backdrop shows); `-l12500`: exit 1, "could not create image from window"; control visible in every path | partial: no letter can be open without Touch ID; deferred to human |
 | V6 | `$T/capture-probe` (ScreenCaptureKit) on the onboarding window | window listed by `SCShareableContent` but excluded in all 8 paths: display filter, display excluding no apps, window filter with `includeChildWindows`, window filter stream, `captureImage(in:)`, `captureScreenshot(contentFilter:)`, `captureScreenshot(rect:)`, display stream; control visible | partial: no letter; deferred to human |
-| V7 | `$T/capture-probe --legacy` on the onboarding window | `CGWindowListCreateImage` (screen and window) and `CGDisplayCreateImage` (display and rect): window excluded. `CGDisplayStream`, `AVCaptureScreenInput` and `CGDisplayStream` through `dlsym` from the 26.0 build: the window shows, with its interface text (not content), as expected; it has no content panes yet | partial: no letter; deferred to human |
+| V7 | `$T/capture-probe --legacy` on the onboarding window | `CGWindowListCreateImage` (screen and window) and `CGDisplayCreateImage` (display and rect): window excluded. `CGDisplayStream`, `AVCaptureScreenInput` and `CGDisplayStream` through `dlsym` from the 26.0 build: the window shows, with its interface text (not content), as expected; it has no content panes yet (the probe as revised after the review marks these three INVALID: no pane to judge) | partial: no letter; deferred to human |
 | V8 | – | – | deferred to human |
 | V9 | `$T/windows Brev` on onboarding | the onboarding window: `kCGWindowSharingState=0`. Brev also owns 4 off-screen windows of 1512×33 at (0,0), the menu bar's size, with `kCGWindowSharingState=1`. Every regular app on this Mac has the same 4 (Finder, Terminal, Xcode, Mail and others checked). `windows` exits 1 | **fails as written** (partial run): WP12 or the owner must decide on these 4 windows. The compose-sheet and `ConfirmSheet` parts wait for the human run |
 | V10 | – | – | deferred to human |
@@ -99,6 +99,33 @@ Touch ID.
   layer alone (`--capturable`): the window shows in 18 of the 19 paths (the
   window-filter stream returned an empty frame) and every pane stays empty. The panes came from Brev's AX scroll areas and matched
   the view host's own rects.
+- `capture-probe` again after the WP4 review (ink judged by area, not by
+  share of the pane; INVALID when nothing is judged). The view host had
+  one-line letters, as VERIFY types them: one letter to Ekko and one to
+  Speil, subject and body one line each, and their echoes. Two sizes: the
+  default width (900 × 484, placed so that no old system dialog lies over a
+  pane) and a window that fills the screen (1512 × 905).
+  - Protected (as Brev): all 19 paths pass, with 0 pt² of ink in every pane,
+    at both sizes. In the full-screen window the panes were given with
+    `--pane` around the two old dialogs; with the AX panes, the dialogs
+    themselves count as ink in the paths that capture the screen.
+  - The layer alone (`--capturable`, default width): 19 of 19 pass; the
+    window is captured in 18.
+  - Negative control (`--capturable --unprotected`): all 19 paths report ink
+    in all three panes, at both sizes. Ink at the default width: contacts
+    4805, threads 1062, letters 2165 pt² (one glyph is 12).
+  - The probe from before the review, on the full-screen negative control:
+    the threads pane (0.48 % ink) passed in every path, and the letters pane
+    (0.26 %) passed in the window-level paths. Only the contacts pane's
+    selection fill made those paths report ink.
+  - A capturable window with text and no scroll area: every path that
+    captured it is INVALID, exit 2 (before the review: pass, exit 0).
+  - A view host that resized its window during the run: the run ends with
+    `panes-after-the-run INVALID`.
+- `TouchIDProbe.app --dry` for the two builds of V51's variants (scrub 0 and
+  128 KiB): PASS; each prints its `scrub=` depth. The disassembly of
+  `scrub_stack_deep` in the three linked probes reserves 64 KiB, nothing and
+  128 KiB of stack.
 - `padcheck` on the view host's three stores: pass (14, 9 and 6 sealed
   values). On a copy where one body was set to 300 bytes: `NOT PADDED:
   rowid 1 length 300`, FAIL.

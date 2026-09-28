@@ -44,9 +44,14 @@ targets:
           - $(inherited)
           - $(SRCROOT)/../../../app/Generated
           - $(SRCROOT)/../../../app/Tests
+        # The brev-core archive and the depth of its unlock scrub in KiB (the
+        # Info.plist key BrevScrubKiB). tools/verify/build.sh overrides both
+        # for V51's variants: 0 (scrub disabled) and 128.
+        BREV_CORE_ARCHIVE: $(SRCROOT)/../../../core/target/release/libbrev_core.a
+        BREV_SCRUB_KIB: "64"
         OTHER_LDFLAGS:
           - $(inherited)
-          - $(SRCROOT)/../../../core/target/release/libbrev_core.a
+          - $(BREV_CORE_ARCHIVE)
         ONLY_ACTIVE_ARCH: "YES"
         ENABLE_HARDENED_RUNTIME: "YES"
         ENABLE_APP_SANDBOX: "YES"

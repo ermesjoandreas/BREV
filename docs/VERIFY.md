@@ -105,7 +105,7 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 | V17 | No plaintext on disk | `strings -a` and a UTF-16LE grep over every file in the container and in Brev's per-user cache and temp folders: marker, `Ekko` and `Speil` absent; control: `SQLite format 3` found in `brev.db`. Run while unlocked, again after V44's quit, and again after V20's crash | A | – |
 | V18 | Padding | `$T/padcheck`: every sealed column length is nonce + bucket + tag in all three stores; control: it checked more than 0 columns in each store | A | – |
 | V19 | No plaintext in logs | `/usr/bin/log stream --level debug` for the whole run, and `/usr/bin/log show --info --debug` from the run's start afterwards (predicate `process == "Brev"`): marker absent (UTF-8 and UTF-16LE) in both; control: `lock reason=` lines present | A | – |
-| V20 | Crash report | `kill -SEGV` an unlocked Brev with a marker letter open; wait for the report of that kill (it is written a few seconds later, so the newest `Brev*.ips` right after the kill is an older one) and scan it: marker absent; control: the report names `SIGSEGV` and the killed PID | A | – |
+| V20 | Crash report | `kill -SEGV` an unlocked Brev with a marker letter open (start with a delay: Terminal in front locks Brev); wait for the report of that kill (it is written a few seconds later, so the newest `Brev*.ips` right after the kill is an older one) and scan it: marker absent; control: the report names `SIGSEGV` and the killed PID, and the V19 stream's last lock or unlock line before the kill is `unlocked` | A | – |
 | V21 | Spotlight | `mdfind BREV-SECRET-BODY`: no path outside this checkout (the repo's docs hold the marker; Brev's container is not indexed, and V17 covers it); control: indexing is enabled and `mdfind` finds `docs/VERIFY.md`. The binary links no CoreSpotlight and references no `CSSearchable…` or `NSUserActivity` class (donation through the API) | A | – |
 | V22 | Switching app locks | ⌘-Tab away: the lock screen; log `lock reason=resignActive` | H + A | per D-0060 (U4) |
 | V23 | Screen lock locks | ⌃⌘Q: `lock reason=screenLocked` | H + A | per D-0060 (U4) |
@@ -136,7 +136,7 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 | V48 | Unlock errors | wrong fingers until Touch ID locks out: `unlock.error.lockout`, never a password button. Then, as the last row of the run: add a fingerprint in System Settings: `unlock.error.fingers` with the reset button. This makes the test install unreadable, as designed, and also invalidates other apps' `.biometryCurrentSet` keys | H | per D-0060 (U4.3) |
 | V49 | Malloc scribbling in the real process | `ps -wwE` shows `MallocScribble=1` for Brev started with `open "$APP"`, from the Finder and from the Dock; `open --env MallocScribble=0 "$APP"` → a re-executed process with `MallocScribble=1`, or `launch.error.unsafe` | A + H launches | per D-0060 (M) |
 | V50 | Release has no Verify code | `nm` on the Release binary finds no `SelfScan` or `brev_scan` symbol; control: the same grep finds them in the Verify build | A | – |
-| V51 | Unlock stack residue | `TouchIDProbe.app --unlock` (built by `tools/verify/build.sh`, team-signed with Brev's bundle id and keychain group) with the final `brev-core`: the exact §5.4 closure (`UnlockService.unlock`, unchanged: KEK lookup, `SecKeyCreateDecryptedData` with ECIES, `brev.unlock`, in-place wipe), needles for the DEK, the ECDH output, the AES key and the IV: it prints PASS, i.e. 0 hits for the ECDH output, AES key and IV after the closure, 0 for everything after lock, at the scrub depth recorded for the unlock drop guard (design D-0035, D-0038 after the renumbering); control: while unlocked, the DEK needle finds Rust's copy, and each needle is found once when made on purpose. It uses Brev's own keychain names, so it runs only with Brev quit and not installed (run order step 2), and deletes what it made | H + A | per D-0060 (K) |
+| V51 | Unlock stack residue | `TouchIDProbe.app --unlock` (built by `tools/verify/build.sh`, team-signed with Brev's bundle id and keychain group) with the final `brev-core`: the exact §5.4 closure (`UnlockService.unlock`, unchanged: KEK lookup, `SecKeyCreateDecryptedData` with ECIES, `brev.unlock`, in-place wipe), needles for the DEK, the ECDH output, the AES key and the IV: it prints PASS, i.e. 0 hits for the ECDH output, AES key and IV after the closure, 0 for everything after lock, at the scrub depth recorded for the unlock drop guard (design D-0035, D-0038 after the renumbering); control: while unlocked, the DEK needle finds Rust's copy, and each needle is found once when made on purpose. Negative control (design §14.2 K): the same run with the build whose unlock scrub is disabled (`touchid-probe-scrub0`) prints `NEGATIVE CONTROL: residue …` and PASS for its own controls, so the scrub is what removes the residue; if it prints `NEGATIVE CONTROL EMPTY` instead, record that the PASS above does not show that the scrub works. If the shipped build fails, run the 128 KiB build (`touchid-probe-scrub128`); a change of depth goes to the owner (design §2.5). It uses Brev's own keychain names, so it runs only with Brev quit and not installed (run order step 2), and deletes what it made | H + A | per D-0060 (K) |
 | V52 | File substitution | copy the three stores in `$D` aside before V38; after the new onboarding, Brev quit, put the old stores back: the unlock fails with `unlock.error.damaged` (the new DEK does not open them), and nothing unlocks | H + A | – |
 
 ## Commands
@@ -166,14 +166,18 @@ screencapture -x "$R/v5.png"
 screencapture -x -V 3 "$R/v5.mov"
 screencapture -x -l <id> "$R/v5-window.png"                # fails: could not create image from window
 
-# V12
-osascript -e 'tell application "System Events" to get entire contents of window 1 of process "Brev"' > "$R/v12.txt"
+# V12 (a marker letter open; Brev in front when the delay ends)
+sleep 30; osascript -e 'tell application "System Events" to get entire contents of window 1 of process "Brev"' > "$R/v12.txt"
 grep -c "$M" "$R/v12.txt"                                  # 0
 grep -c 'Nytt brev' "$R/v12.txt"                           # > 0 (control)
 
-# V5 to V7 (a marker letter open; each run leaves only cuts of its own stage area in $R)
-sleep 30; for m in screencapture sck legacy; do "$T/capture-probe" --$m --out "$R/capture-$m" > "$R/capture-$m.txt"; done
-grep '^RESULT' "$R"/capture-*.txt                          # every line "pass"; exit 0 each. Look at the cuts too
+# V5 to V7 (a marker letter open; each run leaves only cuts of its own stage area in $R). When the delay
+# ends: Brev in front with the letter open, the pointer off its window, and no system dialog over it (the
+# probe counts both as ink).
+sleep 30; for m in screencapture sck legacy; do "$T/capture-probe" --$m --out "$R/capture-$m" > "$R/capture-$m.txt"; echo "$m exit=$?"; done
+grep '^RESULT' "$R"/capture-*.txt                          # every line "pass"; exit 0 each. Look at the cuts too.
+                                                           # INVALID (exit 2): that run judged nothing (Brev locked or not on its
+                                                           # mail window, no Accessibility for Terminal, a control not seen); run again
 
 # V9 (the compose sheet open; again with ConfirmSheet during V38)
 sleep 30; "$T/windows" Brev > "$R/v9.txt"                  # kCGWindowSharingState=0 on every line (see the row)
@@ -183,13 +187,16 @@ sleep 30; "$T/axdump" Brev > "$R/v11.txt"
 grep -c "$M" "$R/v11.txt"                                  # 0
 grep -c 'AXTitle = "Brev"' "$R/v11.txt"                    # > 0 (control)
 
-# V13: a list of $D before and after each press (size, mtime in ns, inode: a rename also counts)
-find "$D" -type f -exec stat -f '%N %z %Fm %i' {} + | sort > "$R/v13-before"
+# V13: a list of $D before and after each press (size, mtime in ns, inode: a rename also counts).
+# For Send: Brev in front, unlocked, the compose sheet open and the marker typed when the delay ends
+# (the list is taken after the delay, because an unlock rewrites biometry.state).
+sleep 30; find "$D" -type f -exec stat -f '%N %z %Fm %i' {} + | sort > "$R/v13-before"
 "$T/axdump" Brev --press '<button title>'                  # record the AXError it prints; no Touch ID prompt appears
 find "$D" -type f -exec stat -f '%N %z %Fm %i' {} + | sort | diff "$R/v13-before" -   # no output
 
-# V17
-hits "$M" "$C" "$CACHE_DIR" "$TEMP_DIR"                    # nothing (a missing TEMP_DIR is fine)
+# V17 (the run while unlocked: Brev in front, unlocked, a marker letter open when the delay ends;
+# the runs after V44's quit and V20's crash need no delay)
+sleep 30; hits "$M" "$C" "$CACHE_DIR" "$TEMP_DIR"          # nothing (a missing TEMP_DIR is fine)
 hits Ekko "$C" "$CACHE_DIR" "$TEMP_DIR"                    # nothing
 hits Speil "$C" "$CACHE_DIR" "$TEMP_DIR"                   # nothing
 strings -a "$D/brev.db" | grep -c 'SQLite format 3'        # 1 (control)
@@ -204,9 +211,9 @@ head -1 "$R/stream.log"                                    # in the first termin
 hits "$M" "$R/stream.log" "$R/show.log"                    # nothing
 grep -c 'lock reason=' "$R/stream.log"                     # > 0 (control)
 
-# V20 (unlocked, a marker letter open)
-PID="$(pgrep -x Brev)"; touch "$R/v20-mark"
-kill -SEGV "$PID"
+# V20 (Brev in front, unlocked, a marker letter open when the delay ends)
+sleep 30; PID="$(pgrep -x Brev)"; touch "$R/v20-mark"; kill -SEGV "$PID"
+grep -E 'lock reason=|\] unlocked' "$R/stream.log" | tail -1   # ends in "] unlocked" (control: Brev was unlocked when it was killed)
 for i in $(seq 60); do IPS="$(find ~/Library/Logs/DiagnosticReports -name 'Brev*.ips' -newer "$R/v20-mark" | head -1)"; [ -n "$IPS" ] && break; sleep 1; done
 echo "$IPS"                                                # one path (none after 60 s fails the row)
 hits "$M" "$IPS"                                           # nothing
@@ -233,9 +240,8 @@ open -n "$APP"                                             # the new instance ex
 pgrep -x Brev                                              # one PID
 find "$D" -type f -exec stat -f '%N %z %m %Sp' {} + | sort | diff "$R/v29-before" -   # no output
 
-# V30
-pgrep -x Brev
-ioreg -l -w 0 | grep kCGSSessionSecureInputPID             # that PID only while a compose field has focus
+# V30 (Brev in front when the delay ends: once with a compose field focused, once unlocked with no field focused)
+sleep 30; pgrep -x Brev; ioreg -l -w 0 | grep kCGSSessionSecureInputPID   # that PID only in the run with a field focused
 
 # V31 (Input Monitoring granted to Terminal; type the marker in compose within the 60 s, then in TextEdit)
 "$T/keylisten" 60 > "$R/v31.txt"                           # no "KL" line while typing in Brev; "KL tap … uniLen=1" in TextEdit
@@ -265,10 +271,14 @@ open --env MallocScribble=0 "$APP"                         # after quitting; the
 nm "$APP/Contents/MacOS/Brev" | grep -Eci 'selfscan|brev_scan'           # 0
 nm "$VAPP/Contents/MacOS/Brev" | grep -Eci 'selfscan|brev_scan'         # > 0 (control)
 
-# V51 (Brev quit and not installed: run order step 2)
-PROBE="$T/touchid-probe/Build/Products/Release/TouchIDProbe.app"
+# V51 (Brev quit and not installed: run order step 2). Each --unlock asks for Touch ID once.
+PROBE="$T/touchid-probe/Build/Products/Release/TouchIDProbe.app"             # brev-core as shipped: scrub=64 KiB
+PROBE0="$T/touchid-probe-scrub0/Build/Products/Release/TouchIDProbe.app"     # the unlock's deep scrub disabled
+PROBE128="$T/touchid-probe-scrub128/Build/Products/Release/TouchIDProbe.app" # the scrub at 128 KiB
 open -W --stdout "$R/v51-dry.txt" "$PROBE" --args --dry  # no prompt; PASS (checks the setup)
 open -W --stdout "$R/v51.txt" "$PROBE" --args --unlock   # exactly one Touch ID prompt, no password button; PASS
+open -W --stdout "$R/v51-scrub0.txt" "$PROBE0" --args --unlock      # NEGATIVE CONTROL: residue …; PASS (record EMPTY if it says so)
+open -W --stdout "$R/v51-scrub128.txt" "$PROBE128" --args --unlock  # only if v51.txt says FAIL
 ```
 
 ## Tools
@@ -276,14 +286,14 @@ open -W --stdout "$R/v51.txt" "$PROBE" --args --unlock   # exactly one Touch ID 
 | Tool | What it does | Rows |
 |---|---|---|
 | `tools/verify/build.sh` | builds the tools below into `$T` (`core/target/verify`) and the Verify build of Brev, and prints `T=` and `VAPP=`; `--tools` skips the Verify build; `--check` only type-checks (scripts/test.sh runs it) | V1, V2, V39, V50 |
-| `$T/capture-probe` | sets a stage (a green backdrop right behind Brev's largest window, a cyan control window with text beside it), captures through every path, saves only cuts of that stage, and judges each path: control visible, window excluded, or ink in the content panes (Brev's AX scroll areas, or `--pane`); default ScreenCaptureKit, `--legacy` CoreGraphics, `CGDisplayStream` and `AVCaptureScreenInput` (built for 14.0), `--screencapture` the `screencapture` tool | V5, V6, V7 |
+| `$T/capture-probe` | sets a stage (a green backdrop right behind Brev's largest window, a cyan control window with text beside it), captures through every path, saves only cuts of that stage (to `--out`, by default a new private folder under `$TMPDIR`), and judges each path: control visible, window excluded, or ink in the content panes (Brev's AX scroll areas, so Terminal needs Accessibility; or `--pane`). A pane shows content when its ink covers one glyph's area, so one line of text counts at any window size. INVALID (exit 2) when a path judged nothing: the window captured but no pane known, the panes changed during the run (a lock), or a window-level capture empty while the same method does not show the control window either. Default ScreenCaptureKit, `--legacy` CoreGraphics, `CGDisplayStream` and `AVCaptureScreenInput` (built for 14.0), `--screencapture` the `screencapture` tool; `--selftest` checks the verdict rules on drawn panes (scripts/test.sh) | V5, V6, V7 |
 | `$T/capture-probe-26` | one `CGDisplayStream` frame through `dlsym`, built for 26.0; `capture-probe --legacy` runs it | V7 |
 | `$T/windows` | lists an app's windows with id, level, `kCGWindowSharingState`, on screen or not | V5, V9 |
 | `$T/axdump` | dumps every AX attribute and parameterized attribute (the read-only ones called; never `AXReplaceRangeWithText`); `--press` sends `AXPress` and prints the `AXError` it returns; `--menus`, `--hit` | V11, V13 |
 | `$T/poster` | posts synthetic keys (`key`) and clicks (`click`) in every variant of V32; the session and HID taps and `IOHIDPostEvent` need `--global` and post only while the target is in front | V32, V33 |
 | `$T/keylisten` | listen-only event tap + IOHIDManager; prints only whether a key value was seen | V31 |
 | `$T/padcheck` | checks every sealed column length in the three stores, read-only | V18 |
-| `TouchIDProbe.app` (`$T/touchid-probe/Build/Products/Release/`) | runs Brev's unlock closure (`UnlockService`) with a real Enclave KEK and scans for the DEK and ECIES needles; `--dry` stops before the prompt | V51 |
+| `TouchIDProbe.app` (`$T/touchid-probe/Build/Products/Release/`) | runs Brev's unlock closure (`UnlockService`) with a real Enclave KEK and scans for the DEK and ECIES needles; `--dry` stops before the prompt. Also built against a copy of brev-core with the unlock's deep scrub disabled (`$T/touchid-probe-scrub0/…`, the negative control) and at 128 KiB (`$T/touchid-probe-scrub128/…`); each prints its `scrub=` depth | V51 |
 | `$T/InputLab.app`, `tools/verify/spikes/` | the GUI-spike lab and the spikes' sources (design §14.2); the rogue-Brev and anchor probes were dropped with D-0035 | – |
 
 ## Coverage
@@ -362,7 +372,9 @@ New mechanisms in the design:
    *Avbryt*, V43, V48's lockout part.
 4. Unlocked, with marker letters to Ekko and Speil: V42, then the capture,
    accessibility (V13 on *Send* and *Lås opp med Touch ID*), input,
-   pasteboard, disk, log and lock rows, V46, V47, and V44 last.
+   pasteboard, disk, log and lock rows, V46, V47, and V44 last. Grant
+   Terminal Accessibility before the capture rows: `capture-probe` finds
+   Brev's panes through it.
 5. With Brev quit after V44's relaunch: V17 and V41 again, so that what the
    lock, discard and quit paths wrote is scanned. Then V39 on the Verify
    build.
@@ -433,3 +445,12 @@ machine-run part (WP4).
   (control visible; window excluded or content panes without ink), with a
   negative control run in `docs/VERIFY-RESULTS.md`. Every A part that needs
   Brev unlocked starts with a delay, because Terminal in front locks Brev.
+- WP4 review: `capture-probe` judges a pane by the area of its ink (one
+  glyph), not by its share of the pane, which let one line of text pass in
+  a large window; a captured window with no known pane, panes that change
+  during the run, and an empty window-level capture without its control are
+  INVALID instead of pass. Its negative control was run again with one-line
+  letters at the default width and in a window that fills the screen
+  (`docs/VERIFY-RESULTS.md`). V51 gets K's two other depths as separate
+  builds (`build.sh`): the negative control with the scrub disabled, and
+  128 KiB for a failure at 64 KiB.

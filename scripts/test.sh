@@ -6,8 +6,8 @@
 # checks (macOS), the forbidden-API grep, the check that AVFoundation,
 # CoreMedia and CoreVideo stay in the protected layer, the dependency audit,
 # the Swift heap-scan harness (macOS), a compile check of the view host
-# (macOS), a type-check of the verification tools (macOS) and an Xcode
-# compile check (macOS with xcodegen).
+# (macOS), a type-check of the verification tools and capture-probe's
+# self-test (macOS) and an Xcode compile check (macOS with xcodegen).
 # Exits non-zero on the first failure.
 #
 # Usage: scripts/test.sh
@@ -321,6 +321,16 @@ fi
 if [[ "$DARWIN" == yes ]]; then
   echo "==> verification tools (tools/verify, type-check only)"
   "$REPO_ROOT/tools/verify/build.sh" --check
+  # capture-probe's verdict rules (V5 to V7): one line of letter text in a
+  # pane counts as content at any window size, a captured window with no
+  # known pane or an empty window image without its control is INVALID, and
+  # the cuts never default to the current directory. Drawn panes only: no
+  # window, no capture, no permission.
+  echo "==> capture-probe --selftest"
+  mkdir -p "$TARGET_DIR/verify-selftest"
+  xcrun swiftc -suppress-warnings -swift-version 5 -target "$ARCH-apple-macos14.0" \
+    "$REPO_ROOT/tools/verify/capture-probe.swift" -o "$TARGET_DIR/verify-selftest/capture-probe"
+  "$TARGET_DIR/verify-selftest/capture-probe" --selftest
 else
   echo "==> verification tools skipped: not macOS ($(uname -s))"
 fi

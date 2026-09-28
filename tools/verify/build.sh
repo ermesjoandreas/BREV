@@ -13,6 +13,10 @@
 #   InputLab.app                      the input spike's lab (design §14.2 U2)
 #   TouchIDProbe.app                  V51 (Brev's unlock closure, needles);
 #                                     team-signed with Brev's bundle id
+#   TouchIDProbe.app, scrub 0 and 128 V51's negative control and next depth
+#                                     (design §14.2 K): brev-core copied and
+#                                     built with the unlock's deep scrub
+#                                     disabled and at 128 KiB
 #   Brev.app, configuration Verify    V1, V2, V39, V50 ($VAPP)
 #
 # Usage: tools/verify/build.sh [--tools | --check] [output dir]
@@ -20,8 +24,9 @@
 #              first, as scripts/build.sh does
 #   --tools    everything but the Verify build of Brev (needs the archive
 #              and bindings from scripts/gen-bindings.sh)
-#   --check    type-check every tool's sources, build nothing; what
-#              scripts/test.sh runs, so the tools keep up with app/Sources
+#   --check    type-check every tool's sources and find the one line the
+#              scrub variants change, build nothing; what scripts/test.sh
+#              runs, so the tools keep up with app/Sources and core/
 # The output folder defaults to core/target/verify. At the end it prints
 #   T=<the tools' folder>  and  VAPP=<the Verify Brev.app>
 # which docs/VERIFY.md's setup block uses. macOS only.
@@ -38,7 +43,7 @@ for arg in "$@"; do
   case "$arg" in
     --tools) MODE=tools ;;
     --check) MODE=check ;;
-    -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "error: unknown argument '$arg' (accepted: --tools, --check, an output folder)" >&2; exit 2 ;;
     *) OUT="$arg" ;;
   esac
@@ -71,8 +76,15 @@ mkdir -p "$OUT"
 PROBE_SOURCES=("$HERE/touchid-probe/main.swift" "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/Keys/*.swift
                "$REPO_ROOT/app/Sources/App/L10n.swift" "$REPO_ROOT/app/Tests/ecies_needles.swift" "$BINDINGS")
 LAB="$HERE/spikes/input/src"
+# The one line of scrub_stack_deep that V51's variants change (the depth).
+CRYPTO="$REPO_ROOT/core/brev-core/src/crypto.rs"
+SCRUB_LINE='let mut buf = [0xA5u8; 64 * 1024];'
 
 if [[ "$MODE" == check ]]; then
+  if [[ "$(grep -cF "$SCRUB_LINE" "$CRYPTO")" != 1 ]]; then
+    echo "error: $CRYPTO no longer has exactly one '$SCRUB_LINE' (scrub_stack_deep); update V51's scrub variants in tools/verify/build.sh" >&2
+    exit 1
+  fi
   # One swiftc per tool, in parallel; each prints its own errors.
   pids=()
   for t in windows axdump keylisten padcheck; do
@@ -148,6 +160,32 @@ xcodebuild -project "$HERE/touchid-probe/TouchIDProbe.xcodeproj" -allowProvision
 PROBE="$OUT/touchid-probe/Build/Products/Release/TouchIDProbe.app"
 [[ -d "$PROBE" ]] || { echo "error: $PROBE is missing" >&2; exit 1; }
 
+# V51's variants (design §14.2 K): the same probe linked against brev-core
+# with the unlock's deep scrub at 0 KiB (disabled: the negative control) and
+# at 128 KiB. Built from a copy of core/ with only that depth changed, in its
+# own target folder: core/ and the archive Brev links stay untouched.
+SCRUB_CORE="$OUT/scrub-core"
+mkdir -p "$SCRUB_CORE"
+rsync -a --delete --exclude /target "$REPO_ROOT/core/" "$SCRUB_CORE/src/"
+PROBES=("$PROBE")
+for kib in 0 128; do
+  echo "==> TouchIDProbe.app with the unlock's deep scrub at $kib KiB"
+  sed "s/\[0xA5u8; 64 \* 1024\]/[0xA5u8; $kib * 1024]/" "$CRYPTO" > "$SCRUB_CORE/src/brev-core/src/crypto.rs"
+  if [[ "$(grep -cF "let mut buf = [0xA5u8; $kib * 1024];" "$SCRUB_CORE/src/brev-core/src/crypto.rs")" != 1 ]]; then
+    echo "error: the scrub depth in the copy of crypto.rs was not changed to $kib KiB" >&2
+    exit 1
+  fi
+  MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --manifest-path "$SCRUB_CORE/src/Cargo.toml" --target-dir "$SCRUB_CORE/target" \
+    --release -p brev-core --quiet
+  cp "$SCRUB_CORE/target/release/libbrev_core.a" "$SCRUB_CORE/libbrev_core-scrub$kib.a"
+  xcodebuild -project "$HERE/touchid-probe/TouchIDProbe.xcodeproj" -allowProvisioningUpdates -scheme TouchIDProbe \
+    -configuration Release -destination "platform=macOS,arch=$ARCH" -derivedDataPath "$OUT/touchid-probe-scrub$kib" \
+    ONLY_ACTIVE_ARCH=YES BREV_CORE_ARCHIVE="$SCRUB_CORE/libbrev_core-scrub$kib.a" BREV_SCRUB_KIB="$kib" build -quiet
+  P="$OUT/touchid-probe-scrub$kib/Build/Products/Release/TouchIDProbe.app"
+  [[ "$(plutil -extract BrevScrubKiB raw "$P/Contents/Info.plist")" == "$kib" ]] || { echo "error: $P does not say $kib KiB" >&2; exit 1; }
+  PROBES+=("$P")
+done
+
 VAPP=""
 if [[ "$MODE" == all ]]; then
   # Release plus the self-scan (app/project.yml, configuration Verify).
@@ -159,7 +197,7 @@ if [[ "$MODE" == all ]]; then
 fi
 
 echo
-echo "TouchIDProbe: $PROBE"
+printf 'TouchIDProbe: %s\n' "${PROBES[@]}"
 echo "InputLab:     $APP"
 echo "T=$OUT"
 [[ -n "$VAPP" ]] && echo "VAPP=$VAPP"

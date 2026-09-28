@@ -35,6 +35,15 @@
 // V51 passes when --unlock prints PASS: after the closure only Rust's copy
 // of the DEK is found (1 hit, the positive control while unlocked), no ECDH
 // output, AES key or IV, and after lock nothing.
+//
+// Design §14.2 K runs the closure with brev-core's unlock scrub at 64 KiB
+// (as shipped), at 128 KiB and disabled. build.sh builds one probe per
+// depth; the Info.plist key BrevScrubKiB says which. The build with the
+// scrub disabled is the negative control: its residue checks print "info"
+// lines instead of failing, and it ends with "NEGATIVE CONTROL: residue …"
+// (the scrub is what removes it) or "NEGATIVE CONTROL EMPTY" (nothing is left
+// even without the scrub, so the shipped build's PASS does not show that the
+// scrub works).
 
 import CryptoKit
 import Foundation
@@ -49,6 +58,14 @@ func check(_ what: String, _ ok: Bool, _ detail: @autoclosure () -> String = "")
     let d = ok ? "" : detail()
     print((ok ? "ok   " : "FAIL ") + what + (d.isEmpty ? "" : "  [\(d)]"))
     if !ok { failures += 1 }
+}
+
+/// A check on what the unlock leaves behind; in the build with the scrub
+/// disabled, only a count of it.
+func residueCheck(_ what: String, _ ok: Bool, _ detail: String) {
+    guard negativeControl else { return check(what, ok, detail) }
+    print("info " + what + (ok ? "" : ": RESIDUE") + "  [\(detail)]")
+    if !ok { residue += 1 }
 }
 
 func needleHits(_ r: brev_scan_result, _ i: Int) -> UInt64 {
@@ -104,7 +121,16 @@ guard unlocking || args.contains("--dry") else {
     print("usage: TouchIDProbe --dry | --unlock   (see the header of tools/verify/touchid-probe/main.swift)")
     exit(2)
 }
-print("touchid-probe \(unlocking ? "--unlock" : "--dry") pid=\(getpid()) MallocScribble=\(getenv("MallocScribble").map { String(cString: $0) } ?? "unset")")
+/// The depth of the deep scrub at the end of Brev.unlock in the brev-core
+/// this build links, in KiB (64 as shipped; 0 and 128 are V51's variants).
+guard let scrubKiB = (Bundle.main.object(forInfoDictionaryKey: "BrevScrubKiB") as? String).flatMap({ Int($0) }) else {
+    print("FAIL the build does not say its scrub depth (Info.plist BrevScrubKiB)")
+    exit(2)
+}
+/// With the scrub disabled, residue is what the build should show: counted, not failed.
+let negativeControl = scrubKiB == 0
+var residue = 0
+print("touchid-probe \(unlocking ? "--unlock" : "--dry") pid=\(getpid()) scrub=\(scrubKiB) KiB\(negativeControl ? " (disabled: the negative control)" : "") MallocScribble=\(getenv("MallocScribble").map { String(cString: $0) } ?? "unset")")
 guard getenv("MallocScribble").map({ String(cString: $0) }) == "1" else {
     print("FAIL MallocScribble=1 is not in effect (launch with open, as Brev is launched)")
     exit(2)
@@ -140,6 +166,10 @@ func cleanup() {
 
 func finish() -> Never {
     cleanup()
+    if negativeControl && unlocking && failures == 0 {
+        print(residue > 0 ? "NEGATIVE CONTROL: residue without the scrub in \(residue) check(s); the scrub is what removes it"
+                          : "NEGATIVE CONTROL EMPTY: nothing is left even without the scrub; a PASS at 64 KiB does not show that the scrub works")
+    }
     print(failures == 0 ? "PASS" : "FAIL: \(failures) check(s)")
     exit(failures == 0 ? 0 : 1)
 }
@@ -205,16 +235,17 @@ func afterUnlock(_ result: Result<Void, UnlockFailure>) -> Never {
     switch result {
     case .success:
         let h = scan()
-        check("while unlocked: the DEK is in Rust's box only (positive control)", h[0] == 1 && !session.brev.isLocked(), show(h))
+        check("while unlocked: the DEK is in Rust's box (positive control)", h[0] >= 1 && !session.brev.isLocked(), show(h))
+        residueCheck("while unlocked: no copy of the DEK besides Rust's box", h[0] == 1, show(h))
         for i in 1..<names.count {
-            check("after the unlock closure: no \(names[i])", h[i] == 0, show(h))
+            residueCheck("after the unlock closure: no \(names[i])", h[i] == 0, show(h))
         }
     case .failure(let f):
         check("the unlock (Touch ID) succeeded", false, "\(f.rawValue)")
     }
     session.brev.lock()
     let h = scan()
-    check("after lock: no DEK and no ECIES secret anywhere", h.allSatisfy { $0 == 0 }, show(h))
+    residueCheck("after lock: no DEK and no ECIES secret anywhere", h.allSatisfy { $0 == 0 }, show(h))
     for i in 0..<names.count {
         let b = materialise(i)
         let c = scan()

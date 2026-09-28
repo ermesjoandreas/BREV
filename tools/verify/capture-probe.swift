@@ -9,15 +9,27 @@
 // It sets a stage around the target app's largest window: a green backdrop
 // right behind that window and a cyan control window with plain AppKit text
 // beside it, both capturable. Every capture is cut down to that area; only
-// the cut is saved (<out>/<path>.png), never a whole screen. Per path it
-// prints the control (it must be visible, with its text), each target window
-// (excluded = the backdrop shows through), and the ink in each content pane:
-// the pixels that differ from the pane's most common colour, which is where
-// letter text would be. Panes are the target's AX scroll areas (no prompt; if
-// Terminal is not trusted for Accessibility, give them with --pane).
+// the cut is saved (<out>/<path>.png). Whole screens (screencapture's files)
+// exist only in a private temporary folder while they are cut, which is
+// removed on every exit, the watchdog's too. Per path it prints the control
+// (it must be visible, with its text), each target window (excluded = the
+// backdrop shows through), and the ink in each content pane: the pixels that
+// differ from the pane's most common colour, which is where letter text
+// would be. A pane shows content when its ink covers at least
+// Ink.minArea square points, whatever the pane's size: one short word at
+// Brev's 13 pt has several times that. Panes are the target's AX scroll
+// areas (no prompt; if Terminal is not trusted for Accessibility, give them
+// with --pane); those are read again after the last capture, and a change
+// (Brev locked, say) makes the run INVALID. A window-level capture (window
+// filter, -l, one window's CGWindowListCreateImage) is also taken of the
+// control window: an empty result for the target counts only if the same
+// method shows the control. Where the control has to lie over the window's
+// right edge (no room beside it), panes are judged left of it. Some paths
+// draw the pointer, so a pointer over a pane is noted.
 //
 // usage: capture-probe [--legacy | --screencapture] [--app <name> | --pid <n>]
 //                      [--out <dir>] [--pane <name>=<x,y,w,h>]... [--hold <s>]
+//        capture-probe --selftest
 //   (default)        ScreenCaptureKit (V6): display filter, window filter with
 //                    includeChildWindows, captureImage(in:) (15.2),
 //                    captureScreenshot(contentFilter:) and (rect:) (26), and one
@@ -28,15 +40,21 @@
 //                    from capture-probe-26 (built for macOS 26.0)
 //   --screencapture  V5: screencapture -x, -R, -l<id> per window, -V 3
 //   --app <name>     the target's name (default Brev); --pid picks one process
-//   --out <dir>      where the cuts go (default ./capture-probe-out)
+//   --out <dir>      where the cuts go (made 0700 if new; default a new 0700
+//                    folder under $TMPDIR, never the current directory)
 //   --pane n=r       a pane rect in global points, origin top left (repeatable)
 //   --hold <s>       seconds to wait after the stage is up (default 1)
+//   --selftest       checks the verdict rules on drawn panes: no window, no
+//                    capture, no permission (scripts/test.sh runs it)
 // Rects are global points with the origin at the top left of the main display.
 //
-// Exit: 0 every path passed (no ink in any pane, whether the window was
-// excluded or captured); 1 a pane showed ink (content may be visible: look at the cut);
-// 2 a control failed (that path proves nothing); 3 not runnable (no Screen
-// Recording access, no target). It never asks for a permission.
+// Exit: 0 every path passed (the window excluded, or captured with no ink in
+// any pane); 1 a pane showed ink (content may be visible: look at the cut);
+// 2 INVALID, a path proved nothing: a control failed, the window was captured
+// but no pane is known (Brev not on its mail window, or no AX trust and no
+// --pane), the panes changed during the run, or the display is not listed;
+// 3 not runnable (no Screen Recording access, no target). It never asks for a
+// permission.
 
 import AppKit
 import AVFoundation
@@ -47,6 +65,29 @@ import UniformTypeIdentifiers
 
 setvbuf(stdout, nil, _IOLBF, 0)
 DispatchQueue.global().asyncAfter(deadline: .now() + 180) { print("WATCHDOG: 180 s, exiting"); exit(3) }
+
+/// A new folder under $TMPDIR that only this user can open (mkdtemp: 0700).
+func privateTempDir(_ prefix: String) -> URL? {
+    var template = Array((NSTemporaryDirectory() + prefix + "-XXXXXX").utf8CString)
+    return template.withUnsafeMutableBufferPointer { b in
+        mkdtemp(b.baseAddress!).map { URL(fileURLWithPath: String(cString: $0), isDirectory: true) }
+    }
+}
+
+/// Where the cuts go: `given`, or a new private folder. Never a default in
+/// the current directory, which may be a checkout that a later commit sweeps
+/// up with the cuts in it.
+func cutsFolder(_ given: String?) -> URL? {
+    guard let given else { return privateTempDir("capture-probe") }
+    let url = URL(fileURLWithPath: given, isDirectory: true)
+    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    return url
+}
+
+/// Whole screens and the dlsym tool's file, only while they are cut. Removed
+/// on every exit through exit(), the watchdog's included.
+let scratch = privateTempDir("capture-probe-tmp")
+atexit { if let scratch { try? FileManager.default.removeItem(at: scratch) } }
 
 let args = Array(CommandLine.arguments.dropFirst())
 func value(_ flag: String) -> String? {
@@ -61,9 +102,10 @@ func rect(_ s: String) -> CGRect? {
 }
 func text(_ r: CGRect) -> String { "\(Int(r.minX)),\(Int(r.minY)),\(Int(r.width)),\(Int(r.height))" }
 
+if args.contains("--selftest") { exit(selftest() ? 0 : 1) }
+
 let mode = args.contains("--legacy") ? "legacy" : args.contains("--screencapture") ? "screencapture" : "sck"
 let appName = value("--app") ?? "Brev"
-let outDir = URL(fileURLWithPath: value("--out") ?? "capture-probe-out", isDirectory: true)
 let hold = value("--hold").flatMap(Double.init) ?? 1
 
 _ = CGMainDisplayID()   // connect to the window server before any ScreenCaptureKit call
@@ -71,7 +113,10 @@ guard CGPreflightScreenCaptureAccess() else {
     print("no Screen Recording access for this process (its responsible app): not runnable, nothing requested")
     exit(3)
 }
-try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+guard let outDir = cutsFolder(value("--out")), let tmpDir = scratch else {
+    print("cannot make a folder for the cuts: not runnable")
+    exit(3)
+}
 
 // MARK: - The target
 
@@ -129,23 +174,32 @@ func scrollAreas(_ e: AXUIElement, _ depth: Int, _ out: inout [CGRect]) {
     for k in (axAttr(e, kAXChildrenAttribute) as? [AXUIElement]) ?? [] { scrollAreas(k, depth + 1, &out) }
 }
 
+/// The target's AX scroll areas now; nil if this process is not trusted for
+/// Accessibility (asking would prompt, so it never asks).
+func axPanes() -> [(String, CGRect)]? {
+    guard AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary) else { return nil }
+    let app = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(app, 2)
+    var found: [CGRect] = []
+    for w in (axAttr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? [] { scrollAreas(w, 0, &found) }
+    return found.enumerated().map { ("pane\($0.offset + 1)", $0.element) }
+}
+
 var panes: [(String, CGRect)] = values("--pane").compactMap { kv in
     let p = kv.split(separator: "=", maxSplits: 1)
     guard p.count == 2, let r = rect(String(p[1])) else { return nil }
     return (String(p[0]), r)
 }
-if panes.isEmpty {
-    if AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary) {
-        let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 2)
-        var found: [CGRect] = []
-        for w in (axAttr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? [] { scrollAreas(w, 0, &found) }
-        panes = found.enumerated().map { ("pane\($0.offset + 1)", $0.element) }
+let panesFromAX = panes.isEmpty
+if panesFromAX {
+    if let found = axPanes() {
+        panes = found
         print("   panes from AX: \(panes.isEmpty ? "none" : panes.map { "\($0.0)=\(text($0.1))" }.joined(separator: " "))")
     } else {
         print("   not trusted for Accessibility: no panes found (none requested); give them with --pane")
     }
 }
+if panes.isEmpty { print("   no content pane is known: a path that captures the window proves nothing (INVALID)") }
 
 // MARK: - The stage: a backdrop behind the target, a control beside it
 
@@ -206,6 +260,11 @@ do {   // is the backdrop right behind the target's window?
     let i = front.firstIndex(of: main.id), j = front.firstIndex(of: CGWindowID(backdrop.windowNumber))
     print("   backdrop right behind window \(main.id): \(i != nil && j == i! + 1 ? "yes" : "NO (window list order \(i ?? -1), \(j ?? -1)): an excluded window may not show green")")
 }
+// Some paths draw the pointer; over a pane it counts as ink.
+let pointerNote: String? = CGEvent(source: nil).flatMap { e in
+    panes.first { $0.1.contains(e.location) }.map { "NOTE the pointer was over \($0.0) at the start: some paths draw it, and it counts as ink there; move it off the window and run again if that pane shows ink" }
+}
+if let pointerNote { print("   \(pointerNote)") }
 
 // MARK: - Pixels
 
@@ -223,6 +282,19 @@ struct Stats { var n = 0, green = 0, cyan = 0, black = 0, clear = 0, ink = 0; va
     func pc(_ k: Int) -> Double { 100 * Double(k) / Double(max(n, 1)) }
     var line: String { String(format: "ink=%.2f%% G=%.1f%% C=%.1f%% K=%.1f%% clear=%.1f%% mode=(%d,%d,%d) px=%d",
                               pc(ink), pc(green), pc(cyan), pc(black), pc(clear), mode.0, mode.1, mode.2, n) }
+}
+
+/// When a pane counts as showing content: by the area its ink covers, not by
+/// its share of the pane. One line of 13 pt text (Brev's content font) is
+/// under 0.5 % of a pane at the default window size and far less in a large
+/// window, but a single short word such as "Ekko" covers several times
+/// `minArea`; a pane the protected layer keeps empty has none.
+enum Ink {
+    /// Square points: about one glyph at 13 pt.
+    static let minArea: Double = 12
+    /// The ink of `s` in square points, for an image of `scale` pixels per point.
+    static func area(_ s: Stats, scale: CGFloat) -> Double { Double(s.ink) / Double(scale * scale) }
+    static func shown(_ s: Stats, scale: CGFloat) -> Bool { area(s, scale: scale) >= minArea }
 }
 
 /// Statistics of `r` (pixel rect) in a decoded image. Ink: pixels that differ
@@ -288,6 +360,27 @@ func record(_ path: String, _ v: Verdict, _ why: String) {
     print("   -> \(tag): \(why)")
 }
 
+/// The verdict on a path whose image shows the window (`captured`) or the
+/// backdrop in its place, from each known pane and whether it shows ink.
+/// A captured window with no known pane proves nothing: "no ink" would only
+/// mean "nothing was looked at".
+func paneVerdict(_ window: String, captured: Bool, _ judged: [(name: String, ink: Bool)]) -> (Verdict, String) {
+    if judged.isEmpty {
+        return captured ? (.invalid, "\(window), but no content pane is known (Brev not on its mail window, or no AX trust and no --pane): nothing judged")
+                        : (.pass, "\(window); no content pane known")
+    }
+    let inked = judged.filter(\.ink).map(\.name)
+    return inked.isEmpty ? (.pass, "\(window), every pane empty") : (.content, "\(window), ink in \(inked.joined(separator: ", "))")
+}
+
+/// The verdict on a window-level capture of the target that gave no image or
+/// an empty one: the window is excluded only if the same method shows the
+/// control window; otherwise the method may simply not work.
+func emptyWindowVerdict(_ what: String, controlShown: Bool) -> (Verdict, String) {
+    controlShown ? (.pass, "\(what); the same method shows the control window")
+                 : (.invalid, "\(what), and the same method does not show the control window either: nothing judged")
+}
+
 /// A capture of the screen (or part of it) covering `covered`: cut to the
 /// stage, saved, and judged.
 func judgeArea(_ path: String, _ img: CGImage?, covered: CGRect) {
@@ -305,35 +398,64 @@ func judgeArea(_ path: String, _ img: CGImage?, covered: CGRect) {
     let win = stats(p, w, h, px(body))
     print("   window    \(win.line)")
     // The panes are judged either way: an excluded window shows the
-    // backdrop there, which has no ink either.
-    judgePanes(path, p, w, h, px, window: win.pc(win.green) >= 50 ? "window excluded (the backdrop shows)" : "window captured")
+    // backdrop there, which has no ink either. Where the control window lies
+    // over the target (no room beside it), that part is the control's.
+    let excluded = win.pc(win.green) >= 50
+    judgePanes(path, p, w, h, scale: s, { px(besideControl($0)) },
+               window: excluded ? "window excluded (the backdrop shows)" : "window captured", captured: !excluded)
 }
 
-func judgePanes(_ path: String, _ p: UnsafeMutablePointer<UInt8>, _ w: Int, _ h: Int, _ px: (CGRect) -> CGRect,
-                window: String = "window captured") {
-    if panes.isEmpty { record(path, .pass, "\(window); no content panes to check"); return }
-    var inked: [String] = []
-    for (name, r) in panes {
+/// The part of `r` left of the control window, when the control lies over
+/// its right edge (it spans the stage's height, so this is all it covers),
+/// 8 points clear of that edge, which a video frame (-V) blurs.
+func besideControl(_ r: CGRect) -> CGRect {
+    let edge = controlRect.minX - 8
+    guard r.maxX > edge, controlRect.maxY > r.minY, controlRect.minY < r.maxY else { return r }
+    return CGRect(x: r.minX, y: r.minY, width: max(0, edge - r.minX), height: r.height)
+}
+
+func judgePanes(_ path: String, _ p: UnsafeMutablePointer<UInt8>, _ w: Int, _ h: Int, scale: CGFloat, _ px: (CGRect) -> CGRect,
+                window: String = "window captured", captured: Bool = true) {
+    let judged = panes.map { (name, r) -> (name: String, ink: Bool) in
         let st = stats(p, w, h, px(r.insetBy(dx: 6, dy: 6)))
-        print("   \(name.padding(toLength: 9, withPad: " ", startingAt: 0)) \(st.line)")
-        if st.pc(st.ink) >= 0.5 { inked.append(name) }
+        print("   \(name.padding(toLength: 9, withPad: " ", startingAt: 0)) \(st.line) ink area=\(Int(Ink.area(st, scale: scale))) pt²")
+        return (name, Ink.shown(st, scale: scale))
     }
-    if inked.isEmpty { record(path, .pass, "\(window), every pane empty") }
-    else { record(path, .content, "\(window), ink in \(inked.joined(separator: ", "))") }
+    let (v, why) = paneVerdict(window, captured: captured, judged)
+    record(path, v, why)
 }
 
-/// An image of one window (a window filter or -l): excluded if it is
-/// transparent or black; otherwise its panes are judged.
-func judgeWindow(_ path: String, _ img: CGImage?, window: Win) {
+/// Whether an image of the control window alone, taken by a window-level
+/// method, shows it: mostly cyan, with its text.
+func controlShown(_ img: CGImage?) -> Bool {
+    guard let img else { print("   control window: no image"); return false }
+    let (p, w, h) = rgba(img); defer { p.deallocate() }
+    let s = stats(p, w, h, CGRect(x: 0, y: 0, width: w, height: h))
+    print("   control window \(s.line)")
+    return s.pc(s.cyan) >= 50 && Ink.shown(s, scale: CGFloat(w) / controlRect.width)
+}
+
+/// An image of one window (a window filter or -l): excluded if it is missing,
+/// transparent or black while the same method shows the control window
+/// (`control`); otherwise its panes are judged.
+func judgeWindow(_ path: String, _ img: CGImage?, window: Win, control: Bool) {
     print("-- \(path)")
-    guard let img else { record(path, .pass, "no image of window \(window.id)"); return }
+    guard let img else {
+        let (v, why) = emptyWindowVerdict("no image of window \(window.id)", controlShown: control)
+        record(path, v, why)
+        return
+    }
     save(img, path)
     let (p, w, h) = rgba(img); defer { p.deallocate() }
     let all = stats(p, w, h, CGRect(x: 0, y: 0, width: w, height: h))
     print("   image     \(all.line)")
-    if all.pc(all.clear) >= 95 || all.pc(all.black) >= 95 { record(path, .pass, "window \(window.id) excluded (image empty)"); return }
+    if all.pc(all.clear) >= 95 || all.pc(all.black) >= 95 {
+        let (v, why) = emptyWindowVerdict("window \(window.id) excluded (image empty)", controlShown: control)
+        record(path, v, why)
+        return
+    }
     let s = CGFloat(w) / window.bounds.width
-    judgePanes(path, p, w, h) { r in
+    judgePanes(path, p, w, h, scale: s) { r in
         CGRect(x: (r.minX - window.bounds.minX) * s, y: (r.minY - window.bounds.minY) * s, width: r.width * s, height: r.height * s)
     }
 }
@@ -345,16 +467,18 @@ func scale(of id: CGDirectDisplayID) -> CGFloat {
         .backingScaleFactor ?? 2
 }
 
+/// Keeps the image of each complete frame, up to the third. A window that
+/// does not change gets one complete frame and then only idle ones, so the
+/// last complete frame is what counts when fewer arrive.
 final class FrameGrabber: NSObject, SCStreamOutput {
     var image: CGImage?
     var frames = 0
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, image == nil,
+        guard type == .screen, frames < 3,
               let att = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let raw = att.first?[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete,
               let pb = sb.imageBuffer else { return }
         frames += 1
-        if frames < 3 { return }
         let ci = CIImage(cvPixelBuffer: pb)
         image = CIContext().createCGImage(ci, from: ci.extent)
     }
@@ -366,19 +490,22 @@ final class FrameGrabber: NSObject, SCStreamOutput {
     do {
         try s.addStreamOutput(g, type: .screen, sampleHandlerQueue: DispatchQueue(label: "grab"))
         try await s.startCapture()
-        for _ in 0..<40 where g.image == nil { try await Task.sleep(nanoseconds: 100_000_000) }
+        for _ in 0..<40 where g.frames < 3 { try await Task.sleep(nanoseconds: 100_000_000) }
         try await s.stopCapture()
     } catch { print("   stream error: \(error)") }
+    print("   stream: \(g.frames) complete frame(s)")
     return g.image
 }
 
 @MainActor func sck() async {
     let content: SCShareableContent
     do { content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) } catch {
-        print("SCShareableContent error: \(error)"); worst = max(worst, .invalid); return
+        print("SCShareableContent error: \(error)"); record("sck", .invalid, "SCShareableContent failed: no path ran"); return
     }
     for w in targetWindows { print("   window \(w.id) listed by SCShareableContent: \(content.windows.contains { $0.windowID == w.id })") }
-    guard let d = content.displays.first(where: { $0.displayID == display }) else { print("display \(display) not listed"); return }
+    guard let d = content.displays.first(where: { $0.displayID == display }) else {
+        record("sck", .invalid, "display \(display) not listed by SCShareableContent: no path ran"); return
+    }
     let sc = scale(of: display)
     let cfg = SCStreamConfiguration()
     cfg.width = Int(CGFloat(d.width) * sc); cfg.height = Int(CGFloat(d.height) * sc); cfg.showsCursor = false
@@ -389,18 +516,32 @@ final class FrameGrabber: NSObject, SCStreamOutput {
     let noApps = SCContentFilter(display: d, excludingApplications: [], exceptingWindows: [])
     do { judgeArea("sck-display-excluding-no-apps", try await SCScreenshotManager.captureImage(contentFilter: noApps, configuration: cfg), covered: displayBounds) }
     catch { print("   error \(error)"); judgeArea("sck-display-excluding-no-apps", nil, covered: displayBounds) }
+    /// A window filter and its configuration, for `sw`.
+    func windowFilter(_ sw: SCWindow) -> (SCContentFilter, SCStreamConfiguration) {
+        let wc = SCStreamConfiguration()
+        wc.width = Int(sw.frame.width * sc); wc.height = Int(sw.frame.height * sc); wc.showsCursor = false
+        if #available(macOS 14.2, *) { wc.includeChildWindows = true }
+        return (SCContentFilter(desktopIndependentWindow: sw), wc)
+    }
+    // The window-filter methods' positive control: the same captures of the
+    // control window.
+    var controlImage = false, controlStream = false
+    if let cw = content.windows.first(where: { $0.windowID == CGWindowID(control.windowNumber) }) {
+        let (f, wc) = windowFilter(cw)
+        print("-- control window through a window filter")
+        do { controlImage = controlShown(try await SCScreenshotManager.captureImage(contentFilter: f, configuration: wc)) }
+        catch { print("   error \(error)") }
+        controlStream = controlShown(await oneFrame(f, wc))
+    } else { print("-- control window not listed by SCShareableContent") }
     for w in targetWindows {
         let name = "sck-window-\(w.id)"
         guard let sw = content.windows.first(where: { $0.windowID == w.id }) else {
             print("-- \(name)"); record(name, .pass, "window \(w.id) not listed, so no window filter can name it"); continue
         }
-        let wc = SCStreamConfiguration()
-        wc.width = Int(sw.frame.width * sc); wc.height = Int(sw.frame.height * sc); wc.showsCursor = false
-        if #available(macOS 14.2, *) { wc.includeChildWindows = true }
-        let f = SCContentFilter(desktopIndependentWindow: sw)
-        do { judgeWindow(name, try await SCScreenshotManager.captureImage(contentFilter: f, configuration: wc), window: w) }
-        catch { print("   error \(error)"); judgeWindow(name, nil, window: w) }
-        judgeWindow("\(name)-stream", await oneFrame(f, wc), window: w)
+        let (f, wc) = windowFilter(sw)
+        do { judgeWindow(name, try await SCScreenshotManager.captureImage(contentFilter: f, configuration: wc), window: w, control: controlImage) }
+        catch { print("   error \(error)"); judgeWindow(name, nil, window: w, control: controlImage) }
+        judgeWindow("\(name)-stream", await oneFrame(f, wc), window: w, control: controlStream)
     }
     if #available(macOS 15.2, *) {
         do { judgeArea("sck-captureImage-in-rect", try await SCScreenshotManager.captureImage(in: area), covered: area) }
@@ -428,9 +569,11 @@ func legacyCG() {
     let desktop = ids.prefix(Int(n)).reduce(CGRect.null) { $0.union(CGDisplayBounds($1)) }
     judgeArea("cg-WindowListCreateImage-screen",
               CGWindowListCreateImage(.infinite, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution]), covered: desktop)
+    print("-- control window through CGWindowListCreateImage")
+    let ctl = controlShown(CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(control.windowNumber), [.boundsIgnoreFraming, .bestResolution]))
     for w in targetWindows {
         judgeWindow("cg-WindowListCreateImage-window-\(w.id)",
-                    CGWindowListCreateImage(.null, .optionIncludingWindow, w.id, [.boundsIgnoreFraming, .bestResolution]), window: w)
+                    CGWindowListCreateImage(.null, .optionIncludingWindow, w.id, [.boundsIgnoreFraming, .bestResolution]), window: w, control: ctl)
     }
     judgeArea("cg-DisplayCreateImage", CGDisplayCreateImage(display), covered: displayBounds)
     let local = area.offsetBy(dx: -displayBounds.minX, dy: -displayBounds.minY)
@@ -498,7 +641,7 @@ func avCapture() {
 /// CGDisplayStream through dlsym, from capture-probe-26 next to this tool.
 func cgDisplayStream26() {
     let tool = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().appendingPathComponent("capture-probe-26")
-    let file = outDir.appendingPathComponent("tmp-cgds26.png")
+    let file = tmpDir.appendingPathComponent("tmp-cgds26.png")
     let p = Process()
     p.executableURL = tool
     p.arguments = [file.path, "\(display)"] + [area.minX, area.minY, area.width, area.height].map { "\(Double($0))" }
@@ -530,29 +673,107 @@ func movieFrame(_ url: URL, at seconds: Double) async -> CGImage? {
 }
 
 @MainActor func screencapture() async {
-    // Whole screens go to a file only for as long as it takes to cut them.
-    let full = outDir.appendingPathComponent("tmp-full.png")
+    // Whole screens go to a file only for as long as it takes to cut them,
+    // in the private temporary folder.
+    let full = tmpDir.appendingPathComponent("tmp-full.png")
     var r = run("/usr/sbin/screencapture", ["-x", full.path])
     print("   screencapture -x exit=\(r.0) \(r.1)")
     judgeArea("screencapture-x", load(full), covered: displayBounds)
     try? FileManager.default.removeItem(at: full)
-    let part = outDir.appendingPathComponent("tmp-R.png")
+    let part = tmpDir.appendingPathComponent("tmp-R.png")
     r = run("/usr/sbin/screencapture", ["-x", "-R\(text(area))", part.path])
     print("   screencapture -R\(text(area)) exit=\(r.0) \(r.1)")
     judgeArea("screencapture-R", load(part), covered: area)
     try? FileManager.default.removeItem(at: part)
+    let file = tmpDir.appendingPathComponent("tmp-l.png")
+    r = run("/usr/sbin/screencapture", ["-x", "-o", "-l\(control.windowNumber)", file.path])
+    print("-- control window through screencapture -l\(control.windowNumber) exit=\(r.0) \(r.1)")
+    let ctl = controlShown(load(file))
+    try? FileManager.default.removeItem(at: file)
     for w in targetWindows {
-        let file = outDir.appendingPathComponent("tmp-l.png")
         r = run("/usr/sbin/screencapture", ["-x", "-o", "-l\(w.id)", file.path])
         print("   screencapture -l\(w.id) exit=\(r.0) \(r.1)")
-        judgeWindow("screencapture-l-\(w.id)", load(file), window: w)
+        judgeWindow("screencapture-l-\(w.id)", load(file), window: w, control: ctl)
         try? FileManager.default.removeItem(at: file)
     }
-    let movie = outDir.appendingPathComponent("tmp-V.mov")
+    let movie = tmpDir.appendingPathComponent("tmp-V.mov")
     r = run("/usr/sbin/screencapture", ["-x", "-V", "3", movie.path])
     print("   screencapture -V 3 exit=\(r.0) \(r.1)")
     judgeArea("screencapture-V", await movieFrame(movie, at: 1.5), covered: displayBounds)
     try? FileManager.default.removeItem(at: movie)
+}
+
+// MARK: - Self-test (--selftest): the verdict rules on drawn panes
+
+/// Statistics of a white pane of `size` points at `scale`, with one line of
+/// `text` in black at 13 pt (Brev's content font), or empty; cut as a pane is.
+func drawnPane(_ size: CGSize, scale: CGFloat, _ text: String?) -> Stats {
+    let w = Int(size.width * scale), h = Int(size.height * scale)
+    let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: w * h * 4)
+    buf.initialize(repeating: 0, count: w * h * 4)
+    defer { buf.deallocate() }
+    let ctx = CGContext(data: buf, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                        space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    if let text {
+        ctx.scaleBy(x: scale, y: scale)
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: [
+            NSAttributedString.Key(kCTFontAttributeName as String): NSFont.systemFont(ofSize: 13) as CTFont,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)]))
+        ctx.textPosition = CGPoint(x: 16, y: size.height - 30)
+        CTLineDraw(line, ctx)
+    }
+    return stats(buf, w, h, CGRect(x: 0, y: 0, width: w, height: h).insetBy(dx: 6 * scale, dy: 6 * scale))
+}
+
+func selftest() -> Bool {
+    print("capture-probe --selftest: the verdict rules on drawn panes (no window, no capture)")
+    var ok = true
+    func expect(_ what: String, _ cond: Bool, _ detail: String = "") {
+        print((cond ? "ok   " : "FAIL ") + what + (detail.isEmpty ? "" : "  [\(detail)]"))
+        if !cond { ok = false }
+    }
+    // VERIFY's letter: the contact names, and a one-line subject and body as
+    // long as the marker (not the marker itself, which V17, V19 and V21
+    // search for), in panes of Brev's default window (900×600) and of one
+    // that fills a 1512×982 screen.
+    let line = "ONE-LINE-SUBJECT æøå"
+    let cases: [(String, CGSize, String)] = [
+        ("contacts pane (default)", CGSize(width: 200, height: 540), "Ekko"),
+        ("contacts pane (default)", CGSize(width: 200, height: 540), "Speil"),
+        ("threads pane (default)", CGSize(width: 280, height: 540), line),
+        ("letters pane (default)", CGSize(width: 418, height: 540), line),
+        ("contacts pane (full screen)", CGSize(width: 330, height: 900), "Ekko"),
+        ("letters pane (full screen)", CGSize(width: 800, height: 900), line),
+    ]
+    for scale: CGFloat in [1, 2] {
+        for (pane, size, text) in cases {
+            let s = drawnPane(size, scale: scale, text)
+            expect("\(pane) at \(Int(scale))x: one line of \(text.count) characters counts as content", Ink.shown(s, scale: scale),
+                   String(format: "ink %.0f pt², %.2f%% of the pane", Ink.area(s, scale: scale), s.pc(s.ink)))
+        }
+        let empty = drawnPane(CGSize(width: 418, height: 540), scale: scale, nil)
+        expect("an empty pane at \(Int(scale))x counts as empty", !Ink.shown(empty, scale: scale),
+               String(format: "ink %.0f pt²", Ink.area(empty, scale: scale)))
+    }
+    expect("window captured, no pane known: INVALID", paneVerdict("window captured", captured: true, []).0 == .invalid)
+    expect("window excluded, no pane known: pass", paneVerdict("window excluded", captured: false, []).0 == .pass)
+    expect("window captured, ink in a pane: content",
+           paneVerdict("window captured", captured: true, [("a", false), ("b", true)]).0 == .content)
+    expect("window captured, every pane empty: pass", paneVerdict("window captured", captured: true, [("a", false)]).0 == .pass)
+    expect("no image of the window, none of the control either: INVALID", emptyWindowVerdict("none", controlShown: false).0 == .invalid)
+    expect("no image of the window, the control shown: pass", emptyWindowVerdict("none", controlShown: true).0 == .pass)
+    if let d = cutsFolder(nil) {
+        let perms = (try? FileManager.default.attributesOfItem(atPath: d.path))?[.posixPermissions] as? Int
+        let parent = d.deletingLastPathComponent().standardizedFileURL.path
+        expect("the cuts' default folder: new, 0700, directly under $TMPDIR (never the current directory)",
+               parent == URL(fileURLWithPath: NSTemporaryDirectory()).standardizedFileURL.path && perms == 0o700,
+               "\(d.path) \(String(perms ?? 0, radix: 8))")
+        try? FileManager.default.removeItem(at: d)
+    } else { expect("the cuts' default folder is made", false) }
+    print(ok ? "PASS" : "FAIL")
+    return ok
 }
 
 // MARK: - main
@@ -568,8 +789,22 @@ case "screencapture":
 default:
     await sck()
 }
+// Were the panes the same through the run? A lock (the lock screen has no
+// scroll area) or a changed window would leave later paths judging pixels
+// that are not the panes.
+if panesFromAX && !panes.isEmpty {
+    let now = axPanes() ?? []
+    print("   panes from AX after the captures: \(now.isEmpty ? "none" : now.map { "\($0.0)=\(text($0.1))" }.joined(separator: " "))")
+    let same = now.count == panes.count && zip(now, panes).allSatisfy { a, b in
+        abs(a.1.minX - b.1.minX) < 2 && abs(a.1.minY - b.1.minY) < 2 && abs(a.1.width - b.1.width) < 2 && abs(a.1.height - b.1.height) < 2
+    }
+    if !same { record("panes-after-the-run", .invalid, "the content panes changed during the run (Brev locked, or its window changed): the paths prove nothing") }
+} else if !panes.isEmpty {
+    print("   panes given with --pane: not read again after the captures")
+}
 backdrop.orderOut(nil)
 control.orderOut(nil)
 print("== summary (\(mode), target pid \(pid), cuts in \(outDir.path))")
+if let pointerNote { print(pointerNote) }
 summary.forEach { print($0) }
 exit(Int32(worst.rawValue))

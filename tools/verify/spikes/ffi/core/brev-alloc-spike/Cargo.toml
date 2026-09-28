@@ -9,7 +9,8 @@ publish.workspace = true
 
 [dependencies]
 zeroize = { workspace = true }
-zeroizing-alloc = { path = "/private/tmp/claude-503/-Users-andypandy/01f11233-b284-49b2-9c90-391fa2f358ef/scratchpad/p2/ffi/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/zeroizing-alloc-0.1.1", optional = true }
+# crates.io 0.1.1, the same source the spike unpacked into its scratchpad cargo home.
+zeroizing-alloc = { version = "=0.1.1", optional = true }
 
 [features]
 onepassword = ["dep:zeroizing-alloc"]
