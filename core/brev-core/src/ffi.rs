@@ -670,6 +670,9 @@ impl Brev {
         }
     }
 
+    /// Never inlined, so any copy of the DEK its frame holds is one that the
+    /// scrub in `create` reaches once it has returned (see `unlock_all`).
+    #[inline(never)]
     fn create_in(
         dir: &Path,
         relay: &str,
@@ -768,6 +771,13 @@ thread_local! {
     static PANIC_IN_UNLOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Never inlined, so any key copy its frame holds (the DEK moved out of
+/// `dek32`'s `Option`) lies below `Brev::unlock`'s frame, where `Finish`'s
+/// scrub reaches it once this frame is gone. Inlined into `Brev::unlock`,
+/// such copies sit in the frame that calls the scrub, above the scrubbed
+/// area, and survive the lock on the unlock thread's stack: Phase 2 found
+/// two copies of each echo peer's key there (docs/DECISIONS.md D-0063).
+#[inline(never)]
 fn unlock_all(s: &mut Session, dek: &[u8]) -> Result<(), BrevError> {
     let mut key = dek32(dek).ok_or(BrevError::WrongKey)?;
     s.me.unlock(&mut key)?;

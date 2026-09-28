@@ -486,6 +486,8 @@ mod tests {
         );
         let env = env.unwrap();
         assert_eq!(scrubs_in(|| drop(open_message(&b, &pa, &env))), 1);
+        // The contact tag's HKDF over the user DEK; `Brev::create` is pinned
+        // in ffi/tests.rs.
         assert_eq!(scrubs_in(|| _ = contact_tag(&dek, &[1; 32])), 1);
     }
 

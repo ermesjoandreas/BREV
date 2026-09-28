@@ -4,6 +4,7 @@
 #include "scan.h"
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <stdlib.h>
 #include <string.h>
 
 // "BREV-SECRET-BODY" XOR 0x5A.
@@ -17,6 +18,12 @@ static uint16_t GLYPHS_X[MAX_NEEDLE / 2];
 static size_t GLYPHS_N = 0;
 static uint8_t NEEDLES_X[BREV_SCAN_NEEDLES][MAX_NEEDLE];
 static size_t NEEDLES_N[BREV_SCAN_NEEDLES];
+// The scribble probe's pattern, "brev-scribble-16" XOR 0x5A; counted only
+// while PROBE_ON.
+static const uint8_t PROBE_X[16] = {0x38, 0x28, 0x3f, 0x2c, 0x77, 0x29, 0x39, 0x28,
+                                    0x33, 0x38, 0x38, 0x36, 0x3f, 0x77, 0x6b, 0x6c};
+static int PROBE_ON = 0;
+#define PROBE_SIZE (32u * 1024)
 
 void brev_scan_set_glyphs(const uint16_t *xored, size_t n) {
     if (n < 4 || n > MAX_NEEDLE / 2) n = 0;
@@ -73,6 +80,14 @@ static void scan_buf(const uint8_t *b, size_t n, size_t limit, brev_scan_result 
             if (j == len) { r->needle_hits[k]++; hits++; }
         }
     }
+    if (PROBE_ON) {
+        for (size_t i = 0; i < limit && i + 16 <= n; i++) {
+            if ((uint8_t)(b[i] ^ KEY) != PROBE_X[0]) continue;
+            size_t j = 1;
+            while (j < 16 && (uint8_t)(b[i + j] ^ KEY) == PROBE_X[j]) j++;
+            if (j == 16) r->probe_hits++;
+        }
+    }
     r->by_tag[tag & 255] += hits;
 }
 
@@ -106,4 +121,21 @@ void brev_scan(brev_scan_result *r) {
         }
         addr += size;
     }
+}
+
+uint64_t brev_scan_scribble_probe(uint64_t *live) {
+    brev_scan_result r;
+    // Written through a volatile pointer, so the fill and the free cannot be
+    // optimised away; no copy of the whole pattern is made anywhere else.
+    volatile uint8_t *p = malloc(PROBE_SIZE);
+    *live = 0;
+    if (p == NULL) return 0;
+    for (size_t i = 0; i < PROBE_SIZE; i++) p[i] = PROBE_X[i % 16] ^ KEY;
+    PROBE_ON = 1;
+    brev_scan(&r);
+    *live = r.probe_hits;
+    free((void *)p);
+    brev_scan(&r);
+    PROBE_ON = 0;
+    return r.probe_hits;
 }

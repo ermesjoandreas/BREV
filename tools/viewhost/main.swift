@@ -62,7 +62,8 @@
 //                   the fake letters
 //   --scan          scan this process for the marker before and after the
 //                   lock, with SelfScan's needle control while the letters
-//                   are shown (run with MallocScribble=1, as Brev runs)
+//                   are shown and its scribble probe after the lock (run
+//                   with MallocScribble=1, as Brev runs)
 //   --post          post a ↓ key to this process (CGEventPostToPid): the
 //                   input filter must drop it; with --compose, a, ⌘↩ and
 //                   Escape while the body has focus
@@ -222,6 +223,31 @@ func hasPixels(_ buffer: CVPixelBuffer) -> Bool {
     guard let base = CVPixelBufferGetBaseAddress(buffer) else { return true }
     let bytes = UnsafeRawBufferPointer(start: base, count: CVPixelBufferGetBytesPerRow(buffer) * CVPixelBufferGetHeight(buffer))
     return bytes.contains { $0 != 0 }
+}
+
+/// Whether AppKit's own drawing of `v` inside `rect` puts ink into an empty
+/// bitmap: `draw(_:)` into a current NSGraphicsContext, as print and PDF
+/// output call it. cacheDisplay does not call `draw(_:)` for a view that
+/// updates its layer (it renders the layer tree), so it cannot show this.
+func drawInks(_ v: NSView, _ rect: NSRect) -> Bool {
+    let w = Int(rect.width.rounded(.up)), h = Int(rect.height.rounded(.up))
+    guard w > 0, h > 0 else { return false }
+    guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return true }
+    // The view's coordinates inside `rect` onto the bitmap.
+    if v.isFlipped {
+        ctx.translateBy(x: 0, y: CGFloat(h))
+        ctx.scaleBy(x: 1, y: -1)
+    }
+    ctx.translateBy(x: -rect.minX, y: -rect.minY)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: v.isFlipped)
+    v.draw(rect)
+    NSGraphicsContext.restoreGraphicsState()
+    guard let data = ctx.data else { return true }
+    return UnsafeRawBufferPointer(start: data, count: ctx.bytesPerRow * h).contains { $0 != 0 }
 }
 
 /// Whether the frame `v`'s protected layer shows holds a pixel that is not
@@ -652,8 +678,11 @@ func composeAfterHold(_ sheet: ComposeSheet) {
     if let rep = sheet.body.bitmapImageRepForCachingDisplay(in: sheet.body.visibleRect) {
         sheet.body.cacheDisplay(in: sheet.body.visibleRect, to: rep)
         let data = rep.bitmapData.map { UnsafeBufferPointer(start: $0, count: rep.bytesPerPlane) }
-        check("compose: cacheDisplay of the body draws nothing", data.map { !$0.contains { $0 != 0 } } ?? false)
+        check("compose: cacheDisplay of the body (its layer tree) draws nothing",
+              data.map { !$0.contains { $0 != 0 } } ?? false)
     }
+    check("compose: draw(_:) of the recipient, subject and body (print and PDF output) draws nothing",
+          views.allSatisfy { !drawInks($0, $0.visibleRect.intersection($0.bounds)) })
     if scanning {
         let h = SelfScan.scan()
         check("compose: the typed marker is in memory (positive control)", h.u16 > 0, "\(h)")
@@ -677,9 +706,24 @@ func composeAfterHold(_ sheet: ComposeSheet) {
     }
 }
 
-/// Escape discards a letter; the lock sequence discards another.
+/// The sent sheet must be freed. AppKit keeps the last event it dequeued in
+/// NSApp.currentEvent, and that event's window with it: after ⌘↩, which
+/// reaches the sheet through sendEvent without being dequeued, a key-up of
+/// the sent sheet can stay there until the next event arrives, which with
+/// nobody at the Mac may be never (review round 1). One event posted here,
+/// in process, replaces it; what still holds the sheet after that is Brev's.
 func composeCancelAndLock() {
-    check("compose: a sent sheet is freed", sentSheet == nil)
+    let tick = NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0,
+                                  windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)
+    tick.map { NSApp.postEvent($0, atStart: false) }
+    waitFor(3, { sentSheet == nil }) { freed in
+        check("compose: a sent sheet is freed", freed)
+        composeSecondAndThird()
+    }
+}
+
+/// Escape discards a letter; the lock sequence discards another.
+func composeSecondAndThird() {
     let threads = lists[1].count
     mail.newLetter(nil)
     guard let second = composeSheet() else {
@@ -727,6 +771,7 @@ func composeCancelAndLock() {
             let h = SelfScan.scan()
             check("after lock: no copy (UTF-8, UTF-16, glyphs), compose included", h.u8 == 0 && h.u16 == 0 && h.glyph == 0,
                   "\(h)")
+            checkScribbled()
         }
         finish()
     }
@@ -923,8 +968,9 @@ func mailChecks() {
     check("two contacts, the first selected", lists.count == 2 && lists[0].count == 2 && lists[0].selected == 0)
     check("Ekko's two threads, the newest selected", lists[1].count == 2 && lists[1].selected == 0)
     check("its letter and the echo are shown", shownLetters() == 2)
-    // The shown letters are pixels in the protected layer's buffers, and
-    // AppKit's own drawing of a letter view gets none.
+    // The shown letters are pixels in the protected layer's buffers. Neither
+    // cacheDisplay (the layer tree) nor draw(_:) (print and PDF output)
+    // gets any of them.
     let bodies = all(SecureTextView.self, in: letters).filter { !$0.visibleRect.intersection($0.bounds).isEmpty }
     check("while shown: each visible letter's frame is in its buffers and on its layer",
           !bodies.isEmpty && bodies.allSatisfy { $0.pool.contains(where: hasPixels) && showsPixels($0) })
@@ -932,11 +978,15 @@ func mailChecks() {
        let rep = body.bitmapImageRepForCachingDisplay(in: shown) {
         body.cacheDisplay(in: shown, to: rep)
         let data = rep.bitmapData.map { UnsafeBufferPointer(start: $0, count: rep.bytesPerPlane) }
-        check("cacheDisplay of a shown letter draws nothing", data.map { !$0.contains { $0 != 0 } } ?? false)
+        check("cacheDisplay of a shown letter (its layer tree) draws nothing",
+              data.map { !$0.contains { $0 != 0 } } ?? false)
     }
+    let inSight = all(ContentView.self, in: mail.view).filter { !$0.visibleRect.intersection($0.bounds).isEmpty }
+    check("draw(_:) of every content view in sight (print and PDF output) draws nothing",
+          inSight.count > 2 && inSight.allSatisfy { !drawInks($0, $0.visibleRect.intersection($0.bounds)) })
     if scanning {
         // The letters' own glyph ids are not live while shown (ContentView
-        // draws through a bitmap), so the glyph needle's control is
+        // draws into its pixel buffers), so the glyph needle's control is
         // SelfScan's CTLine of the marker, as in V39.
         let h = SelfScan.scan(), needle = SelfScan.needleControl()
         check("while shown: the marker is in memory (positive control)", h.u16 > 0, "\(h)")
@@ -1068,11 +1118,20 @@ func sendAndLock() {
         if scanning {
             let h = SelfScan.scan()
             check("after lock: no copy (UTF-8, UTF-16, glyphs)", h.u8 == 0 && h.u16 == 0 && h.glyph == 0, "\(h)")
+            checkScribbled()
         }
         snapshot(window.contentView!, "locked.png")
         checkHardenedChildren()
         finish()
     }
+}
+
+/// SelfScan's scribble probe, as the lock sequence logs it for V39: a freed
+/// 32 KiB block keeps no copy of its pattern, which it shows while allocated.
+func checkScribbled() {
+    let p = SelfScan.scribbleProbe()
+    check("after lock: freed memory is scribbled (the probe's freed block keeps nothing; seen while allocated)",
+          p.live > 0 && p.left == 0, "\(p)")
 }
 
 /// What the lock sequence leaves, whatever ran it: `views` and `buffers`

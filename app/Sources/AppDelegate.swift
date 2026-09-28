@@ -102,6 +102,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         nil
     }
 
+    /// Brev opens no files (§1.4; no document types, §3.2). Any process can
+    /// send an open-documents event (`open -a Brev <file>`), and without this
+    /// handler AppKit hands it to NSDocumentController, whose error alert is
+    /// a window Brev never hardens (capturable, and key over a compose
+    /// sheet, which turns secure event input off). The event is ignored. It
+    /// can arrive before applicationDidFinishLaunching, so this touches
+    /// nothing else. Logs the count only.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        Self.appLog.notice("open event ignored count=\(urls.count, privacy: .public)")
+    }
+
     // MARK: - Routing (§5.2)
 
     /// Installed (the wrapped-DEK item exists): open the stores, locked,

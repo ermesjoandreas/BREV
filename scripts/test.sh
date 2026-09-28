@@ -5,9 +5,10 @@
 # tests, the zeroize and allocator checks, the FFI surface and patch-marker
 # checks (macOS), the forbidden-API grep, the check that AVFoundation,
 # CoreMedia and CoreVideo stay in the protected layer, the dependency audit,
-# the Swift heap-scan harness (macOS), a compile check of the view host
-# (macOS), a type-check of the verification tools and capture-probe's
-# self-test (macOS) and an Xcode compile check (macOS with xcodegen).
+# the Swift heap-scan harness (macOS), the lock probe (macOS), a compile
+# check of the view host (macOS), a type-check of the verification tools and
+# capture-probe's self-test (macOS) and an Xcode compile check (macOS with
+# xcodegen).
 # Exits non-zero on the first failure.
 #
 # Usage: scripts/test.sh
@@ -123,7 +124,7 @@ if [[ "$DARWIN" == yes ]]; then
   # No String carries content across the FFI (docs/PHASE2_DESIGN.md §2.2).
   # The only public functions with a String are these three, and each must
   # be found, so the grep cannot pass by matching nothing.
-  echo "==> FFI surface: no content String"
+  echo "==> FFI surface: no content String, only the known Data"
   ALLOWED_FUNCS=('func ping\(\) -> String' 'func create\(dir: String, ' 'func `?open`?\(dir: String\)')
   FUNCS="$(grep -nE '^(public |open )(static )?func .*String' "$BINDINGS" || true)"
   for f in "${ALLOWED_FUNCS[@]}"; do
@@ -169,6 +170,41 @@ if [[ "$DARWIN" == yes ]]; then
   if [[ "$CONV_FOUND" != "$CONV_EXPECTED" ]]; then
     echo "error: String converters in $BINDINGS differ from the known uses (< known, > found):" >&2
     diff <(printf '%s\n' "$CONV_EXPECTED") <(printf '%s\n' "$CONV_FOUND") >&2 || true
+    exit 1
+  fi
+  # Bytes too: content leaves Rust only as OpenText.chunk's 960-byte
+  # results, and records carry ids and metadata (design §2.2), so a body or
+  # a name must not cross as Data either. Bytes cross in a RustBuffer only
+  # through a FfiConverter…Data type (an Option, a Vec or an enum payload of
+  # Data as well), so every line that names one must be one of these,
+  # exactly as often as listed: the converter itself; the ids passed to
+  # messages, openBody, sendNew and threads; two lifts, chunk's result and
+  # sendNew's thread id; and the reads and writes of ContactRow.id,
+  # MessageRow.id, ThreadRow.id and ThreadRow.contact. (`&[u8]` arguments,
+  # which carry bytes into Rust without a copy, use FfiConverterByRefBytes.)
+  DATA_LIST=(
+    'fileprivate struct FfiConverterData: FfiConverterRustBuffer {'
+    'FfiConverterData.lower(thread),uniffiCallStatus'
+    'FfiConverterData.lower(message),uniffiCallStatus'
+    'FfiConverterData.lower(contact),'
+    'FfiConverterData.lower(contact),uniffiCallStatus'
+    'return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {'
+    'return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {'
+    'id: FfiConverterData.read(from: &buf),'
+    'id: FfiConverterData.read(from: &buf),'
+    'id: FfiConverterData.read(from: &buf),'
+    'contact: FfiConverterData.read(from: &buf),'
+    'FfiConverterData.write(value.id, into: &buf)'
+    'FfiConverterData.write(value.id, into: &buf)'
+    'FfiConverterData.write(value.id, into: &buf)'
+    'FfiConverterData.write(value.contact, into: &buf)'
+  )
+  DATA_EXPECTED="$(printf '%s\n' "${DATA_LIST[@]}" | LC_ALL=C sort)"
+  DATA_FOUND="$(grep -E 'FfiConverter[A-Za-z0-9_]*Data' "$BINDINGS" \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | LC_ALL=C sort || true)"
+  if [[ "$DATA_FOUND" != "$DATA_EXPECTED" ]]; then
+    echo "error: Data converters in $BINDINGS differ from the known uses (< known, > found):" >&2
+    diff <(printf '%s\n' "$DATA_EXPECTED") <(printf '%s\n' "$DATA_FOUND") >&2 || true
     exit 1
   fi
 
@@ -255,9 +291,12 @@ fi
 # no window and no prompt, built from app/Sources/Shared, the patched
 # bindings and the release archive. Every case runs five times and every run
 # must pass: under MallocScribble=1, as the app runs (Info.plist
-# LSEnvironment), except case 6's control without scribbling, which proves
-# that the glyph needle works and that scribbling is what clears the glyphs
-# (it finds nothing at 200 units or less, so it runs at 4096 and 65000).
+# LSEnvironment), except the two controls without scribbling. Case 6's
+# proves that the glyph needle works and that scribbling is what clears the
+# glyphs (it finds nothing at 200 units or less, so it runs at 4096 and
+# 65000). Case 7's proves that the scribble probe SelfScan runs in the
+# Verify build (docs/VERIFY.md V39) can fail: without scribbling, the freed
+# block keeps its pattern.
 if [[ "$DARWIN" == yes ]]; then
   echo "==> Swift harness (app/Tests)"
   HARNESS_DIR="$TARGET_DIR/harness"
@@ -299,8 +338,38 @@ if [[ "$DARWIN" == yes ]]; then
   for n in 4096 65000; do
     run_harness "case 6 (no scribbling: glyphs left, $n units)" none content "$n" --no-scribble
   done
+  run_harness "case 7 (scribble probe)" scribble scribble
+  run_harness "case 7 (no scribbling: the freed block is kept)" none scribble --no-scribble
 else
   echo "==> Swift harness skipped: not macOS ($(uname -s))"
+fi
+
+# The lock probe (app/Tests/Lock): the app's own LockController, UnlockService
+# and content views, which the harness (Shared/ only) cannot reach. A CLI
+# process built from app/Sources/{Shared,App,UI,Keys}: no window on screen,
+# no prompt, no keychain (a software KEK; UnlockService gets a KeyStore
+# subclass). It checks that a discarded unlock and the lock sequence lock the
+# Rust session, that the lock sequence zeroes every content view's pixel
+# buffers, that draw(_:) of a content view draws nothing, and that
+# UnlockService locks Rust when its closure fails after Brev.unlock.
+if [[ "$DARWIN" == yes ]]; then
+  echo "==> lock probe (app/Tests/Lock)"
+  LOCK_DIR="$TARGET_DIR/lock-probe"
+  rm -rf "$LOCK_DIR"
+  mkdir -p "$LOCK_DIR/tmp"
+  xcrun swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" \
+    -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
+    "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/App/*.swift \
+    "$REPO_ROOT"/app/Sources/UI/*.swift "$REPO_ROOT"/app/Sources/Keys/*.swift \
+    "$BINDINGS" "$REPO_ROOT/app/Tests/Lock/main.swift" "$STATICLIB" -o "$LOCK_DIR/lock-probe"
+  if ! out="$(env TMPDIR="$LOCK_DIR/tmp/" "$LOCK_DIR/lock-probe" 2>&1)"; then
+    echo "$out"
+    echo "error: the lock probe failed" >&2
+    exit 1
+  fi
+  echo "    $(grep -c '^ok ' <<<"$out") checks passed"
+else
+  echo "==> lock probe skipped: not macOS ($(uname -s))"
 fi
 
 # The view host (tools/viewhost): Brev's mail window with fake letters, for

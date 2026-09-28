@@ -331,6 +331,35 @@ fn unlock_scrubs_deep_on_every_path() {
     assert!(b.is_locked(), "a wrong DEK on an unlocked session locks it");
 }
 
+/// `create` ends with one stack scrub after `create_in` returns
+/// (`create_in`'s own count is the same for the same inputs), so deleting
+/// it fails here.
+#[test]
+fn create_scrubs_the_stack_after_create_in() {
+    fn scrubs_in(f: impl FnOnce()) -> usize {
+        let before = crypto::scrubs();
+        f();
+        crypto::scrubs() - before
+    }
+    let (t1, t2) = (tmp(), tmp());
+    let key = TestKey::new();
+    let dek: [u8; 32] = crypto::random().unwrap();
+    let inner = scrubs_in(|| drop(Brev::create_in(&t1.0, NO_RELAY, &dek, &key.public).unwrap()));
+    let outer = scrubs_in(|| {
+        drop(
+            Brev::create(
+                t2.0.to_str().unwrap().into(),
+                NO_RELAY.into(),
+                &dek,
+                &key.public,
+            )
+            .unwrap(),
+        )
+    });
+    assert!(inner > 0, "positive control: create_in scrubs");
+    assert_eq!(outer, inner + 1);
+}
+
 /// Item 7 of Phase 2's test list, with Phase 3's texts: contact names
 /// (addresses), the own address, a subject and a body.
 #[test]

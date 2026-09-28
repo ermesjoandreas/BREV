@@ -17,10 +17,19 @@ typedef struct {
     uint64_t regions;                         // readable+writable regions scanned
     uint64_t bytes;                           // bytes scanned
     uint64_t by_tag[256];                     // all hits per VM user_tag (malloc zones, stacks, ...)
+    uint64_t probe_hits;                      // the scribble probe's pattern, only during the probe
 } brev_scan_result;
 
 // Scans every readable+writable region of this task.
 void brev_scan(brev_scan_result *out);
+// The scribble probe (docs/VERIFY.md V39): whether freed heap memory is
+// overwritten in this process, as MallocScribble=1 makes libmalloc do. A
+// 32 KiB block is filled with a 16-byte pattern (not the marker) and freed.
+// Freed blocks of 1 KiB or less read back as zero even without scribbling
+// (GUI spike M), so the block is larger. Stores the pattern's copies a full
+// scan finds while the block is allocated in *live (the positive control),
+// and returns the copies found after the free: 0 while scribbling works.
+uint64_t brev_scan_scribble_probe(uint64_t *live);
 // A sequence of 4 to 64 glyph ids, each XORed with 0x5A5A.
 void brev_scan_set_glyphs(const uint16_t *xored, size_t n);
 // Byte needle `index` (< BREV_SCAN_NEEDLES): 12 to 64 bytes, each XORed with
