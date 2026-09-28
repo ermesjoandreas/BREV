@@ -69,8 +69,9 @@ final class SecretBytes {
 
 extension Data {
     /// Zeroes this Data's storage in place. Only for a Data that nothing else
-    /// references (an FFI chunk, the HPKE output): then there is no
-    /// copy-on-write, and the wiped bytes are the only ones.
+    /// references (an FFI chunk): then there is no copy-on-write, and the
+    /// wiped bytes are the only ones. The unwrapped DEK is a CFData, wiped by
+    /// Enclave.withWiped.
     mutating func wipe() {
         withUnsafeMutableBytes { b in
             if let p = b.baseAddress { _ = memset_s(p, b.count, 0, b.count) }

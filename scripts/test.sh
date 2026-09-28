@@ -265,9 +265,9 @@ if [[ "$DARWIN" == yes ]]; then
     sort -u <<<"$skips" | sed '/^$/d; s/^/      /'
   }
   run_harness "case 1 (units)" scribble units
-  run_harness "case 2 (InputFilter, LockState, LaunchGuard)" scribble shell
+  run_harness "case 2 (InputFilter, LockState, UnlockFailure, LaunchGuard)" scribble shell
   run_harness "case 2 (EditModel, KeyTranslator)" scribble compose
-  run_harness "case 3 (DEK hand-off, HPKE needles)" scribble dek
+  run_harness "case 3 (DEK hand-off, ECIES needles)" scribble dek
   for n in 64 200 4096 65000; do
     run_harness "case 4 (content path, $n units)" scribble content "$n"
   done
@@ -296,9 +296,10 @@ elif ! xcodebuild -version >/dev/null; then
 else
   # -destination pins the active arch to the archive's (ARCH, above) and
   # avoids the "multiple matching destinations" warning; see the comment in
-  # scripts/build.sh.
+  # scripts/build.sh. -allowProvisioningUpdates: team signing (D-0035), as
+  # in build.sh.
   echo "==> xcodebuild (Debug compile check, $ARCH)"
-  xcodebuild -project "$REPO_ROOT/app/Brev.xcodeproj" -scheme Brev -configuration Debug \
+  xcodebuild -project "$REPO_ROOT/app/Brev.xcodeproj" -allowProvisioningUpdates -scheme Brev -configuration Debug \
     -destination "platform=macOS,arch=$ARCH" ONLY_ACTIVE_ARCH=YES build
 fi
 

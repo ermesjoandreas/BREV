@@ -2,13 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- App Sandbox ON from day one (CLAUDE.md §3.2). Phase 0 grants nothing else;
-	     com.apple.security.network.client is added in Phase 3. Never add
-	     cs.disable-library-validation, cs.allow-jit, cs.allow-unsigned-executable-memory,
-	     cs.allow-dyld-environment-variables, cs.debugger, get-task-allow, iCloud,
-	     keychain-access-groups or temporary-exception entitlements (§1.9, §3.2).
-	     XcodeGen regenerates this file from the entitlements block in project.yml. -->
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)no.brev.app</string>
+	</array>
 </dict>
 </plist>

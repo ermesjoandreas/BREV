@@ -8,20 +8,20 @@
 // case 6's control without scribbling, with TMPDIR under core/target/harness.
 //
 // usage: harness units | shell | compose | dek | content <units> [--no-scribble] | kept | control
-//        harness needles <file>     (the helper run that `dek` starts)
+//        harness needles <file>     (the helper run that `dek` starts: ECIES needles)
 //        harness argdomain -NSTraceEvents YES -NSZombieEnabled YES
 //                                   (the helper run that `shell` starts)
 //
 // Case numbers are those of §11. Case 2 has two parts: the app shell's
-// (InputFilter, LockState, LaunchGuard) is `shell`, the compose core's
+// (InputFilter, LockState, LaunchGuard, UnlockFailure) is `shell`, the compose core's
 // (EditModel, KeyTranslator) is `compose`. Output is content-free: check
 // names and hit counts only.
 
 import Carbon.HIToolbox
 import CoreGraphics
 import CoreText
-import CryptoKit
 import Foundation
+import LocalAuthentication
 import Security
 
 // MARK: - Checks and scanning
@@ -121,6 +121,16 @@ func throwsLocked<R>(_ f: () throws -> R) -> Bool {
 
 let signingKey = Data(repeating: 4, count: 65)
 
+/// A new software P-256 key pair, as a SecKey (not in any keychain).
+func newSoftwareKEK() throws -> SecKey {
+    let attrs: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+                                kSecAttrKeySizeInBits as String: 256]
+    var err: Unmanaged<CFError>?
+    guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &err)
+    else { throw err.map { $0.takeRetainedValue() as Error } ?? Enclave.Failure.unknown }
+    return key
+}
+
 /// A fresh directory in TMPDIR for one run's stores, removed afterwards.
 func withStoreDir(_ body: (URL) -> Void) {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("brev-harness-\(getpid())")
@@ -130,16 +140,18 @@ func withStoreDir(_ body: (URL) -> Void) {
     body(dir)
 }
 
-/// The unlock closure of §5.4: open the wrapped DEK, unlock on the same
-/// thread, wipe. Returns whether the DEK's Data kept its address (no copy)
-/// and ended all zero.
-func unlock(_ session: Session, wrapped: Data, kek: P256.KeyAgreement.PrivateKey) throws -> (Bool, Bool) {
-    var dek = try Enclave.open(wrapped, with: kek)
-    let before = dek.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
-    do { try session.brev.unlock(dek: dek) } catch { dek.wipe(); session.brev.lock(); throw error }
-    dek.wipe()
-    let after = dek.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
-    return (before == after, dek.allSatisfy { $0 == 0 })
+/// The unlock closure of §5.4 (UnlockService): unwrap the DEK, unlock on
+/// the same thread without a copy, and the CFData is zeroed in place when
+/// `unwrap` returns. Any error locks the session.
+func unlock(_ session: Session, wrapped: Data, kek: SecKey) throws {
+    do {
+        try Enclave.unwrap(wrapped, with: kek) { dek in
+            do { try session.brev.unlock(dek: dek) } catch { throw CoreUnlockError(underlying: error) }
+        }
+    } catch {
+        session.brev.lock()
+        throw error
+    }
 }
 
 /// Onboarding steps 6 and 7 with a software KEK: a random DEK in a
@@ -148,10 +160,11 @@ func makeUnlockedSession(in dir: URL) throws -> Session {
     let dek = SecretBytes(capacity: 64)
     guard SecRandomCopyBytes(kSecRandomDefault, 32, dek.base) == errSecSuccess else { throw BrevError.Rng }
     dek.setCount(32)
-    let kek = P256.KeyAgreement.PrivateKey()
-    let wrapped = try Enclave.wrap(dek: dek, to: kek.publicKey)
+    let kek = try newSoftwareKEK()
+    guard let kekPublic = SecKeyCopyPublicKey(kek) else { throw Enclave.Failure.unknown }
+    let wrapped = try Enclave.wrap(dek: dek, to: kekPublic)
     let session = try Session.create(dir: dir.path, dek: dek, signingKey: signingKey)
-    _ = try unlock(session, wrapped: wrapped, kek: kek)
+    try unlock(session, wrapped: wrapped, kek: kek)
     return session
 }
 
@@ -277,22 +290,66 @@ func caseUnits() {
     }
     check("TextLayout: an empty paragraph is an empty line", layout.lines.contains { $0.length == 0 && $0.start == wordsEnd + 1 })
 
-    // Enclave wrap and open (software KEK)
+    // Enclave: ECIES wrap and unwrap with a software KEK
+    caseEnclaveUnits()
+}
+
+func caseEnclaveUnits() {
+    guard let kek = try? newSoftwareKEK(), let kekPublic = SecKeyCopyPublicKey(kek) else {
+        check("a software P-256 key can be made", false)
+        return
+    }
+    let raw = try? Enclave.publicKeyBytes(of: kekPublic)
+    check("Enclave: a public key is 65 bytes in X9.63 form", raw?.count == 65 && raw?.first == 0x04)
     let dek = SecretBytes(capacity: 64)
     _ = SecRandomCopyBytes(kSecRandomDefault, 32, dek.base)
     dek.setCount(32)
-    let kek = P256.KeyAgreement.PrivateKey()
-    let wrapped = try? Enclave.wrap(dek: dek, to: kek.publicKey)
-    var opened = wrapped.flatMap { try? Enclave.open($0, with: kek) }
-    check("Enclave: wrap gives 113 bytes, open gives the DEK back",
-          wrapped?.count == Enclave.wrappedLength && opened.map { o in dek.withBytes { Data($0) == o } } == true)
-    opened?.wipe()
+    let wrapped = try? Enclave.wrap(dek: dek, to: kekPublic)
+    let equal = wrapped.flatMap { w in try? Enclave.unwrap(w, with: kek) { d in dek.withBytes { Data($0) == d } } }
+    check("Enclave: wrap gives 113 bytes, unwrap gives the DEK back",
+          wrapped?.count == Enclave.wrappedLength && equal == true)
+    let short = SecretBytes(capacity: 64)
+    short.setCount(31)
+    check("Enclave: only a 32-byte DEK is wrapped",
+          { do { _ = try Enclave.wrap(dek: short, to: kekPublic); return false } catch Enclave.Failure.malformed { return true } catch { return false } }())
     dek.wipe()
-    check("Enclave: a wrapped DEK of the wrong length is refused",
-          (try? Enclave.open(Data(count: 112), with: kek)) == nil)
+    var ran = false
+    let refused: Bool
+    do { try Enclave.unwrap(Data(count: 112), with: kek) { _ in ran = true }; refused = false } catch Enclave.Failure.malformed {
+        refused = true
+    } catch { refused = false }
+    check("Enclave: a wrapped DEK of the wrong length is refused before Security sees it", refused && !ran)
+    if var bad = wrapped {
+        bad[bad.count - 1] ^= 1
+        do {
+            try Enclave.unwrap(bad, with: kek) { _ in ran = true }
+            check("Enclave: a tampered wrapped DEK is refused", false)
+        } catch {
+            let codes = UnlockFailure.chain(error).map { "\($0.domain) \($0.code)" }.joined(separator: ", ")
+            // Security reports errSecParam (-50) here; it reads as retry.
+            check("Enclave: a tampered wrapped DEK is refused and reads as retry [\(codes)]",
+                  !ran && UnlockFailure.classify(error, fingersChanged: false) == .retry)
+        }
+    }
+
+    // withWiped: the view is the CFData's own bytes, zeroed in place on
+    // every path.
+    let filled = [UInt8](repeating: 0xAB, count: 32)
+    let cf = CFDataCreate(nil, filled, 32)!
+    let p = CFDataGetBytePtr(cf)!
+    let seen = Enclave.withWiped(cf) { v in
+        (v.withUnsafeBytes { $0.baseAddress } == UnsafeRawPointer(p), v.count, v.allSatisfy { $0 == 0xAB })
+    }
+    check("Enclave.withWiped: the Data is the CFData's bytes (no copy), zeroed afterwards",
+          seen.0 && seen.1 == 32 && seen.2 && UnsafeBufferPointer(start: p, count: 32).allSatisfy { $0 == 0 })
+    let cf2 = CFDataCreate(nil, filled, 32)!
+    let p2 = CFDataGetBytePtr(cf2)!
+    let threw = (try? Enclave.withWiped(cf2) { _ in throw Enclave.Failure.malformed }) == nil
+    check("Enclave.withWiped: zeroed also when the body throws",
+          threw && UnsafeBufferPointer(start: p2, count: 32).allSatisfy { $0 == 0 })
 }
 
-// MARK: - Case 2, the app shell's part: InputFilter, LockState, LaunchGuard
+// MARK: - Case 2, the app shell's part: InputFilter, LockState, UnlockFailure, LaunchGuard
 
 func caseShell() {
     // InputFilter on CGEvents made in memory; nothing is posted.
@@ -347,6 +404,8 @@ func caseShell() {
     check("LockState: idle at 300 s, not before, not with a clock behind the last input",
           limit == 300_000_000_000 && !LockState.isIdle(now: t0 + limit - 1, lastInput: t0)
             && LockState.isIdle(now: t0 + limit, lastInput: t0) && !LockState.isIdle(now: t0 - 1, lastInput: t0))
+
+    caseUnlockFailure()
 
     // LaunchGuard on injected environments and defaults
     check("LaunchGuard: only argv[0] is allowed",
@@ -407,6 +466,48 @@ func caseShell() {
     helper.waitUntilExit()
     for line in String(decoding: out, as: UTF8.self).split(separator: "\n") { print("  helper: " + line) }
     check("the argument-domain helper run passes", helper.terminationStatus == 0, "status \(helper.terminationStatus)")
+}
+
+/// UnlockFailure.classify (design §5.5) on errors made in memory.
+func caseUnlockFailure() {
+    func ns(_ domain: String, _ code: Int, under: Error? = nil) -> NSError {
+        NSError(domain: domain, code: code, userInfo: under.map { [NSUnderlyingErrorKey: $0 as NSError] } ?? [:])
+    }
+    let os = NSOSStatusErrorDomain, tk = UnlockFailure.tokenDomain
+    let table: [(String, Error, Bool, UnlockFailure)] = [
+        ("LA userCancel", LAError(.userCancel), false, .cancelled),
+        ("LA systemCancel", LAError(.systemCancel), true, .cancelled),
+        ("LA appCancel", LAError(.appCancel), false, .cancelled),
+        ("TK canceledByUser", ns(tk, -4), true, .cancelled),
+        ("errSecUserCanceled", ns(os, Int(errSecUserCanceled)), false, .cancelled),
+        ("a cancel under an OSStatus", ns(os, Int(errSecAuthFailed), under: LAError(.userCancel)), true, .cancelled),
+        ("LA biometryLockout, fingers changed", LAError(.biometryLockout), true, .lockout),
+        ("LA biometryNotAvailable", LAError(.biometryNotAvailable), false, .unavailable),
+        ("LA biometryNotEnrolled", LAError(.biometryNotEnrolled), true, .unavailable),
+        ("LA biometryNotPaired", LAError(.biometryNotPaired), false, .unavailable),
+        ("LA biometryDisconnected", LAError(.biometryDisconnected), false, .unavailable),
+        ("Rust WrongKey", CoreUnlockError(underlying: BrevError.WrongKey), false, .damaged),
+        ("Rust Corrupt, fingers changed", CoreUnlockError(underlying: BrevError.Corrupt), true, .damaged),
+        ("Rust Io, fingers changed", CoreUnlockError(underlying: BrevError.Io), true, .retry),
+        ("a missing key or item", ns(os, Int(errSecItemNotFound)), false, .damaged),
+        ("a missing key or item, fingers changed", ns(os, Int(errSecItemNotFound)), true, .fingers),
+        ("a malformed wrapped DEK", Enclave.Failure.malformed, false, .damaged),
+        ("TK corruptedData", ns(tk, -3), false, .damaged),
+        ("TK authenticationFailed", ns(tk, -5), false, .retry),
+        ("TK authenticationFailed, fingers changed", ns(tk, -5), true, .fingers),
+        ("LA authenticationFailed", LAError(.authenticationFailed), false, .retry),
+        ("LA notInteractive", LAError(.notInteractive), false, .retry),
+        ("another OSStatus", ns(os, Int(errSecInteractionNotAllowed)), false, .retry),
+    ]
+    for (name, error, changed, expected) in table {
+        let got = UnlockFailure.classify(error, fingersChanged: changed)
+        check("UnlockFailure: \(name) → \(expected.rawValue)", got == expected, got.rawValue)
+    }
+    let resets = [UnlockFailure.cancelled, .lockout, .unavailable, .damaged, .fingers, .retry].filter(\.offersReset)
+    check("UnlockFailure: only damaged and fingers offer the reset", resets == [.damaged, .fingers])
+    let chain = UnlockFailure.chain(ns(os, -1, under: ns(tk, -2, under: LAError(.userCancel))))
+    check("UnlockFailure: the error chain is read outermost first",
+          chain.map(\.code) == [-1, -2, LAError.userCancel.rawValue] && chain.last?.domain == LAErrorDomain)
 }
 
 /// The helper run of `shell`, started with -NSTraceEvents YES -NSZombieEnabled YES.
@@ -708,7 +809,7 @@ func caseKeyTranslator() {
     check("typing: after wipe, no copy of the typed marker (UTF-8, UTF-16)", h.u8 == 0 && h.u16 == 0, "\(h)")
 }
 
-// MARK: - Case 3: the DEK hand-off and HPKE needles
+// MARK: - Case 3: the DEK hand-off and ECIES needles
 
 func caseDEK() {
     requireScribble(true)
@@ -724,14 +825,19 @@ func caseDEK() {
             return
         }
         try? FileManager.default.removeItem(at: file)
-        let kek = try! P256.KeyAgreement.PrivateKey(rawRepresentation: blob[0..<32])
-        let wrapped = Data(blob[32..<(32 + Enclave.wrappedLength)])
-        let xored = Data(blob[(32 + Enclave.wrappedLength)...])   // XORed needles only
+        let k = NeedleFile.keyLength, w = Enclave.wrappedLength
+        guard let kek = try? softwareKEK(Data(blob[0..<k])) else {
+            check("the helper's KEK loads", false)
+            return
+        }
+        let wrapped = Data(blob[k..<(k + w)])
+        let xored = Data(blob[(k + w)...])   // XORed needles only
         blob.wipe()
+        let n = NeedleFile.names.count
         let offsets = NeedleFile.lengths.indices.map { NeedleFile.lengths[..<$0].reduce(0, +) }
-        for (i, n) in NeedleFile.lengths.enumerated() {
-            let set = xored[offsets[i]..<(offsets[i] + n)].withUnsafeBytes {
-                brev_scan_set_needle(i, $0.bindMemory(to: UInt8.self).baseAddress, n)
+        for (i, len) in NeedleFile.lengths.enumerated() {
+            let set = xored[offsets[i]..<(offsets[i] + len)].withUnsafeBytes {
+                brev_scan_set_needle(i, $0.bindMemory(to: UInt8.self).baseAddress, len)
             }
             check("scanner takes needle \(NeedleFile.names[i])", set == 0)
         }
@@ -747,8 +853,8 @@ func caseDEK() {
         let dek = materialise(0)
 
         var h = scan()
-        check("baseline: the DEK is in its SecretBytes only (positive control); no HPKE secret",
-              h.needle(0) == 1 && (1..<5).allSatisfy { h.needle($0) == 0 }, "\(h)")
+        check("baseline: the DEK is in its SecretBytes only (positive control); no ECIES secret",
+              h.needle(0) == 1 && (1..<n).allSatisfy { h.needle($0) == 0 }, "\(h)")
         let session: Session
         do { session = try Session.create(dir: dir.path, dek: dek, signingKey: signingKey) } catch {
             check("create", false, "\(error)")
@@ -758,7 +864,7 @@ func caseDEK() {
         check("after create: the DEK is nowhere; the session is locked", h.needle(0) == 0 && session.brev.isLocked(), "\(h)")
 
         // The unlock closure on its own serial queue, as UnlockService runs it.
-        var result: Result<(Bool, Bool), Error>?
+        var result: Result<Void, Error>?
         let done = DispatchSemaphore(value: 0)
         DispatchQueue(label: "no.brev.unlock").async {
             result = Result { try unlock(session, wrapped: wrapped, kek: kek) }
@@ -766,22 +872,19 @@ func caseDEK() {
         }
         done.wait()
         switch result {
-        case .success(let (sameAddress, zeroed))?:
-            check("unlock: the DEK's Data is wiped in place (same address, all zero)", sameAddress && zeroed)
-        case .failure(let error)?:
-            check("unlock", false, "\(error)")
-        case nil:
-            check("unlock ran", false)
+        case .success?: check("unlock with the software KEK", true)
+        case .failure(let error)?: check("unlock with the software KEK", false, "\(error)")
+        case nil: check("unlock ran", false)
         }
         h = scan()
         check("while unlocked: the DEK is in Rust's box only", h.needle(0) == 1 && !session.brev.isLocked(), "\(h)")
-        for i in 1..<5 {
+        for i in 1..<n {
             check("after the unlock closure: no \(NeedleFile.names[i])", h.needle(i) == 0, "\(h)")
         }
         session.brev.lock()
         h = scan()
-        check("after lock: no DEK and no HPKE secret anywhere", (0..<5).allSatisfy { h.needle($0) == 0 }, "\(h)")
-        for i in 1..<5 {
+        check("after lock: no DEK and no ECIES secret anywhere", (0..<n).allSatisfy { h.needle($0) == 0 }, "\(h)")
+        for i in 1..<n {
             let b = materialise(i)
             h = scan()
             b.wipe()

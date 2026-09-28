@@ -88,9 +88,13 @@ if [[ "$ARCH" != "$(uname -m)" ]]; then
   echo "      (the rustup toolchain cargo used is not native to this shell; see \`rustup show\`)"
 fi
 
+# -allowProvisioningUpdates: Brev is signed by team AV26DNQ5SC with automatic
+# signing (docs/DECISIONS.md D-0035), so xcodebuild may fetch or renew the
+# Mac App Development profile. This Mac and the App ID are registered.
 echo "==> Building Brev ($CONFIGURATION, $ARCH)"
 xcodebuild \
   -project "$APP_DIR/Brev.xcodeproj" \
+  -allowProvisioningUpdates \
   -scheme Brev \
   -configuration "$CONFIGURATION" \
   -destination "platform=macOS,arch=$ARCH" \

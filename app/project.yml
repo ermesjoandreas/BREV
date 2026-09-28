@@ -89,15 +89,22 @@ targets:
         NSHighResolutionCapable: true
 
     # Entitlements are generated from this block into Brev.entitlements and wired
-    # into CODE_SIGN_ENTITLEMENTS. App Sandbox ON (CLAUDE.md §3.2). Phase 0 has no
-    # other entitlement (network.client arrives in Phase 3). Never add
-    # cs.disable-library-validation, cs.allow-jit, cs.allow-unsigned-executable-memory,
-    # cs.allow-dyld-environment-variables, cs.debugger, get-task-allow, iCloud,
-    # keychain-access-groups or temporary-exception entitlements (§1.9, §3.2).
+    # into CODE_SIGN_ENTITLEMENTS. App Sandbox ON (CLAUDE.md §3.2). The one
+    # keychain access group holds the two Secure Enclave keys and the wrapped
+    # DEK (§3.2, §3.3; docs/DECISIONS.md D-0035); the provisioning profile
+    # authorises it, and Xcode adds application-identifier and
+    # team-identifier from the profile. network.client arrives in Phase 3.
+    # Never add cs.disable-library-validation, cs.allow-jit,
+    # cs.allow-unsigned-executable-memory, cs.allow-dyld-environment-variables,
+    # cs.debugger, get-task-allow, iCloud (keychain sharing with iCloud
+    # included), another keychain group or temporary-exception entitlements
+    # (§1.9, §3.2).
     entitlements:
       path: Brev.entitlements
       properties:
         com.apple.security.app-sandbox: true
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)no.brev.app
 
     settings:
       base:
@@ -144,12 +151,16 @@ targets:
         # App Sandbox ON (§3.2). Redundant with the entitlements file, and harmless.
         ENABLE_APP_SANDBOX: "YES"
         CODE_SIGN_ENTITLEMENTS: Brev.entitlements
-        # Ad-hoc signing so a clean checkout builds with no Apple team. Sandbox and
-        # Hardened Runtime are still enforced locally for ad-hoc signatures.
-        # Real Developer ID signing + notarization are Phase 5.
-        CODE_SIGN_IDENTITY: "-"
-        CODE_SIGN_STYLE: Manual
-        DEVELOPMENT_TEAM: ""
+        # Signed by the owner's team with a Mac App Development profile
+        # (docs/DECISIONS.md D-0035, replacing D-0005's ad-hoc signing): the
+        # data protection keychain binds Brev's keys to this signing identity,
+        # and an ad-hoc build cannot reach them (-34018). Automatic signing
+        # picks the Apple Development certificate and the profile; xcodebuild
+        # needs -allowProvisioningUpdates (scripts/build.sh and test.sh pass
+        # it). Developer ID signing and notarization are Phase 5.
+        CODE_SIGN_IDENTITY: "Apple Development"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: AV26DNQ5SC
         # Build-phase scripts (none today) run sandboxed, so a future script phase
         # cannot silently read or write outside the declared inputs (§1.1 hygiene).
         ENABLE_USER_SCRIPT_SANDBOXING: "YES"

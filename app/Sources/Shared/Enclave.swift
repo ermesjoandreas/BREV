@@ -1,70 +1,109 @@
-// Enclave.swift — the two Secure Enclave keys and the HPKE-wrapped DEK.
+// Enclave.swift — the key-encryption operations on Secure Enclave SecKeys.
 //
-// Upholds CLAUDE.md §1.8, §1.9 and §3.3 (docs/DECISIONS.md D-0032, D-0033;
-// docs/PHASE2_DESIGN.md §5.1): both keys are CryptoKit SecureEnclave.P256
-// keys, ThisDeviceOnly and bound to the current fingerprints
-// (.biometryCurrentSet). Their blobs are stored as files by KeyStore, never
-// in the keychain. The DEK is wrapped to the KEK with HPKE (RFC 9180,
-// P256_SHA256_AES_GCM_256). Creating the keys and wrapping need no prompt;
-// opening needs one Touch ID prompt, through the LAContext the caller gives
-// the KEK (UnlockService, §5.4). No AppKit: compiled into the app and the
-// CLI harness, which runs `wrap` and `open` with a software key.
+// Upholds CLAUDE.md §1.8, §1.9, §1.10 and §3.3 (docs/DECISIONS.md D-0035):
+// both keys are permanent Secure Enclave SecKeys in the data protection
+// keychain, ThisDeviceOnly and bound to the current fingerprints
+// (.biometryCurrentSet); KeyStore (Keys/) creates and finds them. The DEK is
+// wrapped to the KEK's public key with ECIES
+// (.eciesEncryptionCofactorVariableIVX963SHA256AESGCM), which needs no
+// prompt, and unwrapped with SecKeyCreateDecryptedData, which is the one
+// Touch ID prompt, through the LAContext the key was looked up with
+// (UnlockService). The unwrapped DEK exists only as the CFData Security
+// returns: the caller sees it as a no-copy Data inside a closure, and the
+// CFData is zeroed in place when the closure returns, on every path. No
+// AppKit and no keychain: compiled into the app and the CLI harness, which
+// runs `wrap` and `unwrap` with a software key.
 
-import CryptoKit
 import Foundation
 import LocalAuthentication
 import Security
 
 enum Enclave {
-    static let suite = HPKE.Ciphersuite.P256_SHA256_AES_GCM_256
-    static let info = Data("brev/v1/dek-wrap".utf8)
-    static let encapsulatedKeyLength = 65
-    /// `dek.hpke`: encapsulated key (65) || ciphertext (32) + tag (16).
-    static let wrappedLength = encapsulatedKeyLength + 32 + 16
+    static let algorithm = SecKeyAlgorithm.eciesEncryptionCofactorVariableIVX963SHA256AESGCM
+    /// A P-256 public key in X9.63 form: 04 || X || Y.
+    static let publicKeyLength = 65
+    /// The wrapped DEK: ephemeral public key (65) || ciphertext (32) + tag (16).
+    static let wrappedLength = publicKeyLength + 32 + 16
 
+    enum Failure: Error {
+        /// A wrapped DEK, an unwrapped DEK or a public key of the wrong length.
+        case malformed
+        /// Security failed without saying why.
+        case unknown
+    }
+
+    /// Touch ID only, the current fingers only, this Mac only, and only
+    /// while a login password is set (§1.8, §1.9).
     static func accessControl() throws -> SecAccessControl {
         var err: Unmanaged<CFError>?
         guard let ac = SecAccessControlCreateWithFlags(
             nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
             [.privateKeyUsage, .biometryCurrentSet], &err)
-        else { throw err!.takeRetainedValue() as Error }
+        else { throw err.map { $0.takeRetainedValue() as Error } ?? Failure.unknown }
         return ac
     }
 
-    /// Creates the identity key and the KEK, without any prompt (a context
-    /// that forbids interaction).
-    static func makeKeys() throws -> (identity: SecureEnclave.P256.Signing.PrivateKey,
-                                      kek: SecureEnclave.P256.KeyAgreement.PrivateKey) {
-        let ctx = LAContext()
-        ctx.interactionNotAllowed = true
-        let ac = try accessControl()
-        let identity = try SecureEnclave.P256.Signing.PrivateKey(
-            compactRepresentable: false, accessControl: ac, authenticationContext: ctx)
-        let kek = try SecureEnclave.P256.KeyAgreement.PrivateKey(
-            compactRepresentable: false, accessControl: ac, authenticationContext: ctx)
-        return (identity, kek)
+    /// A P-256 public key in X9.63 form (65 bytes). For the identity key
+    /// this is what `Brev.create` stores as the user's signing key.
+    static func publicKeyBytes(of publicKey: SecKey) throws -> Data {
+        var err: Unmanaged<CFError>?
+        guard let raw = SecKeyCopyExternalRepresentation(publicKey, &err) as Data?
+        else { throw err.map { $0.takeRetainedValue() as Error } ?? Failure.unknown }
+        guard raw.count == publicKeyLength else { throw Failure.malformed }
+        return raw
     }
 
-    /// Wraps the 32-byte DEK to the KEK's public key. No prompt. The result
-    /// is `wrappedLength` bytes and not secret.
-    static func wrap(dek: SecretBytes, to kek: P256.KeyAgreement.PublicKey) throws -> Data {
-        guard dek.count == 32 else { throw CryptoKitError.incorrectParameterSize }
-        var sender = try HPKE.Sender(recipientKey: kek, ciphersuite: suite, info: info)
-        let ct = try dek.withBytes { try sender.seal($0) }
-        return sender.encapsulatedKey + ct
+    /// Wraps the 32-byte DEK to `publicKey`. No prompt. The result is
+    /// `wrappedLength` bytes and not secret. Security reads the DEK through
+    /// a no-copy view of its SecretBytes.
+    static func wrap(dek: SecretBytes, to publicKey: SecKey) throws -> Data {
+        guard dek.count == 32 else { throw Failure.malformed }
+        var err: Unmanaged<CFError>?
+        // 32 bytes: a no-copy Data of 14 bytes or less would be copied inline.
+        let plain = Data(bytesNoCopy: dek.base, count: 32, deallocator: .none)
+        let wrapped = withExtendedLifetime(dek) {
+            SecKeyCreateEncryptedData(publicKey, algorithm, plain as CFData, &err) as Data?
+        }
+        guard let wrapped else { throw err.map { $0.takeRetainedValue() as Error } ?? Failure.unknown }
+        guard wrapped.count == wrappedLength else { throw Failure.malformed }
+        return wrapped
     }
 
-    /// Opens a wrapped DEK. With a Secure Enclave KEK this is the one Touch
-    /// ID prompt. The result is 32 bytes of heap `Data` that the caller hands
-    /// to `Brev.unlock` on the same thread and then wipes in place (§5.4).
-    /// Generic over the key type, so the harness runs the same code with a
-    /// software key (no Secure Enclave, no prompt).
-    static func open<K: HPKEDiffieHellmanPrivateKey>(_ wrapped: Data, with key: K) throws -> Data {
-        guard wrapped.count == wrappedLength else { throw CryptoKitError.incorrectParameterSize }
-        let enc = wrapped.prefix(encapsulatedKeyLength)
-        let ct = wrapped.suffix(from: wrapped.startIndex + encapsulatedKeyLength)
-        var r = try HPKE.Recipient(privateKey: key, ciphersuite: suite, info: info, encapsulatedKey: Data(enc))
-        return try r.open(ct)
+    /// Unwraps `wrapped` with `key` and runs `body` with the DEK: 32 bytes,
+    /// a no-copy Data over the CFData Security returned, which must not
+    /// escape `body`. The CFData is zeroed in place when this returns, on
+    /// every path. With a Secure Enclave KEK this is the one Touch ID prompt.
+    /// UnlockService calls `Brev.unlock` in `body`, on the same thread, so
+    /// Rust's stack scrub covers the frames this call used (design §2.5).
+    static func unwrap<R>(_ wrapped: Data, with key: SecKey, _ body: (Data) throws -> R) throws -> R {
+        guard wrapped.count == wrappedLength else { throw Failure.malformed }
+        var err: Unmanaged<CFError>?
+        guard let plain = SecKeyCreateDecryptedData(key, algorithm, wrapped as CFData, &err)
+        else { throw err.map { $0.takeRetainedValue() as Error } ?? Failure.unknown }
+        return try withWiped(plain) { dek in
+            guard dek.count == 32 else { throw Failure.malformed }
+            return try body(dek)
+        }
+    }
+
+    /// Runs `body` with a no-copy Data over `data`'s bytes, then zeroes those
+    /// bytes in place with `memset_s`, on every path. `data` is a CFData that
+    /// only this caller holds (Security's decrypt result), so its bytes are
+    /// the only copy. The Data must not escape `body`.
+    static func withWiped<R>(_ data: CFData, _ body: (Data) throws -> R) rethrows -> R {
+        let n = CFDataGetLength(data)
+        guard n > 0, let p = CFDataGetBytePtr(data) else { return try body(Data()) }
+        let bytes = UnsafeMutableRawPointer(mutating: p)
+        defer { _ = memset_s(bytes, n, 0, n) }
+        // More than 14 bytes, so Foundation keeps the view out of line: the
+        // view is these bytes, not a copy (SecretBytes.capacity).
+        let view = Data(bytesNoCopy: bytes, count: n, deallocator: .none)
+        return try withExtendedLifetime(data) { try body(view) }
+    }
+
+    /// Whether Touch ID is set up and usable. No prompt.
+    static func touchIDAvailable() -> Bool {
+        LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
     }
 
     /// The enrolled-fingers hash: a hint only (docs/PHASE2_DESIGN.md §5.5),

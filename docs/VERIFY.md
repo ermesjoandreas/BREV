@@ -77,8 +77,8 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 
 | # | Check | How | A/H | Depends on |
 |---|---|---|---|---|
-| V1 | Sandboxed + hardened | on `$APP` and `$VAPP`: `codesign -dv`: `runtime`; entitlements only `app-sandbox`; no `get-task-allow` | A | – |
-| V2 | Plist and bundle | on `$APP` and `$VAPP`: `plutil -p`: none of D-0009's keys; `NSPrincipalClass = BrevApplication`; `LSEnvironment.MallocScribble = 1`. No extension, App Intents metadata, XPC service, sdef, Quick Look or Spotlight plug-in, bundle, framework or nested app anywhere in the bundle, and `Contents` holds only `Info.plist`, `MacOS`, `PkgInfo`, `Resources`, `_CodeSignature` | A | – |
+| V1 | Sandboxed + hardened | on `$APP` and `$VAPP`: `codesign -dv`: `runtime`, `TeamIdentifier=AV26DNQ5SC`; entitlements only `app-sandbox`, `keychain-access-groups` = `AV26DNQ5SC.no.brev.app`, and the `application-identifier` and `team-identifier` the profile adds; no `get-task-allow` | A | – |
+| V2 | Plist and bundle | on `$APP` and `$VAPP`: `plutil -p`: none of D-0009's keys; `NSPrincipalClass = BrevApplication`; `LSEnvironment.MallocScribble = 1`. No extension, App Intents metadata, XPC service, sdef, Quick Look or Spotlight plug-in, bundle, framework or nested app anywhere in the bundle, and `Contents` holds only `Info.plist`, `MacOS`, `PkgInfo`, `Resources`, `_CodeSignature` and `embedded.provisionprofile` (team signing, D-0035) | A | – |
 | V3 | No AppleScript | `sdef` fails; with Brev running, `osascript -e 'tell application "Brev" to get name of every window'` must fail with an error from Brev itself (expected -1708, errAEEventNotHandled; record the code). -1743 (not permitted) or -600 (not running) means the event never reached Brev and fails the row (grant Automation first) | A | – |
 | V4 | ⇧⌘4 (window and area), ⇧⌘5 recording | a marker letter open: content absent or black | H | per D-0057 (U1) |
 | V5 | `screencapture` | `-x` and `-V 3` show no letter; `-l <id>` (id from `tools/verify/windows`) fails; control: another app's window is visible | A | per D-0057 (U1) |
@@ -114,9 +114,9 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 | V35 | Norwegian input | æ ø å Æ Ø Å; ´+e → é; ¨+u → ü; ⇧´+e → è; ⌥¨ then n → ñ; @ (the key left of Return); ⇧4 $; ⌥7 \|; ⇧⌥7 \\; ⌥8/⌥9 [ ]; ⇧⌥8/⇧⌥9 { }; Caps Lock; key repeat | H | per D-0057 (U2.1) |
 | V36 | Onboarding | the four rules texts (`touchid`, `nobackup`, `fingers`, `prompt`) appear in bokmål, plus `onboarding.rules.gone` if D-0055 chose the warning; *Opprett nøkler* stays disabled until *Jeg forstår …* is ticked | H | per D-0055 |
 | V37 | Crash during onboarding | `kill -9` after *Opprett nøkler*, before the first unlock: relaunch shows onboarding; only fresh files exist after the next attempt | A + H | – |
-| V38 | Damaged and reset | move `kek.se` out of `$D`: `unlock.error.damaged`; files unchanged after *Avbryt* in `ConfirmSheet`; gone only after *Slett alt*; onboarding starts | H + A | – |
+| V38 | Damaged and reset | Brev quit, move `brev.db` out of `$D`, launch: `unlock.error.damaged` with only *Slett alt og start på nytt*; files unchanged after *Avbryt* in `ConfirmSheet`; after *Slett alt* onboarding starts and `$D` holds only `.lock`; quit and launch again: onboarding (the wrapped-DEK item is gone too) | H + A | – |
 | V39 | Heap residue in the real app | Verify build: send and read a marker letter to Ekko, lock; log `selfscan u8=0 u16=0 glyph=0`. `glyph` counts the marker's glyph ids in `GlyphFlush.attrs`'s font (stored XORed, as in harness case 4); it is the only count that sees the residue `MallocScribble` and `GlyphFlush` remove. Control: a scan while the letter is open shows u16 > 0 and glyph > 0 | H + A | per D-0057 (M) |
-| V40 | Key files | `identity.se`, `kek.se` 569 B; `biometry.state` 32 B (if written); `dek.hpke` 113 B; all files 0600, the directory 0700; `security find-generic-password -s no.brev.app` finds nothing (if WP9 is built: only the anchor item); `xattr`/`tmutil isexcluded` shows the folder excluded (if the owner allows backups: not excluded) | A | per D-0055, D-0057 (A); per D-0037 (Q3) |
+| V40 | Key storage | no key file: `$D` holds only `.lock` (0 B), `biometry.state` (32 B, if written) and the three stores; all files 0600, the directory 0700; `security find-generic-password -s no.brev.app` finds nothing (the keys and the wrapped DEK are in the data protection keychain, which `security` cannot list; a copy in a file keychain would be a bug); `xattr`/`tmutil isexcluded` shows the folder excluded | A | – |
 | V41 | Nothing else written | no `Saved Application State`; only §5.1's files in Application Support. Run after onboarding, again after V44's quit, and again after V20's crash | A | – |
 | V42 | Echo | the three panes show Ekko and Speil, the threads and the letters; a letter to Ekko and one to Speil show as sent; each echo arrives within 3 s in the same thread | H | – |
 | V43 | Dock / title | no minimise button; title "Brev"; the Dock window list shows only "Brev" | H | – |
@@ -127,8 +127,8 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 | V48 | Unlock errors | wrong fingers until Touch ID locks out: `unlock.error.lockout`, never a password button. Then, as the last row of the run: add a fingerprint in System Settings: `unlock.error.fingers` with the reset button. This makes the test install unreadable, as designed, and also invalidates other apps' `.biometryCurrentSet` keys | H | per D-0057 (U4.3) |
 | V49 | Malloc scribbling in the real process | `ps -wwE` shows `MallocScribble=1` for Brev started with `open "$APP"`, from the Finder and from the Dock; `open --env MallocScribble=0 "$APP"` → a re-executed process with `MallocScribble=1`, or `launch.error.unsafe` | A + H launches | per D-0057 (M) |
 | V50 | Release has no Verify code | `nm` on the Release binary finds no `SelfScan` or `brev_scan` symbol; control: the same grep finds them in the Verify build | A | – |
-| V51 | Unlock stack residue | `tools/verify/touchid-probe` with the final `brev-core`: the exact §5.4 closure, needles for the DEK, the P-256 DH output, the HPKE KEM shared secret, the AEAD key and the base nonce: 0 hits after the closure at the scrub depth D-0035 names; control: while unlocked, the DEK needle finds Rust's copy | H + A | per D-0057 (K) |
-| V52 | File substitution | only if WP9 is built: copy `$D` aside before V38; after the new onboarding, put the old `kek.se`, `dek.hpke` and stores back: `unlock.error.tampered`, and no unlock | H + A | per D-0055, D-0057 (A) |
+| V51 | Unlock stack residue | `tools/verify/touchid-probe` with the final `brev-core`: the exact §5.4 closure (`UnlockService`: KEK lookup, `SecKeyCreateDecryptedData` with ECIES, `brev.unlock`, in-place wipe), needles for the DEK, the ECDH output, the AES key and the IV: 0 hits after the closure at the scrub depth recorded for the unlock drop guard (design D-0035, D-0038 after the renumbering); control: while unlocked, the DEK needle finds Rust's copy | H + A | per D-0057 (K) |
+| V52 | File substitution | copy the three stores in `$D` aside before V38; after the new onboarding, Brev quit, put the old stores back: the unlock fails with `unlock.error.damaged` (the new DEK does not open them), and nothing unlocks | H + A | – |
 
 ## Commands
 
@@ -137,14 +137,15 @@ For the A parts of the rows above. Each comment says what a pass looks like.
 ```sh
 # V1 and V2, on both builds
 for A in "$APP" "$VAPP"; do
-  codesign -dv "$A" 2>&1 | grep flags                     # flags=0x10002(adhoc,runtime)
-  codesign -d --entitlements - --xml "$A" | plutil -p -   # only "com.apple.security.app-sandbox" => true
+  codesign -dv "$A" 2>&1 | grep -E 'flags|TeamIdentifier' # flags=0x10000(runtime); TeamIdentifier=AV26DNQ5SC
+  codesign -d --entitlements - --xml "$A" | plutil -p -   # only app-sandbox => true, keychain-access-groups => [AV26DNQ5SC.no.brev.app],
+                                                          # com.apple.application-identifier, com.apple.developer.team-identifier
   P="$A/Contents/Info.plist"
   plutil -p "$P" | grep -E 'NSAppleScriptEnabled|NSServices|CFBundleDocumentTypes|CFBundleURLTypes|UTExportedTypeDeclarations|NSUserActivityTypes|NSAppleEventsUsageDescription|Intents|NSMainNibFile'   # nothing
   plutil -extract NSPrincipalClass raw "$P"               # BrevApplication
   plutil -extract LSEnvironment.MallocScribble raw "$P"   # 1
   find "$A" -mindepth 1 \( -name '*.appex' -o -name '*.appintents' -o -name '*.xpc' -o -name '*.sdef' -o -name '*.qlgenerator' -o -name '*.mdimporter' -o -name '*.plugin' -o -name '*.bundle' -o -name '*.framework' -o -name '*.app' \)   # nothing
-  ls -A "$A/Contents"                                     # only Info.plist MacOS PkgInfo Resources _CodeSignature
+  ls -A "$A/Contents"                                     # only Info.plist MacOS PkgInfo Resources _CodeSignature embedded.provisionprofile
 done
 
 # V3
@@ -217,13 +218,13 @@ grep -o 'selfscan .*' "$R/stream.log"                      # after the lock: sel
 
 # V40
 stat -f '%Sp %z %N' "$D" "$D/.lock" "$D"/*                 # drwx------; files -rw-------; sizes as in the row
-security find-generic-password -s no.brev.app              # could not be found (if WP9 is built: only the anchor item)
-tmutil isexcluded "$D"                                     # [Excluded] (if the owner allows backups: [Included])
-xattr -l "$D"                                              # com.apple.metadata:com_apple_backup_excludeItem (if backups are allowed: absent)
+security find-generic-password -s no.brev.app              # could not be found
+tmutil isexcluded "$D"                                     # [Excluded]
+xattr -l "$D"                                              # com.apple.metadata:com_apple_backup_excludeItem
 
 # V41
 ls -A "$C/Data/Library/Saved Application State"            # no such file or directory, or empty
-ls -A "$D"                                                 # only .lock identity.se kek.se biometry.state brev.db peer-1.db peer-2.db dek.hpke
+ls -A "$D"                                                 # only .lock biometry.state brev.db peer-1.db peer-2.db
 
 # V49 (launch with open, from the Finder and from the Dock)
 ps -wwE -p "$(pgrep -x Brev)" | tr ' ' '\n' | grep '^MallocScribble='   # MallocScribble=1
@@ -288,7 +289,7 @@ New mechanisms in the design:
 | Binding patches and the uniffi pin (§3) | V45 |
 | `SecretBytes`, `SecretText`, CTLine-only layout, `GlyphFlush` (§6) | V45, V39 |
 | `MallocScribble` through `LSEnvironment` (§6.4) | V2, V49, V39 |
-| Key files, 0600/0700, backup exclusion, no keychain item (§5.1) | V40, V41 |
+| Keys and the wrapped DEK in the keychain, no key file, 0600/0700, backup exclusion (§5.1 as changed by D-0035) | V1, V40, V41 |
 | Install atomicity and known-name cleanup (§2.10, §5.2, §5.3) | V37 |
 | Instance lock (§5.2) | V29 |
 | Unlock: one prompt, no prompt without a human, the post-unlock rule (§4.3, §5.4) | V26, V27, V47 |
@@ -307,7 +308,7 @@ New mechanisms in the design:
 | Synthetic-input filter in `sendEvent` and `nextEvent` (§8.5) | V32, V33, V45 |
 | Launch hygiene (§8.6) | V28, V49 |
 | Verify configuration and `SelfScan` (§4.1) | V39, V50 |
-| Anchor against file substitution (WP9, only if built) | V52 |
+| Replaced stores do not unlock (§2, D-0035) | V52 |
 | FFI surface check, forbidden-API grep, Swift harness (§11) | V45 |
 
 ## Order of a run
@@ -356,3 +357,10 @@ fail, or the D-entry that accepts it.
 - V13: the design's "the log shows no send, unlock or reset" names log lines
   that nothing writes. The evidence is the state of `$D`, the `AXError`, and
   a human who sees no Touch ID prompt.
+- Keys in the keychain (D-0035, WP5): there are no key files and no
+  `dek.hpke`. V1 expects the team signature and the keychain access group, and V2
+  the embedded provisioning profile;
+  V38 damages the stores instead of moving `kek.se`; V40 and V41 list the
+  files that remain; V51 uses the ECIES secrets; V52, which depended on the
+  dropped anchor (WP9), now checks that stores put back from an older
+  install do not unlock.
