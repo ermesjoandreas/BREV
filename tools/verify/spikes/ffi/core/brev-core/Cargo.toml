@@ -1,0 +1,39 @@
+[package]
+name = "brev-core"
+description = "Brev core: storage, crypto and session state, exposed to Swift via UniFFI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "brev_core"
+# `lib` for Rust tests and the relay, `staticlib` for the macOS app,
+# `cdylib` so `uniffi-bindgen --library` can read metadata on any host.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+uniffi = { workspace = true }
+thiserror = { workspace = true }
+brev-proto = { path = "../brev-proto" }
+rusqlite = { workspace = true }
+chacha20poly1305 = { workspace = true }
+poly1305 = { workspace = true }  # only for its `zeroize` feature (see core/Cargo.toml)
+x25519-dalek = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+brev-alloc-spike = { path = "../brev-alloc-spike" }
+
+[dev-dependencies]
+# Test-only signer/verifier for the envelope signature slot (CLAUDE.md §4:
+# ed25519-dalek is relay-side only; never a normal dependency of brev-core).
+ed25519-dalek = { workspace = true }
+# `trace` (a no-dependency feature of an approved crate) lets one test record
+# every SQL statement with its bound values. Test builds only.
+rusqlite = { workspace = true, features = ["trace"] }
+
+[lints]
+workspace = true

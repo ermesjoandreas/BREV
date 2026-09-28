@@ -1,0 +1,63 @@
+# touchid-probe — XcodeGen spec for TouchIDProbe.app (docs/VERIFY.md V51).
+#
+# A verification tool, never linked into Brev.app. tools/verify/build.sh
+# generates the project next to this file (gitignored) and builds it into
+# core/target/verify. It has Brev's bundle id, team signature and keychain
+# group, because only such a build can make and use Secure Enclave keys the
+# way Brev does (docs/DECISIONS.md D-0035). It compiles Brev's Keys/ and
+# Shared/ code unchanged, L10n for the prompt text, the harness's ECIES
+# sender and heap scanner, the patched bindings and the release archive.
+# Like Release: sandboxed, hardened, no get-task-allow.
+
+name: TouchIDProbe
+
+options:
+  minimumXcodeGenVersion: "2.40.0"
+  deploymentTarget:
+    macOS: "14.0"
+  developmentLanguage: nb
+
+targets:
+  TouchIDProbe:
+    type: application
+    platform: macOS
+    sources:
+      - path: main.swift
+      - path: ../../../app/Sources
+        includes:
+          - "Shared/*.swift"
+          - "Keys/*.swift"
+          - "App/L10n.swift"
+          - "nb.lproj/**"
+      - path: ../../../app/Tests/ecies_needles.swift
+      - path: ../../../app/Tests/scan.c
+      - path: ../../../app/Generated/BrevCore.swift
+    settings:
+      base:
+        PRODUCT_NAME: TouchIDProbe
+        PRODUCT_BUNDLE_IDENTIFIER: no.brev.app
+        INFOPLIST_FILE: Info.plist
+        CODE_SIGN_ENTITLEMENTS: TouchIDProbe.entitlements
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: ../../../app/Tests/bridging.h
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/../../../app/Generated
+          - $(SRCROOT)/../../../app/Tests
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - $(SRCROOT)/../../../core/target/release/libbrev_core.a
+        ONLY_ACTIVE_ARCH: "YES"
+        ENABLE_HARDENED_RUNTIME: "YES"
+        ENABLE_APP_SANDBOX: "YES"
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: "NO"
+        CODE_SIGN_IDENTITY: "Apple Development"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: AV26DNQ5SC
+        ENABLE_USER_SCRIPT_SANDBOXING: "YES"
+
+schemes:
+  TouchIDProbe:
+    build:
+      targets:
+        TouchIDProbe: all

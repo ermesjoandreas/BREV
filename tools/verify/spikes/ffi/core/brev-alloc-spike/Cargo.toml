@@ -1,0 +1,16 @@
+[package]
+name = "brev-alloc-spike"
+description = "Spike: probing / zeroing global allocator (unsafe lives only here)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zeroize = { workspace = true }
+zeroizing-alloc = { path = "/private/tmp/claude-503/-Users-andypandy/01f11233-b284-49b2-9c90-391fa2f358ef/scratchpad/p2/ffi/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/zeroizing-alloc-0.1.1", optional = true }
+
+[features]
+onepassword = ["dep:zeroizing-alloc"]
+# no [lints] workspace = true: this crate needs `unsafe` (GlobalAlloc is an unsafe trait)

@@ -6,7 +6,8 @@
 # checks (macOS), the forbidden-API grep, the check that AVFoundation,
 # CoreMedia and CoreVideo stay in the protected layer, the dependency audit,
 # the Swift heap-scan harness (macOS), a compile check of the view host
-# (macOS) and an Xcode compile check (macOS with xcodegen).
+# (macOS), a type-check of the verification tools (macOS) and an Xcode
+# compile check (macOS with xcodegen).
 # Exits non-zero on the first failure.
 #
 # Usage: scripts/test.sh
@@ -311,6 +312,17 @@ if [[ "$DARWIN" == yes ]]; then
   "$REPO_ROOT/tools/viewhost/build.sh" >/dev/null
 else
   echo "==> view host skipped: not macOS ($(uname -s))"
+fi
+
+# The verification tools of docs/VERIFY.md (tools/verify): type-checked so
+# they keep up with app/Sources (TouchIDProbe compiles Brev's Keys/ and
+# Shared/ code). Never built or run here; tools/verify/build.sh builds them,
+# and nothing in them is linked into Brev.app.
+if [[ "$DARWIN" == yes ]]; then
+  echo "==> verification tools (tools/verify, type-check only)"
+  "$REPO_ROOT/tools/verify/build.sh" --check
+else
+  echo "==> verification tools skipped: not macOS ($(uname -s))"
 fi
 
 # Compile check of the Swift app: the project xcodegen generated above, the

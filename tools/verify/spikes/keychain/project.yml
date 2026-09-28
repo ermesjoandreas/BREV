@@ -1,0 +1,30 @@
+name: KCProbe
+options:
+  deploymentTarget:
+    macOS: "14.0"
+targets:
+  KCProbe:
+    type: application
+    platform: macOS
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleName: KCProbe
+        CFBundleIdentifier: no.brev.app
+        LSUIElement: true
+        NSPrincipalClass: NSApplication
+    entitlements:
+      path: KCProbe.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)no.brev.app
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: no.brev.app
+        DEVELOPMENT_TEAM: AV26DNQ5SC
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_VERSION: "5.0"
