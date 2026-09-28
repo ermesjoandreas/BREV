@@ -16,8 +16,9 @@
 // they are given, never through AppKit's current context. That context is
 // one buffer of a fixed pool of IOSurface-backed CVPixelBuffers, shown
 // through an AVSampleBufferDisplayLayer with `preventsCapture = true`.
-// AppKit's own drawing of the view (`draw(_:)`, which also feeds
-// cacheDisplay and PDF output) draws nothing. On macOS 26.2
+// AppKit's own drawing of the view (`draw(_:)`, which print and PDF output
+// call; cacheDisplay renders the layer tree instead) draws nothing, which
+// the lock probe (app/Tests/Lock) checks. On macOS 26.2
 // `sharingType = .none` keeps a window out of ScreenCaptureKit and
 // screencapture, but not out of CGDisplayStream or AVCaptureScreenInput; the
 // protected layer is missing from all four (capture spike, re-run at Brev's
@@ -131,8 +132,9 @@ class ContentView: OpaqueView {
 
     override var wantsUpdateLayer: Bool { true }
 
-    /// AppKit's drawing of this view (a backing store, cacheDisplay, PDF)
-    /// gets no pixels of content.
+    /// AppKit's drawing of this view (print and PDF output; cacheDisplay
+    /// and the window's display pass use the layer) gets no pixels of
+    /// content.
     override func draw(_ dirtyRect: NSRect) {}
 
     override func updateLayer() {

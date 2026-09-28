@@ -7,10 +7,13 @@
 //   SecKeys, and the wrapped DEK is a generic-password item, all three in
 //   the data protection keychain under the access group
 //   AV26DNQ5SC.no.brev.app. The keychain binds them to Brev's signing
-//   identity, so no other program can use, read or replace them. Creating,
-//   finding, reading and deleting never prompts: every query that does not
-//   unwrap carries an LAContext that forbids interaction, so it fails
-//   instead of showing UI. Only UnlockService's unwrap prompts.
+//   identity, so no other program can use, read or replace them, on a Mac
+//   that does not hold Brev's team signing key: on one that does, any
+//   same-user process can sign itself into that identity (CLAUDE.md §2;
+//   docs/DECISIONS.md D-0062). Creating, finding, reading and deleting
+//   never prompts: every query that does not unwrap carries an LAContext
+//   that forbids interaction, so it fails instead of showing UI. Only
+//   UnlockService's unwrap prompts.
 // - Install marker: Brev is installed when the wrapped-DEK item exists. It
 //   is written last, after the first Touch ID unlock (design §2.10; D-0039
 //   in the shifted numbering), so a crash before that leaves Brev
@@ -21,12 +24,14 @@
 //   `.lock`, held with O_EXLOCK for the process lifetime so a second Brev
 //   cannot run onboarding or open the stores at the same time.
 // Nothing secret is ever held here; the wrapped DEK is not secret.
+// Not final: the lock probe (app/Tests/Lock) overrides the keychain calls
+// to run UnlockService without the keychain.
 
 import Foundation
 import LocalAuthentication
 import Security
 
-final class KeyStore {
+class KeyStore {
     /// The keychain access group of all three items (D-0035). The
     /// entitlement names the same group through $(AppIdentifierPrefix).
     static let accessGroup = "AV26DNQ5SC.no.brev.app"
@@ -36,7 +41,8 @@ final class KeyStore {
     static let wrappedAccount = "wrapped-dek"
 
     /// Every file Brev writes in `dir`, except `.lock`: the only names the
-    /// cleanup ever deletes (design §5.2).
+    /// cleanup ever deletes (design §5.2's rule; its list, which still names
+    /// the key files, is replaced by D-0035).
     static let knownFiles = ["brev.db", "brev.db-journal", "peer-1.db", "peer-1.db-journal",
                              "peer-2.db", "peer-2.db-journal", "biometry.state", "biometry.state.tmp"]
 

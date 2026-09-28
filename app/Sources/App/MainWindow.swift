@@ -6,7 +6,8 @@
 //                                                   excluded from the Windows menu
 //   §1.1 nothing written to disk                  → isRestorable = false,
 //                                                   no frame autosave name
-// There is no minimise button, so no Dock thumbnail of the window
+// The window cannot be minimised (no .miniaturizable; AppKit still shows the
+// minimise button, disabled), so there is no Dock thumbnail of it
 // (docs/PHASE2_DESIGN.md §8.1). The window holds one RootViewController for
 // its whole life; screens change inside it, so the window never resizes on
 // lock or unlock.

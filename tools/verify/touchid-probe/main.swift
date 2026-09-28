@@ -1,7 +1,8 @@
 // touchid-probe — docs/VERIFY.md V51 (design §14.2 K, with ECIES per
 // docs/DECISIONS.md D-0035): after Brev's unlock closure with the real
-// Secure Enclave KEK, is any copy of the DEK or of the ECIES secrets left in
-// the process?
+// Secure Enclave KEK, is any copy of the DEK, of the ECIES secrets or of the
+// echo peers' DEKs (which Brev.unlock derives from the DEK) left in the
+// process?
 //
 // A verification tool, never linked into Brev.app. Built by
 // tools/verify/build.sh as TouchIDProbe.app with Brev's bundle id, team
@@ -21,7 +22,8 @@
 // random DEK to the KEK's public key with its own X9.63 ECIES sender
 // (app/Tests/ecies_needles.swift, checked against Security with a software
 // key first) and writes the wrapped DEK plus the DEK, the ECDH output, the
-// AES key and the IV, XORed. This process only ever holds them XORed, until
+// AES key, the IV and the two peer DEKs, XORed. This process only ever holds
+// them XORed, until
 // the positive controls at the end. app/Tests/scan.c counts copies in every
 // readable and writable region (every heap and thread stack).
 //
@@ -32,9 +34,9 @@
 //       the full closure: exactly one Touch ID prompt ("låse opp brevene
 //       dine", no password button); a human answers it
 // Output: check lines ("ok"/"FAIL") with hit counts only, then PASS or FAIL.
-// V51 passes when --unlock prints PASS: after the closure only Rust's copy
-// of the DEK is found (1 hit, the positive control while unlocked), no ECDH
-// output, AES key or IV, and after lock nothing.
+// V51 passes when --unlock prints PASS: after the closure only Rust's copies
+// of the DEK and the peer DEKs are found (1 hit each, the positive control
+// while unlocked), no ECDH output, AES key or IV, and after lock nothing.
 //
 // Design §14.2 K runs the closure with brev-core's unlock scrub at 64 KiB
 // (as shipped), at 128 KiB and disabled. build.sh builds one probe per
@@ -100,7 +102,9 @@ func makeNeedles(publicKey: URL, out: URL) throws {
     else { throw CryptoKitError.incorrectParameterSize }
     let w = try X963ECIES.wrap(dek, to: pk, ephemeral: P256.KeyAgreement.PrivateKey())
     var blob = w.wrapped
-    for s in [dek, w.sharedSecret, w.key, w.iv] { blob += Data(s.map { $0 ^ 0x5A }) }
+    for s in [dek, w.sharedSecret, w.key, w.iv, peerDEK(dek, index: 0), peerDEK(dek, index: 1)] {
+        blob += Data(s.map { $0 ^ 0x5A })
+    }
     try blob.write(to: out)
     dek.resetBytes(in: 0..<32)
 }
@@ -220,7 +224,8 @@ do {
     finish()
 }
 let h0 = scan()
-check("after create: no DEK and no ECIES secret; locked", h0.allSatisfy { $0 == 0 } && session.brev.isLocked(), show(h0))
+check("after create: no DEK, peer DEK or ECIES secret; locked", h0.allSatisfy { $0 == 0 } && session.brev.isLocked(),
+      show(h0))
 
 /// Needle `i` un-XORed into a new SecretBytes.
 func materialise(_ i: Int) -> SecretBytes {
@@ -238,14 +243,18 @@ func afterUnlock(_ result: Result<Void, UnlockFailure>) -> Never {
         check("while unlocked: the DEK is in Rust's box (positive control)", h[0] >= 1 && !session.brev.isLocked(), show(h))
         residueCheck("while unlocked: no copy of the DEK besides Rust's box", h[0] == 1, show(h))
         for i in 1..<names.count {
-            residueCheck("after the unlock closure: no \(names[i])", h[i] == 0, show(h))
+            if NeedleFile.heldWhileUnlocked.contains(i) {
+                residueCheck("while unlocked: no copy of \(names[i]) besides Rust's box", h[i] == 1, show(h))
+            } else {
+                residueCheck("after the unlock closure: no \(names[i])", h[i] == 0, show(h))
+            }
         }
     case .failure(let f):
         check("the unlock (Touch ID) succeeded", false, "\(f.rawValue)")
     }
     session.brev.lock()
     let h = scan()
-    residueCheck("after lock: no DEK and no ECIES secret anywhere", h.allSatisfy { $0 == 0 }, show(h))
+    residueCheck("after lock: no DEK, peer DEK or ECIES secret anywhere", h.allSatisfy { $0 == 0 }, show(h))
     for i in 0..<names.count {
         let b = materialise(i)
         let c = scan()

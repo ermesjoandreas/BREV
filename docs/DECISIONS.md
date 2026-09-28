@@ -1367,3 +1367,120 @@ the new numbers.
   with Touch ID is not yet tested with this key type in the app.
 - **Numbering:** the entries planned in `docs/PHASE2_DESIGN.md` §13 now
   shift by three (D-0036 to D-0061).
+
+D-0036 to D-0061 stay reserved for the entries `docs/PHASE2_DESIGN.md` §13
+plans (WP12 writes them, D-0035's numbering). Entries made before WP12
+take the numbers after them, so those numbers do not shift again.
+
+### D-0062 — Spec change: the keychain binding does not hold on a Mac with Brev's signing key (records 39e1858; open for the owner)
+
+- **Date:** 2026-09-28
+- **Decision:** Commit 39e1858 changed CLAUDE.md §2 and §3.2 and
+  `docs/THREAT_MODEL.md` without an entry; this is that entry, and it
+  narrows D-0035. On a Mac that holds Brev's team signing key (a
+  developer's Mac), any same-user process can sign its own program with
+  Brev's App ID and keychain group, without a prompt, and so replace
+  Brev's keychain items (both Enclave keys and the wrapped DEK) together
+  with the stores, or ask for Touch ID on Brev's keys. D-0035's "other
+  programs can neither use nor replace it", and its closing of D-0032
+  item 2 and D-0033 items 1 and 5, hold only on a Mac without that key.
+  This Mac holds it, and it is the only Mac Brev runs on. The owner has
+  not decided: the remedies §2 names are real letters only on a Mac
+  without the key, or the key behind a password prompt. Until the owner
+  decides, the §2 item is open, not accepted residual risk (§2 now says
+  so), and Phase 2 is not done (`docs/VERIFY.md`, "Failures and
+  results"). The unqualified claims were qualified: the header of
+  `app/Sources/Keys/KeyStore.swift` and VERIFY's "Changes from the
+  design" (V52, and why the rogue-Brev test was dropped).
+- **Reasoning:** Entries are append-only and a narrowed decision gets a
+  new entry that points back (this file's rules; CLAUDE.md §1 "ALWAYS").
+  Without it, D-0035 read as closing D-0033 item 5 ("Developer ID and
+  keychain storage are required before Brev holds real letters") on this
+  Mac too, and a reviewer of Phase 2 could sign it off with the item
+  untracked. V52 checks only that old stores put back do not unlock; it
+  says nothing about stores and keychain items replaced together by a
+  program signed into Brev's identity. VERIFY forbids calling a failure
+  residual risk without the owner.
+- **Verified:** The fact is the one §2 records: on 2026-09-28 an agent
+  session signed its own program into Brev's App ID and keychain group
+  with `xcodebuild -allowProvisioningUpdates`, with no prompt. Review
+  round 1 checked that 39e1858 touches only CLAUDE.md and
+  `docs/THREAT_MODEL.md`. The owner's decision is still open.
+
+### D-0063 — Phase 2 review round 1: residue, tests that can fail, an ignored open event, spec text
+
+- **Date:** 2026-09-28
+- **Decision:** The confirmed findings of review round 1 are fixed:
+  1. **Peer DEKs on the unlock stack.** `unlock_all` (and `create_in`) in
+     `ffi.rs` are `#[inline(never)]`. Inlined into `Brev::unlock`, moving
+     the two peer DEKs into their array left copies in the frame that
+     calls `Finish`'s 64 KiB scrub, above the area it overwrites, so they
+     survived the lock on the unlock thread's stack. Harness case 3 and
+     `TouchIDProbe` (V51) get needles for both peer DEKs (CryptoKit HKDF
+     in the helper, as `echo::peer_dek` derives them): one copy each while
+     unlocked (Rust's), none after create and after lock.
+  2. **Scrub call sites pinned.** The scrub-count tests cover
+     `echo::peer_dek` (crypto.rs) and the scrub `Brev::create` runs after
+     `create_in` (ffi.rs).
+  3. **V39 can fail when scribbling does not work.** `SelfScan` runs a
+     scribble probe after the lock (`app/Tests/scan.c`): a 32 KiB block
+     filled with a pattern and freed must keep no copy of it
+     (`scribble=0`), and is seen while allocated (`probe`). The glyph
+     count cannot show this for a typed letter (small freed blocks are
+     zeroed without scribbling). Harness case 7 runs the probe with
+     scribbling (0 left) and without (the block kept), in test.sh.
+  4. **The app's lock paths are tested.** A lock probe
+     (`app/Tests/Lock`, run by test.sh, no window on screen, no prompt)
+     runs `LockController` and `UnlockService` with a software KEK: a
+     discarded unlock and the lock sequence lock Rust, the lock sequence
+     zeroes every content view's pixel buffers, `draw(_:)` of a content
+     view draws nothing, and `UnlockService` locks Rust when its closure
+     fails after `Brev.unlock` (a `KeyStore` subclass whose install fails;
+     `KeyStore` is no longer `final` for this). VERIFY V53 makes the view
+     host's own runs (mail, compose, lock triggers) a required row.
+  5. **FFI surface.** test.sh pins every use of a `FfiConverter…Data`
+     type in the bindings, as it pins the String converters, so a body or
+     a name cannot cross as `Data` unnoticed (design §2.2).
+  6. **Open-documents event.** `AppDelegate` implements
+     `application(_:open:)` and ignores the event (Brev opens no files,
+     §1.4, §3.2). Without it AppKit showed its "cannot open" alert: an
+     unhardened, capturable window that took key from a compose sheet,
+     which turned secure input off while Brev stayed unlocked. VERIFY V54.
+  7. **View host.** Its cacheDisplay checks are named for the layer tree
+     they check; new checks call `draw(_:)` into a bitmap (cacheDisplay
+     never calls it for a view that updates its layer). Its "sent sheet
+     is freed" check first posts one in-process event, because AppKit's
+     `currentEvent` kept the sent sheet alive until the next event.
+     After the lock it runs the scribble probe.
+  8. **Spec text.** CLAUDE.md §3.2's `SecureTextView` bullet follows
+     D-0034: Core Text into the protected layer's pixel buffers,
+     `draw(_:)` draws nothing. VERIFY V41 names the files left after
+     D-0035, and V43 expects a disabled minimise button (AppKit shows one,
+     greyed out, on a titled window without `.miniaturizable`).
+     `docs/PHASE2_DESIGN.md` says under its title what D-0034 and D-0035
+     superseded. The README describes Phase 2 and its build prerequisites.
+- **Reasoning:** CLAUDE.md §1.10 and §3.1 (keys and plaintext zeroized on
+  lock) and §1 "ALWAYS" (security-relevant code has tests that prove the
+  invariant): each fix comes with a check that fails without it. The
+  echo peers' DEKs open stores holding every letter. The alert broke
+  design §7.1 ("no NSAlert anywhere") and §8.1 ("Hardening.apply runs on
+  every window"). No fix needs the owner or adds a dependency.
+- **Verified:** macOS 26.2, 2026-09-28, each check against its fix
+  reverted: harness case 3 with the old archive failed 6 of 6 runs (two
+  copies of each peer DEK on a stack after lock, VM tag 30) and passed 8
+  of 8 with the fix; the new scrub-count assertions fail with either
+  scrub deleted; harness case 7 finds the freed block kept without
+  scribbling and empty with it (5 of 5 each); the lock probe fails with
+  each of `LockController`'s two `brev.lock()` calls deleted, the one in
+  `UnlockService`'s catch deleted, the zeroing in `blank()` or
+  `release()` deleted, the lock sequence's `wipeContent()` deleted, and
+  with a `draw(_:)` that draws content; the view host's new `draw(_:)`
+  check fails on that last one, where its cacheDisplay check passes; the
+  Data surface check fails on bindings generated from a Rust mutant that
+  adds a `body_bytes` export and a `name_bytes` field; the view host's
+  compose run passed 6 of 6 (the sent-sheet check failed 2 of 5 before),
+  and still fails with a retain cycle in `ComposeSheet`; its mail and
+  `--triggers switch` runs pass. `open -a <Brev.app> <file>` to a running
+  Debug build with the handler added no window and logged `open event
+  ignored count=1`; the same event to the Release build of 1873eed added a
+  layer-8 window with sharing state 1 (the alert).

@@ -359,6 +359,9 @@ impl Brev {
         }
     }
 
+    /// Never inlined, so its key copies are in its own frame, which the
+    /// scrub in `create` reaches once it has returned (see `unlock_all`).
+    #[inline(never)]
     fn create_in(dir: &Path, dek: &[u8], signing_key: &[u8]) -> Result<Brev, BrevError> {
         let mut key = dek32(dek).ok_or(BrevError::Malformed)?;
         let mut peer_keys = [echo::peer_dek(&key, 0)?, echo::peer_dek(&key, 1)?];
@@ -412,6 +415,12 @@ thread_local! {
     static PANIC_IN_UNLOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Never inlined: moving the peer keys into their array leaves copies in
+/// this function's frame, which only `Finish`'s scrub in the caller reaches,
+/// and only after this frame is gone. Inlined into `Brev::unlock`, the
+/// copies sat in the frame that calls the scrub, which lies above the
+/// scrubbed area, and survived the lock on the unlock thread's stack.
+#[inline(never)]
 fn unlock_all(s: &mut Session, dek: &[u8]) -> Result<(), BrevError> {
     let mut key = dek32(dek).ok_or(BrevError::WrongKey)?;
     let mut peer_keys = [echo::peer_dek(&key, 0)?, echo::peer_dek(&key, 1)?];
@@ -651,6 +660,26 @@ mod tests {
             all_locked(&b),
             "a wrong DEK on an unlocked session locks everything"
         );
+    }
+
+    /// `create` ends with one stack scrub after `create_in` returns
+    /// (`create_in`'s own count is the same for the same inputs), so
+    /// deleting it fails here.
+    #[test]
+    fn create_scrubs_the_stack_after_create_in() {
+        fn scrubs_in(f: impl FnOnce()) -> usize {
+            let before = crypto::scrubs();
+            f();
+            crypto::scrubs() - before
+        }
+        let (t1, t2) = (tmp(), tmp());
+        let dek: [u8; 32] = crypto::random().unwrap();
+        let inner = scrubs_in(|| drop(Brev::create_in(&t1.0, &dek, &[4u8; 65]).unwrap()));
+        let outer = scrubs_in(|| {
+            drop(Brev::create(t2.0.to_str().unwrap().into(), &dek, &[4u8; 65]).unwrap())
+        });
+        assert!(inner > 0, "positive control: create_in scrubs");
+        assert_eq!(outer, inner + 1);
     }
 
     #[test]

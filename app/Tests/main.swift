@@ -8,11 +8,13 @@
 // case 6's control without scribbling, with TMPDIR under core/target/harness.
 //
 // usage: harness units | shell | compose | dek | content <units> [--no-scribble] | kept | control
-//        harness needles <file>     (the helper run that `dek` starts: ECIES needles)
+//        harness scribble [--no-scribble]
+//        harness needles <file>     (the helper run that `dek` starts: ECIES and peer-DEK needles)
 //        harness argdomain -NSTraceEvents YES -NSZombieEnabled YES
 //                                   (the helper run that `shell` starts)
 //
-// Case numbers are those of §11. Case 2 has two parts: the app shell's
+// Case numbers are those of §11; case 7 (SelfScan's scribble probe) came
+// with review round 1 (docs/DECISIONS.md D-0063). Case 2 has two parts: the app shell's
 // (InputFilter, LockState, LaunchGuard, UnlockFailure) is `shell`, the compose core's
 // (EditModel, ComposeKey, KeyTranslator) is `compose`. Output is content-free: check
 // names and hit counts only.
@@ -967,7 +969,8 @@ func caseDEK() {
             return
         }
         h = scan()
-        check("after create: the DEK is nowhere; the session is locked", h.needle(0) == 0 && session.brev.isLocked(), "\(h)")
+        check("after create: the DEK and the peer DEKs are nowhere; the session is locked",
+              NeedleFile.heldWhileUnlocked.allSatisfy { h.needle($0) == 0 } && session.brev.isLocked(), "\(h)")
 
         // The unlock closure on its own serial queue, as UnlockService runs it.
         var result: Result<(sameAddress: Bool, zeroed: Bool), Error>?
@@ -985,13 +988,14 @@ func caseDEK() {
         case nil: check("unlock ran", false)
         }
         h = scan()
-        check("while unlocked: the DEK is in Rust's box only", h.needle(0) == 1 && !session.brev.isLocked(), "\(h)")
-        for i in 1..<n {
+        check("while unlocked: the DEK and the peer DEKs are in Rust's boxes only",
+              NeedleFile.heldWhileUnlocked.allSatisfy { h.needle($0) == 1 } && !session.brev.isLocked(), "\(h)")
+        for i in 1..<n where !NeedleFile.heldWhileUnlocked.contains(i) {
             check("after the unlock closure: no \(NeedleFile.names[i])", h.needle(i) == 0, "\(h)")
         }
         session.brev.lock()
         h = scan()
-        check("after lock: no DEK and no ECIES secret anywhere", (0..<n).allSatisfy { h.needle($0) == 0 }, "\(h)")
+        check("after lock: no DEK, peer DEK or ECIES secret anywhere", (0..<n).allSatisfy { h.needle($0) == 0 }, "\(h)")
         for i in 1..<n {
             let b = materialise(i)
             h = scan()
@@ -1128,6 +1132,25 @@ func caseControl() {
     withExtendedLifetime(s) {}
 }
 
+// MARK: - Case 7: the scribble probe
+
+/// SelfScan's scribble probe (docs/VERIFY.md V39), which does not depend
+/// on Core Text: a freed 32 KiB block keeps no copy of its pattern under
+/// MallocScribble=1. Without scribbling (the negative control) it keeps
+/// them, so the probe can fail on this Mac.
+func caseScribble(scribble: Bool) {
+    requireScribble(scribble)
+    var live: UInt64 = 0
+    let left = brev_scan_scribble_probe(&live)
+    check("scribble probe: the allocated block is seen (positive control)", live > 0, "live=\(live)")
+    if scribble {
+        check("scribble probe: nothing of the block is left after free", left == 0, "left=\(left) live=\(live)")
+    } else {
+        check("without MallocScribble: the freed block keeps its pattern (the probe can fail)", left > 0,
+              "left=\(left) live=\(live)")
+    }
+}
+
 // MARK: - Main
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -1151,8 +1174,15 @@ case ("content", 2), ("content", 3):
     caseContent(units: n, scribble: args.count == 2)
 case ("kept", 1): caseKept()
 case ("control", 1): caseControl()
+case ("scribble", 1), ("scribble", 2):
+    guard args.count == 1 || args[1] == "--no-scribble" else {
+        print("usage: harness scribble [--no-scribble]")
+        exit(2)
+    }
+    caseScribble(scribble: args.count == 1)
 default:
-    print("usage: harness units | shell | compose | dek | content <units> [--no-scribble] | kept | control | needles <file>")
+    print("usage: harness units | shell | compose | dek | content <units> [--no-scribble] | kept | control"
+          + " | scribble [--no-scribble] | needles <file>")
     exit(2)
 }
 print(failures == 0 ? "PASS" : "FAIL: \(failures) check(s)")

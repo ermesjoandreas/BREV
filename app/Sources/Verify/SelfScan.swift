@@ -10,10 +10,17 @@
 // same way. It logs counts only. The marker is "BREV-SECRET-BODY", as in
 // scan.c; its glyph ids in the content font are the scanner's glyph needle,
 // stored XORed, as in harness case 4. A shown letter leaves no live glyph
-// ids (ContentView draws each line into a bitmap, and Core Text frees a
-// line's glyphs once it is drawn), so the control also holds a CTLine of the
-// marker and counts its glyphs (`needle`): proof that the needle is set and
-// seen in this process.
+// ids (ContentView draws each line into its pixel buffers, and Core Text
+// frees a line's glyphs once it is drawn), so the control also holds a
+// CTLine of the marker and counts its glyphs (`needle`): proof that the
+// needle is set and seen in this process. After the lock, `glyph` shows that
+// GlyphFlush cleared that line (and a long letter's lines); a short letter
+// leaves no glyph ids even without scribbling, because libmalloc zeroes
+// small freed blocks itself. So the end of the lock also runs the scribble
+// probe (scan.c), which does not depend on Core Text: a freed 32 KiB block
+// must keep no copy of its pattern (`scribble=0`), and is seen while
+// allocated (`probe`, the positive control). This is the check that
+// MallocScribble takes effect in this process, not only that it is set.
 
 import CoreText
 import os
@@ -25,15 +32,25 @@ enum SelfScan {
                                            0x08, 0x1f, 0x0e, 0x77, 0x18, 0x15, 0x1e, 0x03]
 
     /// Logs `selfscan control u8=… u16=… glyph=… needle=…` at the start of a
-    /// lock, and `selfscan u8=… u16=… glyph=…` at its end.
+    /// lock, and `selfscan u8=… u16=… glyph=… scribble=… probe=…` at its end.
     static func run(control: Bool) {
         let h = scan()
         if control {
             let needle = needleControl()
             log.notice("selfscan control u8=\(h.u8, privacy: .public) u16=\(h.u16, privacy: .public) glyph=\(h.glyph, privacy: .public) needle=\(needle, privacy: .public)")
         } else {
-            log.notice("selfscan u8=\(h.u8, privacy: .public) u16=\(h.u16, privacy: .public) glyph=\(h.glyph, privacy: .public)")
+            let p = scribbleProbe()
+            log.notice("selfscan u8=\(h.u8, privacy: .public) u16=\(h.u16, privacy: .public) glyph=\(h.glyph, privacy: .public) scribble=\(p.left, privacy: .public) probe=\(p.live, privacy: .public)")
         }
+    }
+
+    /// The scribble probe (scan.c): the probe pattern's copies while its
+    /// 32 KiB block is allocated (`live`, > 0) and after it is freed
+    /// (`left`, 0 while MallocScribble takes effect).
+    static func scribbleProbe() -> (live: UInt64, left: UInt64) {
+        var live: UInt64 = 0
+        let left = brev_scan_scribble_probe(&live)
+        return (live, left)
     }
 
     /// The marker's copies in this process: as UTF-8, as UTF-16 and as glyph

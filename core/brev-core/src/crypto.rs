@@ -461,6 +461,9 @@ mod tests {
         );
         let env = env.unwrap();
         assert_eq!(scrubs_in(|| drop(open_message(&b, &pa, &env))), 1);
+        // The echo peers' HKDF over the user DEK (echo.rs); `Brev::create`
+        // is pinned in ffi.rs.
+        assert_eq!(scrubs_in(|| drop(crate::echo::peer_dek(&dek, 0))), 1);
     }
 
     #[test]

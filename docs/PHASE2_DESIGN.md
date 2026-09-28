@@ -1,5 +1,7 @@
 # Brev Phase 2: "The locked UI" (final design)
 
+Superseded in part (2026-09-28): the key files and HPKE (§5, and every mention of `identity.se`, `kek.se`, `dek.hpke`, the rogue-Brev test R and the anchor A) by keychain keys and ECIES (D-0035), and drawing in `draw(_:)` or into a bitmap by the protected content layer (D-0034); planned decision numbers shift by three. See the notes at the top of §13, and docs/VERIFY.md "Changes from the design".
+
 Status: final after review, 2026-09-27. Based on branch `claude/laughing-knuth-yhp8ji` at `d1c800d`. Inputs: CLAUDE.md as of `d1c800d`, docs/DECISIONS.md D-0001 to D-0032, `core/`, `app/`, `scripts/`, the enclave and ffi spikes (the skeptics' corrections override the original claims), the lead's rulings R1 to R6, and 34 review findings (dispositions are returned separately).
 
 The owner accepted A1 to A7 in **D-0032**. CLAUDE.md §1.9, §2, §3.1 to §3.3, §4 and §5 already say so. This design treats them as settled: key files plus HPKE, key files not bound to Brev, `.biometryCurrentSet`, `zeroizing-alloc`, patched bindings, framework copies as residual risk, and padded storage (schema v2). Still open: the GUI facts U1 to U4 and the owner questions at the end.
