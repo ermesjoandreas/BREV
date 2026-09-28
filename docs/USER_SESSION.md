@@ -9,7 +9,7 @@ Skrevet 28. september 2026 for eieren. Kjør alt i Terminal fra `~/BREV`. Ber ma
 - Alle automatiske tester er grønne (`scripts/test.sh`, 28. september kl. 17).
 - Maskinen har kjørt alt den kan uten deg (`docs/VERIFY-RESULTS.md`). V9 feiler som skrevet (beslutning 7).
 - Brev har aldri vært installert her. Alt med Touch ID, ekte brev og Brev B venter på deg.
-- Brev B mangler: `scripts/build.sh --instance b` finnes ikke ennå (fase 3, WP6). Se Runde 1, steg 7.
+- Brev B bygges med `scripts/build.sh --instance b` (fase 3, WP6). Den er bygget én gang, men aldri startet. Se Runde 1, steg 2 og 7.
 - Avgjort: signeringsnøkkelen (godtatt for testbrev), releet kjører som deg, og App ID `no.brev.app.b`.
 
 ## Beslutninger som gjenstår
@@ -47,7 +47,7 @@ Svar kort, for eksempel «2c 4b 5a 6b 7a».
 Byggingen kommer i tillegg. Noter hver rad: nummer, pass eller feil, og hva du så. Filen lages i steg 3.
 
 1. **Rydd skjermen (1 min).** «Terminal vil ha tilgang til data fra andre apper»: trykk «Ikke tillat». Andre gamle dialoger (krasjrapport, tilgjengelighet): «Ignorer» eller lukk.
-2. **Bygg.** `scripts/build.sh && tools/verify/build.sh && (cd core && cargo build --release -p brev-relay)`
+2. **Bygg.** `scripts/build.sh && scripts/build.sh --instance b && tools/verify/build.sh && (cd core && cargo build --release -p brev-relay)`
 3. **Tre Terminal-vinduer i `~/BREV` (2 min).** Lim inn blokken under «Setup» i `docs/VERIFY.md` i alle tre.
    - Vindu 3, releet (tomt fra start): `[ -e "$RD" ] && mv "$RD" "$R/relay-before-$(date +%s)"`, så `"$RELAY" serve --db "$RDB" --listen 127.0.0.1:8787 --trace > "$R/relay.log"`
    - Vindu 2, loggen: `/usr/bin/log stream --level debug --predicate 'process == "Brev"' > "$R/stream.log"`
@@ -70,8 +70,7 @@ Byggingen kommer i tillegg. Noter hver rad: nummer, pass eller feil, og hva du s
    - Havner du på låseskjermen rett etter Touch ID, noter det (beslutning 2). Kjør så `/usr/bin/log show --last 5m --predicate 'subsystem == "no.brev.app" AND category == "touchid"'` og noter linjen `resign active during Touch ID (unlock)`, eller «ingen linje».
    - `grep -E 'open failed|unlockExpired' "$R/stream.log"` skal ikke gi noe. Et treff er en feil å melde, ikke skadede filer.
 6. **Registrer adressen (2 min).** Skriv `brev-secret-me`, trykk «Registrer» (V55). Én dialog: «Brev» … «registrere adressen din», ingen passordknapp. Kjør `log show`-linjen fra steg 5 igjen. Står det `resign active during Touch ID (sign)`: si fra. Da må en bryter slås på og Brev bygges på nytt.
-7. **Bygg og start Brev B (4 min).** `scripts/build.sh --help`. Står ikke `--instance` der, er WP6 ikke gjort (slik er det i `cc7dbd6`). Stopp runden her og si fra, så lager jeg det. Ellers:
-   - `scripts/build.sh --instance b`. Første gang registreres App ID `no.brev.app.b`.
+7. **Start Brev B (4 min).** Den ble bygget i steg 2. Den bruker teamets jokerprofil (`AV26DNQ5SC.*`), samme profil som Brev.
    - `open "$APPB"`. Onboarding, så «Lås opp med Touch ID»: dialogen skal si «Brev B». Registrer `brev-secret-peer`.
 8. **Legg til hverandre (2 min).** I Brev: «Legg til kontakt», skriv `brev-secret-peer`, «Legg til». I Brev B det samme med `brev-secret-me`. Ingen Touch ID her (V26).
 9. **Ett brev hver vei (5 min).** Skriv `BREV-SECRET-BODY æøå` i emne og tekst. «Send»: én dialog per brev, «… sende brevet», ingen passordknapp, riktig navn (V56, V57).

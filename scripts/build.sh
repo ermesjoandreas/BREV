@@ -3,9 +3,11 @@
 # macOS only: only Xcode can produce the app bundle. Everything that can run
 # elsewhere lives in test.sh and gen-bindings.sh.
 #
-# Usage: scripts/build.sh [--debug] [--open]
-#   --debug  build the Debug configuration instead of Release
-#   --open   launch the built app afterwards
+# Usage: scripts/build.sh [--debug] [--open] [--instance b]
+#   --debug       build the Debug configuration instead of Release
+#   --open        launch the built app afterwards
+#   --instance b  build the second instance "Brev B" (bundle id no.brev.app.b,
+#                 its own container and keychain group) into app/build-b
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,14 +15,36 @@ APP_DIR="$REPO_ROOT/app"
 
 CONFIGURATION=Release
 OPEN_APP=no
-for arg in "$@"; do
-  case "$arg" in
-    --debug)   CONFIGURATION=Debug ;;
-    --open)    OPEN_APP=yes ;;
-    -h|--help) sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *)         echo "error: unknown argument '$arg' (accepted: --debug, --open)" >&2; exit 2 ;;
+INSTANCE=
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug)    CONFIGURATION=Debug ;;
+    --open)     OPEN_APP=yes ;;
+    --instance)
+      if [[ "${2:-}" != b ]]; then
+        echo "error: --instance takes exactly one value: b" >&2; exit 2
+      fi
+      INSTANCE=b; shift ;;
+    -h|--help)  sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)          echo "error: unknown argument '$1' (accepted: --debug, --open, --instance b)" >&2; exit 2 ;;
   esac
+  shift
 done
+
+# The second instance (docs/PHASE3_DESIGN.md §7) is the same code with
+# another bundle id and name. Container, data folder, .lock and keychain
+# group all follow from the bundle id, and the Touch ID dialogs and the Dock
+# show the name. The default build passes no overrides at all, so nothing
+# changes for no.brev.app. Its own derived data keeps the two apart.
+if [[ "$INSTANCE" == b ]]; then
+  PRODUCT="Brev B"
+  DERIVED="$APP_DIR/build-b"
+  OVERRIDES=(PRODUCT_BUNDLE_IDENTIFIER=no.brev.app.b "PRODUCT_NAME=Brev B")
+else
+  PRODUCT=Brev
+  DERIVED="$APP_DIR/build"
+  OVERRIDES=()
+fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "error: scripts/build.sh only runs on macOS, because building Brev.app needs Xcode." >&2
@@ -90,19 +114,21 @@ fi
 
 # -allowProvisioningUpdates: Brev is signed by team AV26DNQ5SC with automatic
 # signing (docs/DECISIONS.md D-0035), so xcodebuild may fetch or renew the
-# Mac App Development profile. This Mac and the App ID are registered.
-echo "==> Building Brev ($CONFIGURATION, $ARCH)"
+# Mac App Development profile. This Mac and the App ID are registered; the
+# first --instance b build registers no.brev.app.b the same way.
+echo "==> Building $PRODUCT ($CONFIGURATION, $ARCH)"
 xcodebuild \
   -project "$APP_DIR/Brev.xcodeproj" \
   -allowProvisioningUpdates \
   -scheme Brev \
   -configuration "$CONFIGURATION" \
   -destination "platform=macOS,arch=$ARCH" \
-  -derivedDataPath "$APP_DIR/build" \
+  -derivedDataPath "$DERIVED" \
   ONLY_ACTIVE_ARCH=YES \
+  ${OVERRIDES[@]+"${OVERRIDES[@]}"} \
   build
 
-APP="$APP_DIR/build/Build/Products/$CONFIGURATION/Brev.app"
+APP="$DERIVED/Build/Products/$CONFIGURATION/$PRODUCT.app"
 if [[ ! -d "$APP" ]]; then
   echo "error: xcodebuild succeeded but $APP is missing" >&2
   exit 1
@@ -110,7 +136,7 @@ fi
 
 echo
 echo "Built: $APP"
-echo "Run it with:  open \"$APP\"   (or: scripts/build.sh --open)"
+echo "Run it with:  open \"$APP\"   (or: scripts/build.sh${INSTANCE:+ --instance $INSTANCE} --open)"
 
 if [[ "$OPEN_APP" == yes ]]; then
   open "$APP"

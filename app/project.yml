@@ -71,8 +71,10 @@ targets:
     info:
       path: Info.plist
       properties:
-        CFBundleName: Brev
-        CFBundleDisplayName: Brev
+        # From the build, so the Dock and the Touch ID dialogs say «Brev B»
+        # for the second instance (docs/PHASE3_DESIGN.md §7). "Brev" for Brev.
+        CFBundleName: $(PRODUCT_NAME)
+        CFBundleDisplayName: $(PRODUCT_NAME)
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         CFBundleShortVersionString: "0.0.1"
         CFBundleVersion: "1"
@@ -147,6 +149,8 @@ targets:
 
     settings:
       base:
+        # scripts/build.sh --instance b overrides both on the command line
+        # (Brev B: "Brev B", no.brev.app.b; docs/PHASE3_DESIGN.md §7).
         PRODUCT_NAME: Brev
         PRODUCT_BUNDLE_IDENTIFIER: no.brev.app
         # The relay Brev talks to (Info.plist BrevRelayURL; PHASE3 §5.1).

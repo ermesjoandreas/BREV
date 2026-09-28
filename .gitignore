@@ -13,6 +13,7 @@ app/Info.plist
 app/*.xcodeproj/
 app/*.xcworkspace/
 app/build/
+app/build-b/
 app/DerivedData/
 # tools/verify (built into core/target/verify): TouchIDProbe's generated project,
 # and what the spike scripts in tools/verify/spikes build and write next to themselves
