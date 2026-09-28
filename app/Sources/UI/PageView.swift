@@ -42,6 +42,13 @@ final class PageView: NSView {
         }
     }
 
+    /// Disables every button in the column, until the next `show`.
+    func disableButtons() {
+        for case let button as NSButton in stack.arrangedSubviews {
+            button.isEnabled = false
+        }
+    }
+
     /// A button in the column's style.
     static func button(_ title: String, target: AnyObject, action: Selector) -> HumanButton {
         let button = HumanButton(title: title, target: target, action: action)

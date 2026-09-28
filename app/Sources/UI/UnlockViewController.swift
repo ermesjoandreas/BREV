@@ -3,7 +3,7 @@
 // Upholds CLAUDE.md §1.8 (Touch ID only) and §3.2 (docs/PHASE2_DESIGN.md
 // §5.3 steps 7 and 8, §5.4, §5.5). Brev never prompts on its own: only a
 // human click on Lås opp med Touch ID, or Return, calls `onUnlock`
-// (HumanButton). While the prompt is up the button is disabled. A failure
+// (HumanButton). While the prompt is up every button is disabled. A failure
 // shows its text (UnlockFailure); a cancel shows the screen as before.
 // "Slett alt og start på nytt" appears after damaged or changed-fingers
 // failures, after any failure of the first unlock, and when the stores do
@@ -48,9 +48,10 @@ final class UnlockViewController: NSViewController {
         layout(message: nil, reset: false)
     }
 
-    /// The Touch ID prompt is up: the button is disabled until it ends.
+    /// The Touch ID prompt is up: every button is disabled until it ends,
+    /// the reset too, so no reset can run under an unlock still in flight.
     func showWorking() {
-        unlock?.isEnabled = false
+        page.disableButtons()
     }
 
     func show(_ failure: UnlockFailure) {

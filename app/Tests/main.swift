@@ -142,16 +142,33 @@ func withStoreDir(_ body: (URL) -> Void) {
 
 /// The unlock closure of §5.4 (UnlockService): unwrap the DEK, unlock on
 /// the same thread without a copy, and the CFData is zeroed in place when
-/// `unwrap` returns. Any error locks the session.
-func unlock(_ session: Session, wrapped: Data, kek: SecKey) throws {
+/// `unwrap` returns. Any error locks the session. Returns whether `Brev.unlock`
+/// got the bytes of the CFData Security returned (no copy) and whether that
+/// CFData is all zero after `unwrap`; the harness keeps it alive to look.
+@discardableResult
+func unlock(_ session: Session, wrapped: Data, kek: SecKey) throws -> (sameAddress: Bool, zeroed: Bool) {
+    var plain: CFData?
+    var seen: UnsafeRawPointer?
     do {
-        try Enclave.unwrap(wrapped, with: kek) { dek in
+        try Enclave.unwrap(wrapped, with: kek, decrypt: {
+            plain = SecKeyCreateDecryptedData($0, $1, $2, $3)
+            return plain
+        }) { dek in
+            seen = dek.withUnsafeBytes { $0.baseAddress }
             do { try session.brev.unlock(dek: dek) } catch { throw CoreUnlockError(underlying: error) }
         }
     } catch {
         session.brev.lock()
         throw error
     }
+    guard let plain, let p = CFDataGetBytePtr(plain) else { return (false, false) }
+    return (seen == UnsafeRawPointer(p), allZero(plain))
+}
+
+/// Whether `data` holds 32 bytes, all zero.
+func allZero(_ data: CFData) -> Bool {
+    guard CFDataGetLength(data) == 32, let p = CFDataGetBytePtr(data) else { return false }
+    return UnsafeBufferPointer(start: p, count: 32).allSatisfy { $0 == 0 }
 }
 
 /// Onboarding steps 6 and 7 with a software KEK: a random DEK in a
@@ -347,6 +364,18 @@ func caseEnclaveUnits() {
     let threw = (try? Enclave.withWiped(cf2) { _ in throw Enclave.Failure.malformed }) == nil
     check("Enclave.withWiped: zeroed also when the body throws",
           threw && UnsafeBufferPointer(start: p2, count: 32).allSatisfy { $0 == 0 })
+
+    // unwrap zeroes the CFData Security returned also when the body throws
+    // (a failed Brev.unlock); case 3 checks the unlock that succeeds.
+    if let wrapped {
+        var plain: CFData?
+        let failed = (try? Enclave.unwrap(wrapped, with: kek, decrypt: {
+            plain = SecKeyCreateDecryptedData($0, $1, $2, $3)
+            return plain
+        }) { _ in throw Enclave.Failure.unknown }) == nil
+        check("Enclave.unwrap: Security's CFData is zeroed also when the body throws",
+              failed && plain.map(allZero) == true)
+    }
 }
 
 // MARK: - Case 2, the app shell's part: InputFilter, LockState, UnlockFailure, LaunchGuard
@@ -864,7 +893,7 @@ func caseDEK() {
         check("after create: the DEK is nowhere; the session is locked", h.needle(0) == 0 && session.brev.isLocked(), "\(h)")
 
         // The unlock closure on its own serial queue, as UnlockService runs it.
-        var result: Result<Void, Error>?
+        var result: Result<(sameAddress: Bool, zeroed: Bool), Error>?
         let done = DispatchSemaphore(value: 0)
         DispatchQueue(label: "no.brev.unlock").async {
             result = Result { try unlock(session, wrapped: wrapped, kek: kek) }
@@ -872,7 +901,9 @@ func caseDEK() {
         }
         done.wait()
         switch result {
-        case .success?: check("unlock with the software KEK", true)
+        case .success(let handOff)?:
+            check("unlock: Brev.unlock got Security's CFData, wiped in place (same address, all zero)",
+                  handOff.sameAddress && handOff.zeroed)
         case .failure(let error)?: check("unlock with the software KEK", false, "\(error)")
         case nil: check("unlock ran", false)
         }

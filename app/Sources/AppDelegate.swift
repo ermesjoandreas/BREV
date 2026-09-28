@@ -223,8 +223,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Locks and drops the session, deletes the known names (the keychain
-    /// items first) and starts onboarding again.
+    /// items first) and starts onboarding again. Never while an unlock is in
+    /// flight: its closure holds the old session and would store the wrapped
+    /// DEK again after the deletion, and its completion would show mail. The
+    /// unlock screen disables the reset button meanwhile; this refuses a
+    /// sheet confirmed after an unlock began.
     private func reset() {
+        guard !lock.state.authInFlight else {
+            Self.appLog.notice("reset refused: unlock in flight")
+            return
+        }
         session?.brev.lock()
         session = nil
         lock.session = nil

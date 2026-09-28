@@ -75,10 +75,16 @@ enum Enclave {
     /// every path. With a Secure Enclave KEK this is the one Touch ID prompt.
     /// UnlockService calls `Brev.unlock` in `body`, on the same thread, so
     /// Rust's stack scrub covers the frames this call used (design §2.5).
-    static func unwrap<R>(_ wrapped: Data, with key: SecKey, _ body: (Data) throws -> R) throws -> R {
+    /// `decrypt` is always SecKeyCreateDecryptedData; only the harness
+    /// passes a wrapper around it, which keeps the CFData so that cases 1
+    /// and 3 can check it is the one `body` saw and all zero afterwards.
+    static func unwrap<R>(_ wrapped: Data, with key: SecKey,
+                          decrypt: (SecKey, SecKeyAlgorithm, CFData, UnsafeMutablePointer<Unmanaged<CFError>?>?)
+                              -> CFData? = SecKeyCreateDecryptedData,
+                          _ body: (Data) throws -> R) throws -> R {
         guard wrapped.count == wrappedLength else { throw Failure.malformed }
         var err: Unmanaged<CFError>?
-        guard let plain = SecKeyCreateDecryptedData(key, algorithm, wrapped as CFData, &err)
+        guard let plain = decrypt(key, algorithm, wrapped as CFData, &err)
         else { throw err.map { $0.takeRetainedValue() as Error } ?? Failure.unknown }
         return try withWiped(plain) { dek in
             guard dek.count == 32 else { throw Failure.malformed }
