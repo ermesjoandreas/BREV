@@ -83,7 +83,7 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 | V4 | ⇧⌘4 (window and area), ⇧⌘5 recording | a marker letter open: content absent or black | H | per D-0057 (U1) |
 | V5 | `screencapture` | `-x` and `-V 3` show no letter; `-l <id>` (id from `tools/verify/windows`) fails; control: another app's window is visible | A | per D-0057 (U1) |
 | V6 | ScreenCaptureKit | `tools/verify/capture-probe`: display filter, window filter (`includeChildWindows`), `captureImage(in:)`, `captureScreenshot(…)` (26); control: a control window is visible | H grants, A runs | per D-0057 (U1) |
-| V7 | Legacy CG capture | `tools/verify/capture-probe --legacy` (built for 14.0): `CGWindowListCreateImage`, `CGDisplayCreateImage`; control as V6 | A | per D-0057 (U1) |
+| V7 | Legacy CG capture, and the paths `.none` does not stop | a marker letter open: `tools/verify/capture-probe --legacy` (built for 14.0): `CGWindowListCreateImage`, `CGDisplayCreateImage`, `CGDisplayStream` and `AVCaptureScreenInput`; and one `CGDisplayStream` frame through `dlsym` from a binary built for 26.0. No letter in any: the last three show the window with empty panes (the protected layer, D-0034); control as V6 | A | per D-0057 (U1) |
 | V8 | Screen Sharing / ARD / AirPlay | a second Mac views, observes, mirrors: no letter visible | H | per D-0057 (U1) |
 | V9 | Every window excluded | `tools/verify/windows`: `kCGWindowSharingState == 0` for all Brev windows, once with the compose sheet open and once with `ConfirmSheet` open (it only exists in an error state, so do it during V38); control: the sheet is listed as its own window | A (H opens) | – |
 | V10 | Accessibility Inspector | the contacts list, the thread list, the letter, the compose fields and the recipient show no text | H | per D-0057 (U3) |
@@ -368,6 +368,14 @@ fail, or the D-entry that accepts it.
 - V13: the design's "the log shows no send, unlock or reset" names log lines
   that nothing writes. The evidence is the state of `$D`, the `AXError`, and
   a human who sees no Touch ID prompt.
+- V7 (WP11, D-0034): on macOS 26.2 `CGDisplayStream` (also through
+  `dlsym` from a binary built for 26.0) and `AVCaptureScreenInput` capture a
+  `sharingType = .none` window, also at Brev's window level 0 (capture spike,
+  re-run in WP11). V7 adds them. Content views draw into an
+  `AVSampleBufferDisplayLayer` with `preventsCapture = true`, which all
+  capture paths leave empty. `tools/viewhost --control` with `--capturable`
+  and `--unprotected` runs the same matrix against the real views, with a
+  negative control that shows the letters.
 - Keys in the keychain (D-0035, WP5): there are no key files and no
   `dek.hpke`. V1 expects the team signature and the keychain access group, and V2
   the embedded provisioning profile;

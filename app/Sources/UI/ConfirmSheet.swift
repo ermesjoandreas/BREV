@@ -10,7 +10,7 @@
 
 import AppKit
 
-final class ConfirmSheet: NSWindow {
+final class ConfirmSheet: HardenedWindow {
     private var confirmed = false
 
     /// Shows the sheet on `parent`. `completion(true)` only after a human

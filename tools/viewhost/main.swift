@@ -14,16 +14,30 @@
 // letter → the sync timer shows its echo → the real lock sequence → exit.
 // Output is check names and counts only; "ready pid=<n> window=<n>
 // frame=<x,y,w,h>" tells a driver when to run an AX dump, AX presses or a
-// capture against the window during the hold. SelfScan is compiled in with
-// BREV_SELFSCAN, as in the Verify build: the lock sequence runs it, and
-// --scan counts with it.
+// capture against the window during the hold, and the "rect <name>
+// <x,y,w,h>" lines after it (global points, origin top left) name the
+// three panes and, with --control, the backdrop and the control window.
+// SelfScan is compiled in with BREV_SELFSCAN, as in the Verify build: the
+// lock sequence runs it, and --scan counts with it. The content views draw
+// into the protected layer (ContentView, D-0034), so a capture shows their
+// panes without content, and so do the snapshots below.
 //
-// usage: ViewHost [--hold <s>] [--snapshot <dir>] [--capturable] [--scan] [--post]
+// usage: ViewHost [--hold <s>] [--frame <x,y,w,h>] [--control] [--snapshot <dir>]
+//                 [--capturable] [--unprotected] [--scan] [--post]
 //   --hold <s>      seconds to wait after ready before the checks (default 3)
+//   --frame <r>     the window's frame (global points, origin top left)
+//                   instead of centred
+//   --control       a green backdrop window behind the window and a cyan
+//                   control window with plain AppKit text to its right, both
+//                   capturable: an excluded window shows the backdrop, and
+//                   the control shows that the capture sees text
 //   --snapshot <d>  write unlocked.png, after-sync.png and locked.png (drawn
 //                   offscreen with cacheDisplay; no screen capture)
-//   --capturable    sharingType .readOnly, so screencapture can see the fake
-//                   letters (the default keeps Hardening's .none)
+//   --capturable    sharingType .readOnly (the default keeps Hardening's
+//                   .none): only the protected layer keeps content out
+//   --unprotected   preventsCapture = false on every content view's layer,
+//                   also those made later; with --capturable, the negative
+//                   control: a capture must see the fake letters
 //   --scan          scan this process for the marker before and after the
 //                   lock, with SelfScan's needle control while the letters
 //                   are shown (run with MallocScribble=1, as Brev runs)
@@ -31,6 +45,7 @@
 //                   input filter must drop it
 
 import AppKit
+import AVFoundation
 import Security
 
 setvbuf(stdout, nil, _IOLBF, 0)
@@ -49,6 +64,16 @@ func value(_ flag: String) -> String? {
 let hold = value("--hold").flatMap(Double.init) ?? 3
 let snapshotDir = value("--snapshot").map { URL(fileURLWithPath: $0, isDirectory: true) }
 let capturable = args.contains("--capturable")
+let unprotected = args.contains("--unprotected")
+let control = args.contains("--control")
+/// A rect given as x,y,w,h in global points with the origin at the top
+/// left, in AppKit's screen coordinates.
+func screenRect(_ text: String) -> NSRect? {
+    let n = text.split(separator: ",").compactMap { Double($0) }
+    guard n.count == 4, let top = NSScreen.screens.first?.frame.maxY else { return nil }
+    return NSRect(x: n[0], y: top - n[1] - n[3], width: n[2], height: n[3])
+}
+let frameArg = value("--frame").flatMap(screenRect)
 let scanning = args.contains("--scan")
 let posting = args.contains("--post")
 
@@ -150,6 +175,64 @@ func snapshot(_ view: NSView, _ name: String) {
     }
 }
 
+/// Whether a pixel row of `buffer` holds a byte that is not 0.
+func hasPixels(_ buffer: CVPixelBuffer) -> Bool {
+    guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { return true }
+    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(buffer) else { return true }
+    let bytes = UnsafeRawBufferPointer(start: base, count: CVPixelBufferGetBytesPerRow(buffer) * CVPixelBufferGetHeight(buffer))
+    return bytes.contains { $0 != 0 }
+}
+
+/// Whether the frame `v`'s protected layer shows holds a pixel that is not
+/// 0 (false when it shows none).
+func showsPixels(_ v: ContentView) -> Bool {
+    guard #available(macOS 14.4, *), let shown = v.protectedLayer.sampleBufferRenderer.displayedPixelBuffer()
+    else { return false }
+    return hasPixels(shown)
+}
+
+/// A capturable window at `rect` that AppKit draws: green, or cyan with
+/// lines of plain text (the control).
+final class PlainView: NSView {
+    let color: NSColor, lines: Int
+    init(color: NSColor, lines: Int) {
+        self.color = color
+        self.lines = lines
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        color.setFill()
+        bounds.fill()
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.black]
+        for i in 0..<lines {
+            ("KONTROLL \(i + 1): synlig tekst i et vindu som kan tas opp" as NSString)
+                .draw(at: NSPoint(x: 16, y: bounds.height - 40 - CGFloat(i) * 20), withAttributes: attrs)
+        }
+    }
+}
+
+func plainWindow(_ rect: NSRect, _ view: NSView) -> NSWindow {
+    let w = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
+    w.isReleasedWhenClosed = false
+    w.isRestorable = false
+    w.contentView = view
+    w.orderFrontRegardless()
+    return w
+}
+
+/// `rect` (AppKit screen coordinates) as x,y,w,h with the origin at the top
+/// left.
+func globalText(_ rect: NSRect) -> String {
+    let top = NSScreen.screens.first?.frame.maxY ?? 0
+    return "\(Int(rect.minX)),\(Int(top - rect.maxY)),\(Int(rect.width)),\(Int(rect.height))"
+}
+
 // MARK: - Main
 
 let application = BrevApplication.shared
@@ -213,9 +296,34 @@ var events: [String] = []
 mail.onLock = { events.append("lock") }
 mail.onNewLetter = { _ in events.append("new letter") }
 window.root.show(mail)
-window.center()
+if let frameArg { window.setFrame(frameArg, display: false) } else { window.center() }
+// Behind the window, a backdrop that shows where the window is excluded;
+// to its right, the control.
+var plainWindows: [NSWindow] = []
+if control {
+    let screen = NSScreen.screens.first?.visibleFrame ?? .zero
+    let f = window.frame
+    let backdrop = NSRect(x: f.minX - 8, y: f.minY - 8, width: screen.maxX - f.minX + 8, height: f.height + 16)
+    plainWindows.append(plainWindow(backdrop, PlainView(color: NSColor(srgbRed: 0, green: 160 / 255, blue: 0, alpha: 1),
+                                                        lines: 0)))
+    plainWindows.append(plainWindow(NSRect(x: f.maxX + 8, y: f.minY, width: backdrop.maxX - f.maxX - 16,
+                                           height: f.height),
+                                    PlainView(color: NSColor(srgbRed: 0, green: 1, blue: 1, alpha: 1), lines: 12)))
+}
 window.orderFrontRegardless()
+plainWindows.dropFirst().forEach { $0.orderFrontRegardless() }
 mail.start()
+// Every content view draws through a layer with preventsCapture = true.
+let contentViews = all(ContentView.self, in: mail.view)
+check("every content view has a protected layer", !contentViews.isEmpty && contentViews.allSatisfy {
+    $0.protectedLayer.preventsCapture && $0.protectedLayer.superlayer === $0.layer && $0.wantsUpdateLayer
+})
+// The negative control reaches the letter views a reload makes later, too.
+func unprotect() { all(ContentView.self, in: mail.view).forEach { $0.protectedLayer.preventsCapture = false } }
+if unprotected {
+    unprotect()
+    _ = commonModeTimer(every: 0.05, unprotect)
+}
 
 lock.window = window
 lock.session = session
@@ -233,6 +341,13 @@ func shownLetters() -> Int { all(SecureTextView.self, in: letters).count }
 let screenTop = NSScreen.screens.first?.frame.maxY ?? 0
 let f = window.frame
 print("ready pid=\(getpid()) window=\(window.windowNumber) frame=\(Int(f.minX)),\(Int(screenTop - f.maxY)),\(Int(f.width)),\(Int(f.height))")
+mail.view.layoutSubtreeIfNeeded()
+for (name, v) in zip(["contacts", "threads", "letters"], [lists[0], lists[1], letters] as [NSView]) {
+    if let scroll = v.enclosingScrollView {
+        print("rect \(name) \(globalText(window.convertToScreen(scroll.convert(scroll.bounds, to: nil))))")
+    }
+}
+for (name, w) in zip(["backdrop", "control"], plainWindows) { print("rect \(name) \(globalText(w.frame))") }
 
 DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
     snapshot(mail.view, "unlocked.png")
@@ -240,6 +355,17 @@ DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
     check("two contacts, the first selected", lists.count == 2 && lists[0].count == 2 && lists[0].selected == 0)
     check("Ekko's two threads, the newest selected", lists[1].count == 2 && lists[1].selected == 0)
     check("its letter and the echo are shown", shownLetters() == 2)
+    // The shown letters are pixels in the protected layer's buffers, and
+    // AppKit's own drawing of a letter view gets none.
+    let bodies = all(SecureTextView.self, in: letters).filter { !$0.visibleRect.intersection($0.bounds).isEmpty }
+    check("while shown: each visible letter's frame is in its buffers and on its layer",
+          !bodies.isEmpty && bodies.allSatisfy { $0.pool.contains(where: hasPixels) && showsPixels($0) })
+    if let body = bodies.first, case let shown = body.visibleRect.intersection(body.bounds),
+       let rep = body.bitmapImageRepForCachingDisplay(in: shown) {
+        body.cacheDisplay(in: shown, to: rep)
+        let data = rep.bitmapData.map { UnsafeBufferPointer(start: $0, count: rep.bytesPerPlane) }
+        check("cacheDisplay of a shown letter draws nothing", data.map { !$0.contains { $0 != 0 } } ?? false)
+    }
     if scanning {
         // The letters' own glyph ids are not live while shown (ContentView
         // draws through a bitmap), so the glyph needle's control is
@@ -252,11 +378,12 @@ DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
     // Wider window: only the letter pane grows, and every document view
     // follows its scroll view's width.
     let before = lists.map { $0.frame.width }, lettersBefore = letters.frame.width
+    let grown = 1100 - window.contentView!.frame.width
     window.setContentSize(NSSize(width: 1100, height: 640))
     mail.view.layoutSubtreeIfNeeded()
     let fits = (lists + [letters]).allSatisfy { $0.frame.width == $0.superview?.bounds.width }
     check("resize: the lists keep their width, the documents follow their scroll views",
-          lists.map { $0.frame.width } == before && fits && letters.frame.width == lettersBefore + 200,
+          lists.map { $0.frame.width } == before && fits && letters.frame.width == lettersBefore + grown,
           "lists \(before) -> \(lists.map { $0.frame.width }), letters \(lettersBefore) -> \(letters.frame.width)")
     // A divider dragged to the right edge, then a window narrower than the
     // panes: no pane gets narrower than its minimum, the window grows back
@@ -319,7 +446,15 @@ func sendAndLock() {
         check("after sync: the letter pane keeps its scroll position",
               scrolled > 0 && letters.visibleRect.minY == scrolled, "\(scrolled) -> \(letters.visibleRect.minY)")
         snapshot(mail.view, "after-sync.png")
+        // Every content view the lock reaches, including the letters that
+        // letters.clear() removes from the window.
+        let views = all(ContentView.self, in: mail.view)
+        check("before lock: content views hold pixels (control)", views.contains { $0.pool.contains(where: hasPixels) })
         lock.lock(.manual)
+        check("lock: every pixel buffer of every content view is zero",
+              views.allSatisfy { !$0.pool.contains(where: hasPixels) },
+              "\(views.filter { $0.pool.contains(where: hasPixels) }.count) of \(views.count) views")
+        check("lock: no content view's layer shows a pixel", !views.contains(where: showsPixels))
         check("lock: lists and letters wiped", lists.allSatisfy { $0.count == 0 } && letters.isEmpty)
         check("lock: the session is locked", session.brev.isLocked())
         check("lock: the lock screen replaced the mail screen", window.root.child is NoticeViewController)
@@ -331,8 +466,26 @@ func sendAndLock() {
             check("after lock: no copy (UTF-8, UTF-16, glyphs)", h.u8 == 0 && h.u16 == 0 && h.glyph == 0, "\(h)")
         }
         snapshot(window.contentView!, "locked.png")
+        checkHardenedChildren()
         finish()
     }
+}
+
+/// A sheet and a child window made with the default sharing type get
+/// Hardening's settings from the window they join (CLAUDE.md §3.2).
+func checkHardenedChildren() {
+    let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 80), styleMask: [.titled],
+                         backing: .buffered, defer: false)
+    let child = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 120, height: 40), styleMask: [.borderless],
+                         backing: .buffered, defer: false)
+    for w in [sheet, child] { w.isReleasedWhenClosed = false }
+    window.beginSheet(sheet)
+    window.addChildWindow(child, ordered: .above)
+    check("a sheet and a child window get Hardening's settings",
+          [sheet, child].allSatisfy { $0.sharingType == .none && !$0.isRestorable && $0.isExcludedFromWindowsMenu })
+    window.endSheet(sheet)
+    window.removeChildWindow(child)
+    child.orderOut(nil)
 }
 
 application.run()

@@ -100,8 +100,10 @@ final class LockController: NSObject {
         idleTimer = nil
         NSApp.mainMenu?.cancelTracking()
         // 2, 3. The screen wipes its content, including a compose sheet's,
-        //    and every sheet ends.
+        //    and every sheet ends. Every content view zeroes its pixel
+        //    buffers in place and shows a blank frame (D-0034).
         window?.root.wipeContent()
+        ContentView.blankAll()
         // 4. Replace what Core Text keeps alive, after every text is wiped.
         GlyphFlush.flush()
         // 5. Rust closes open texts, zeroes the three DEKs, scrubs stacks.

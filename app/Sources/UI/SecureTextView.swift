@@ -42,12 +42,13 @@ final class SecureTextView: ContentView {
         return layout.height
     }
 
-    /// Wipes the text and forgets its lines.
+    /// Wipes the text, forgets its lines and zeroes its pixels.
     func clear() {
         text?.wipe()
         text = nil
         layout.reset()
         laidOutWidth = -1
+        blank()
         needsDisplay = true
     }
 

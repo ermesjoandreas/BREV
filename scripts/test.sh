@@ -188,13 +188,16 @@ fi
 # checkable cases of §6.3 rules 1 and 5 that §11's list misses: the other
 # ways to make a String from bytes or units, the mutable string classes, the
 # copying CFString constructor (the NoCopy one does not match) and the other
-# logging calls.
+# logging calls. The three imports keep AVFoundation, CoreMedia and
+# CoreVideo to the capture-protected content layer, the only use CLAUDE.md
+# §4 approves (docs/DECISIONS.md D-0034).
 echo "==> forbidden APIs in app/Sources"
 FORBIDDEN=(NSPasteboard NSTextView NSTextField NSTextInputClient .characters 'String(decoding' 'NSString('
            'NSAttributedString(' CTTypesetter CTFramesetter NSAlert 'print(' servicesMenu
            'String(utf16CodeUnits' 'String(data' 'String(bytes' 'String(cString' 'String(validating'
            'String(utf8String' 'String(unsafeUninitializedCapacity' NSMutableString NSMutableAttributedString
-           'CFStringCreateWithCharacters(' 'NSLog(' 'debugPrint(' 'dump(' 'os_log(')
+           'CFStringCreateWithCharacters(' 'NSLog(' 'debugPrint(' 'dump(' 'os_log('
+           'import AVFoundation' 'import CoreMedia' 'import CoreVideo')
 GREP_ARGS=()
 for p in "${FORBIDDEN[@]}"; do GREP_ARGS+=(-e "$p"); done
 # "path<TAB>trimmed line" for every hit and for every allow-list entry

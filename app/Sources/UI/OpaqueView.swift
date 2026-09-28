@@ -10,24 +10,35 @@
 // shows only an empty AXScrollArea; the full set is kept as defence in
 // depth, and the design's fallback of one opaque container is not needed.
 //
-// ContentView is where content becomes pixels. Its subclasses draw only in
+// ContentView is where content becomes pixels, and the only place
+// (CLAUDE.md §3.2; docs/DECISIONS.md D-0034). Its subclasses draw only in
 // `drawContent(in:rect:)`, with Core Graphics and Core Text into the context
-// they are given, never through AppKit's current context. `draw(_:)` renders
-// that into a bitmap of its own and gives AppKit only the image. On macOS
-// 26.2 AppKit records `draw(_:)` into a Core Graphics display list, which
-// copies the glyph ids of every line drawn into it and keeps them while the
-// view shows them, and after a lock until the run-loop turn ends (measured
-// with tools/viewhost: 3 subject lines left after the lock sequence). Drawn
-// into a bitmap, a line's glyphs exist only while Core Text draws it
-// (CLAUDE.md §2; docs/PHASE2_DESIGN.md §6.4; D-0047 in the shifted
-// numbering), so a shown letter leaves no live glyph ids, and V39's glyph
-// control is SelfScan's own line of the marker (docs/VERIFY.md, "Changes
-// from the design"). The protected content layer (WP11; CLAUDE.md §3.2,
-// docs/DECISIONS.md D-0034) takes the same bitmap into a pixel buffer behind
-// an AVSampleBufferDisplayLayer, and only this class changes. No tooltips,
-// popovers or other AppKit-made windows over content (capture spike).
+// they are given, never through AppKit's current context. That context is
+// one buffer of a fixed pool of IOSurface-backed CVPixelBuffers, shown
+// through an AVSampleBufferDisplayLayer with `preventsCapture = true`.
+// AppKit's own drawing of the view (`draw(_:)`, which also feeds
+// cacheDisplay and PDF output) draws nothing. On macOS 26.2
+// `sharingType = .none` keeps a window out of ScreenCaptureKit and
+// screencapture, but not out of CGDisplayStream or AVCaptureScreenInput; the
+// protected layer is missing from all four (capture spike, re-run at Brev's
+// window level 0 in WP11; D-0060 in the shifted numbering). Drawing into a
+// bitmap also keeps glyph ids out of AppKit's display list, which kept them
+// until after a lock (WP7, tools/viewhost; D-0047 in the shifted numbering),
+// so a shown letter leaves no live glyph ids, and V39's glyph control is
+// SelfScan's own line of the marker (docs/VERIFY.md, "Changes from the
+// design"). Only the visible part of a view is drawn: again on every scroll,
+// resize and content change, into the pool's next buffer. The buffers are
+// zeroed in place when the view's text is wiped or it leaves its window
+// (`blank()`), when it is freed, and for every view in the lock sequence
+// (`ContentView.blankAll()`), which also shows a blank frame (§2 accepts
+// pixels in these buffers until then). AVFoundation, CoreMedia and CoreVideo
+// are approved for this layer only (§4). No tooltips, popovers or other
+// AppKit-made windows over content (capture spike).
 
 import AppKit
+import AVFoundation
+import CoreMedia
+import CoreVideo
 
 class OpaqueView: NSView {
     override var isFlipped: Bool { true }
@@ -63,36 +74,225 @@ class ContentView: OpaqueView {
     /// Metadata (dates) and nothing else.
     static let metaFont = NSFont.systemFont(ofSize: 11) as CTFont
 
-    /// Renders `dirtyRect` with `drawContent` into a bitmap at the window's
-    /// scale and draws that image. AppKit never sees a glyph.
-    override func draw(_ dirtyRect: NSRect) {
-        guard let ctx = NSGraphicsContext.current?.cgContext, let image = render(dirtyRect.integral) else { return }
-        let r = dirtyRect.integral
-        ctx.saveGState()
-        ctx.interpolationQuality = .none
-        // The view is flipped; the image's first row is its top.
-        ctx.translateBy(x: 0, y: r.minY + r.maxY)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.draw(image, in: r)
-        ctx.restoreGState()
+    /// Buffers per view: one shown, one queued, one being drawn.
+    private static let poolSize = 3
+    /// Buffer sides are rounded up to this many pixels, so a live resize
+    /// makes a new pool only every few steps.
+    private static let granule = 256
+    /// Every content view alive, for the lock sequence.
+    private static let live = NSHashTable<ContentView>.weakObjects()
+
+    /// Lock sequence (docs/PHASE2_DESIGN.md §8.4; D-0034): every content
+    /// view zeroes its pixel buffers in place and shows a blank frame.
+    static func blankAll() {
+        live.allObjects.forEach { $0.blank() }
     }
 
-    /// `rect` (in this view's coordinates) drawn by `drawContent` into a new
-    /// bitmap of the window's scale; nil for an empty rect.
-    func render(_ rect: CGRect) -> CGImage? {
-        let scale = window?.backingScaleFactor ?? 2
-        let w = Int((rect.width * scale).rounded(.up)), h = Int((rect.height * scale).rounded(.up))
-        guard w > 0, h > 0, let space = CGColorSpace(name: CGColorSpace.sRGB),
-              let bitmap = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: space,
-                                     bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                                         | CGBitmapInfo.byteOrder32Little.rawValue)
-        else { return nil }
-        // View coordinates (y down, from rect's corner) onto the bitmap.
-        bitmap.scaleBy(x: scale, y: -scale)
-        bitmap.translateBy(x: -rect.minX, y: -rect.maxY)
-        drawContent(in: bitmap, rect: rect)
-        return bitmap.makeImage()
+    /// Shows this view's pixels, and keeps them out of screen captures.
+    let protectedLayer = AVSampleBufferDisplayLayer()
+    /// The fixed pool, all buffers of one size; empty until the first frame.
+    private(set) var pool: [CVPixelBuffer] = []
+    private var nextIndex = 0
+    /// Whether the layer may show a frame that `blank()` has not zeroed.
+    private var showing = false
+    /// The enclosing clip view's scroll and resize notifications.
+    private var observers: [NSObjectProtocol] = []
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        protectedLayer.preventsCapture = true
+        protectedLayer.videoGravity = .resize
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        Self.live.add(self)
     }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    deinit {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        pool.forEach(Self.zero)
+    }
+
+    override func makeBackingLayer() -> CALayer {
+        let layer = super.makeBackingLayer()
+        layer.masksToBounds = true
+        layer.addSublayer(protectedLayer)
+        return layer
+    }
+
+    // MARK: When to draw
+
+    override var wantsUpdateLayer: Bool { true }
+
+    /// AppKit's drawing of this view (a backing store, cacheDisplay, PDF)
+    /// gets no pixels of content.
+    override func draw(_ dirtyRect: NSRect) {}
+
+    override func updateLayer() {
+        present()
+    }
+
+    /// Scrolling or resizing the enclosing scroll view changes what is
+    /// visible, so it draws again. Leaving the window blanks the buffers.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers = []
+        guard window != nil else { return blank() }
+        if let clip = enclosingScrollView?.contentView {
+            for name in [NSView.boundsDidChangeNotification, NSView.frameDidChangeNotification] {
+                observers.append(NotificationCenter.default.addObserver(forName: name, object: clip, queue: nil) {
+                    [weak self] _ in self?.needsDisplay = true
+                })
+            }
+        }
+        needsDisplay = true
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsDisplay = true
+    }
+
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        super.setFrameOrigin(newOrigin)
+        needsDisplay = true
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsDisplay = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    // MARK: The protected layer
+
+    /// Draws the visible part of the view with `drawContent` into the
+    /// pool's next buffer, at the window's scale, and shows it.
+    private func present() {
+        // visibleRect is not clipped to the view's own bounds (views do not
+        // clip to them since macOS 14): a letter below the pane's visible
+        // part would get the whole pane.
+        let visible = visibleRect.intersection(bounds)
+        guard let window, visible.width >= 1, visible.height >= 1 else {
+            if showing { blank() }
+            return
+        }
+        let scale = window.backingScaleFactor
+        guard let buffer = nextBuffer(width: Int((visible.width * scale).rounded(.up)),
+                                      height: Int((visible.height * scale).rounded(.up))),
+              CVPixelBufferLockBaseAddress(buffer, []) == kCVReturnSuccess
+        else { return }
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        guard let base = CVPixelBufferGetBaseAddress(buffer), let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: base, width: width, height: height, bitsPerComponent: 8,
+                                  bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: space,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                      | CGBitmapInfo.byteOrder32Little.rawValue)
+        else {
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            return
+        }
+        ctx.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        // View coordinates (y down, from the visible rect's corner) onto the
+        // buffer, whose first row is its top.
+        ctx.translateBy(x: 0, y: CGFloat(height))
+        ctx.scaleBy(x: scale, y: -scale)
+        ctx.translateBy(x: -visible.minX, y: -visible.minY)
+        ctx.clip(to: visible)
+        drawContent(in: ctx, rect: visible)
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        protectedLayer.frame = CGRect(x: visible.minX, y: visible.minY,
+                                      width: CGFloat(width) / scale, height: CGFloat(height) / scale)
+        show(buffer)
+        CATransaction.commit()
+        showing = true
+    }
+
+    /// Zeroes every buffer of the pool in place, removes the shown frame and
+    /// shows a blank one. For a wiped text, a view that left its window or
+    /// scrolled out of sight, and every view in the lock sequence.
+    func blank() {
+        pool.forEach(Self.zero)
+        protectedLayer.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
+        if let empty = pool.first { show(empty) }
+        showing = false
+    }
+
+    /// The pool's next buffer for a frame of at least `width` x `height`
+    /// pixels. A new size makes a new pool; the old one is zeroed first.
+    private func nextBuffer(width: Int, height: Int) -> CVPixelBuffer? {
+        let w = Self.roundUp(width), h = Self.roundUp(height)
+        if pool.first.map({ CVPixelBufferGetWidth($0) != w || CVPixelBufferGetHeight($0) != h }) ?? true {
+            pool.forEach(Self.zero)
+            pool = (0..<Self.poolSize).compactMap { _ in Self.makeBuffer(width: w, height: h) }
+            nextIndex = 0
+            guard pool.count == Self.poolSize else {
+                pool = []
+                return nil
+            }
+        }
+        defer { nextIndex = (nextIndex + 1) % pool.count }
+        return pool[nextIndex]
+    }
+
+    /// Replaces the layer's frame with `buffer` at once.
+    private func show(_ buffer: CVPixelBuffer) {
+        var format: CMVideoFormatDescription?
+        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: buffer,
+                                                           formatDescriptionOut: &format) == noErr,
+              let format,
+              CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: buffer, formatDescription: format,
+                                                       sampleTiming: &timing, sampleBufferOut: &sample) == noErr,
+              let sample
+        else { return }
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true)
+            as? [NSMutableDictionary] {
+            attachments.first?[kCMSampleAttachmentKey_DisplayImmediately] = true
+        }
+        let renderer = protectedLayer.sampleBufferRenderer
+        renderer.flush()
+        renderer.enqueue(sample)
+    }
+
+    private static func roundUp(_ n: Int) -> Int {
+        (n + granule - 1) / granule * granule
+    }
+
+    /// An IOSurface-backed BGRA buffer that a CGContext can draw into.
+    private static func makeBuffer(width: Int, height: Int) -> CVPixelBuffer? {
+        let attrs = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+                     kCVPixelBufferCGBitmapContextCompatibilityKey: true] as CFDictionary
+        var buffer: CVPixelBuffer?
+        guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attrs, &buffer) == kCVReturnSuccess,
+              let buffer, let space = CGColorSpace(name: CGColorSpace.sRGB)
+        else { return nil }
+        CVBufferSetAttachment(buffer, kCVImageBufferCGColorSpaceKey, space, .shouldPropagate)
+        return buffer
+    }
+
+    /// Every pixel row of `buffer` set to 0, in place.
+    private static func zero(_ buffer: CVPixelBuffer) {
+        guard CVPixelBufferLockBaseAddress(buffer, []) == kCVReturnSuccess else { return }
+        if let base = CVPixelBufferGetBaseAddress(buffer) {
+            let n = CVPixelBufferGetBytesPerRow(buffer) * CVPixelBufferGetHeight(buffer)
+            memset_s(base, n, 0, n)
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+    }
+
+    // MARK: Drawing, for subclasses
 
     /// Draws what lies inside `rect` (in this view's flipped coordinates)
     /// into `ctx`, whose transform already maps those coordinates. Only

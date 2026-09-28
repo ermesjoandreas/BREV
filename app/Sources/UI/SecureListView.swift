@@ -41,10 +41,11 @@ final class SecureListView: ContentView {
 
     var count: Int { rows.count }
 
-    /// Replaces the rows, wiping the old ones' texts, and selects `selected`
-    /// without calling `onSelect`.
+    /// Replaces the rows, wiping the old ones' texts and pixels, and selects
+    /// `selected` without calling `onSelect`.
     func setRows(_ new: [Row], selected: Int?) {
         rows.forEach { $0.text.wipe() }
+        blank()
         rows = new
         self.selected = selected.flatMap { rows.indices.contains($0) ? $0 : nil }
         fitSize()

@@ -24,7 +24,7 @@ final class BlankContentView: NSView {
     }
 }
 
-final class MainWindow: NSWindow {
+final class MainWindow: HardenedWindow {
     /// Holds the current screen (onboarding, lock screen or mail).
     let root = RootViewController()
 
