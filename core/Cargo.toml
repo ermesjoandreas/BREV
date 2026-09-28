@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "brev-core",
+    "brev-mail",
     "brev-proto",
+    "brev-vault",
     "brev-relay",
     "uniffi-bindgen",
 ]
@@ -30,8 +31,9 @@ hkdf = "0.13.0"
 sha2 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
 rand = { version = "0.10.3", default-features = false, features = ["sys_rng"] }
 zeroize = "1.9.0"
-# brev-core's global allocator: zeroes every freed heap block, including the
-# RustBuffers Swift frees through UniFFI (docs/DECISIONS.md D-0032 item 4).
+# brev-vault's global allocator (feature `zeroing-allocator`): zeroes every
+# freed heap block, including the RustBuffers Swift frees through UniFFI
+# (docs/DECISIONS.md D-0032 item 4).
 zeroizing-alloc = "0.1.1"
 # Phase 3 (docs/PHASE3_DESIGN.md §0, §3.3, §5.1). P-256 verification of the
 # Secure Enclave's signatures, in brev-proto for brev-core and brev-relay;

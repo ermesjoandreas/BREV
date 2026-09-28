@@ -14,28 +14,26 @@
 //! second half of a call that a lock came in between (§5.2).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use brev_proto::body::{self, is_valid_address, ADDRESS_MAX};
+use brev_vault::Text;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, Plaintext};
 use crate::relay::RelayTransport;
-use crate::store::{is_permanent, Letter};
+use crate::store::{is_permanent, Letter, MAIL};
 use crate::transport::{NetError, Transport};
 use crate::{ContactId, Core, Error, MessageId, ThreadId};
 
 /// Bytes per [`OpenText::chunk`]. Every chunk has exactly this length, so no
 /// buffer that carries content across the FFI is ever above 1 KiB.
-pub const CHUNK: usize = 960;
+pub const CHUNK: usize = brev_vault::CHUNK;
 /// Largest subject, in UTF-8 bytes.
 pub const MAX_SUBJECT: usize = 256;
 /// Largest body, in UTF-8 bytes.
 pub const MAX_BODY: usize = 64 * 1024;
-
-/// The user's store, in the directory the app passes to `create` and `open`.
-const MY_FILE: &str = "brev.db";
 
 /// Errors across the FFI. Unit variants only, so nothing but a variant
 /// index ever crosses. Each is the [`Error`] of the same name.
@@ -211,37 +209,27 @@ pub struct MessageRow {
 /// one that is still open.
 #[derive(uniffi::Object)]
 pub struct OpenText {
-    plain: Mutex<Option<Plaintext>>,
+    /// The vault's text; the vault closes it when it locks.
+    text: Arc<Text>,
 }
 
 #[uniffi::export]
 impl OpenText {
     /// Content length in bytes; 0 once closed.
     pub fn byte_len(&self) -> u32 {
-        guard(&self.plain).as_ref().map_or(0, |p| p.len() as u32)
+        self.text.byte_len()
     }
 
     /// Bytes `[index * CHUNK, index * CHUNK + CHUNK)`, zero-padded to
     /// exactly [`CHUNK`]. `Malformed` past the end (so an empty text has no
     /// chunk), `Locked` once closed.
     pub fn chunk(&self, index: u32) -> Result<Vec<u8>, BrevError> {
-        let g = guard(&self.plain);
-        let p = g.as_ref().ok_or(BrevError::Locked)?;
-        let start = (index as usize)
-            .checked_mul(CHUNK)
-            .ok_or(BrevError::Malformed)?;
-        if start >= p.len() {
-            return Err(BrevError::Malformed);
-        }
-        let end = p.len().min(start + CHUNK);
-        let mut out = vec![0u8; CHUNK];
-        out[..end - start].copy_from_slice(&p[start..end]);
-        Ok(out)
+        self.text.chunk(index).map_err(|e| Error::from(e).into())
     }
 
     /// Wipes the content now. Idempotent.
     pub fn close(&self) {
-        guard(&self.plain).take();
+        self.text.close();
     }
 }
 
@@ -253,9 +241,9 @@ pub struct Brev {
 }
 
 struct Session {
+    /// The store; every `OpenText` handed out is registered in its vault,
+    /// which closes the ones still alive when it locks.
     me: Core,
-    /// Every `OpenText` handed out; `lock_all` closes the ones still alive.
-    open: Vec<Weak<OpenText>>,
     /// Bumped by every lock. A call that released the mutex for the network
     /// and finds another epoch when it takes it again stores nothing.
     epoch: u64,
@@ -300,7 +288,7 @@ impl Brev {
     #[uniffi::constructor]
     pub fn open(dir: String, relay: String) -> Result<Arc<Brev>, BrevError> {
         let net = RelayTransport::new(&relay)?;
-        let me = Core::open(&PathBuf::from(dir).join(MY_FILE))?;
+        let me = Core::open(&MAIL.path_in(&PathBuf::from(dir)))?;
         Ok(Arc::new(Brev::new(me, net)))
     }
 
@@ -660,7 +648,6 @@ impl Brev {
         Brev {
             s: Mutex::new(Session {
                 me,
-                open: Vec::new(),
                 epoch: 0,
                 ticket: None,
                 letter: None,
@@ -681,7 +668,7 @@ impl Brev {
     ) -> Result<Brev, BrevError> {
         let net = RelayTransport::new(relay)?;
         let mut key = dek32(dek).ok_or(BrevError::Malformed)?;
-        let mut me = Core::create(&dir.join(MY_FILE), &mut key, signing_key)?;
+        let mut me = Core::create(&MAIL.path_in(dir), &mut key, signing_key)?;
         me.lock();
         Ok(Brev::new(me, net))
     }
@@ -791,20 +778,13 @@ fn unlock_all(s: &mut Session, dek: &[u8]) -> Result<(), BrevError> {
 impl Session {
     /// Wraps `p` in an `OpenText` that `lock_all` can close.
     fn register(&mut self, p: Plaintext) -> Arc<OpenText> {
-        self.open.retain(|w| w.strong_count() > 0);
-        let t = Arc::new(OpenText {
-            plain: Mutex::new(Some(p)),
-        });
-        self.open.push(Arc::downgrade(&t));
-        t
+        Arc::new(OpenText {
+            text: self.me.open_text(p),
+        })
     }
 
+    /// The texts are closed inside `me.lock()`, under the same mutex.
     fn lock_all(&mut self) {
-        for w in self.open.drain(..) {
-            if let Some(t) = w.upgrade() {
-                t.close();
-            }
-        }
         self.ticket = None;
         self.letter = None;
         self.registration = None;

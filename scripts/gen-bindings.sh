@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Builds brev-core in release, regenerates the UniFFI Swift bindings into
-# app/Generated/ (gitignored) and patches them (scripts/patch-bindings.py).
+# Builds brev-mail (library brev_core) in release, regenerates the UniFFI
+# Swift bindings into app/Generated/ (gitignored) and patches them
+# (scripts/patch-bindings.py).
 # Runs on macOS and Linux, so a CI box without Xcode can still prove that the
 # bindings generate. build.sh and test.sh call this.
 #
@@ -39,10 +40,10 @@ if [[ "$(uname -s)" == Darwin ]]; then
   export MACOSX_DEPLOYMENT_TARGET=14.0
 fi
 
-echo "==> Building brev-core (release)"
+echo "==> Building brev-mail (release)"
 # One build produces both artefacts: libbrev_core.a, which the app links, and
 # the shared library (.dylib/.so) that bindgen reads UniFFI metadata from.
-cargo build --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-core
+cargo build --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-mail
 
 # The generated Swift comes from uniffi_bindgen, the runtime it calls from
 # uniffi; both must be the pinned release. Each name must occur once in
@@ -70,6 +71,24 @@ for f in "$TARGET_DIR/release/libbrev_core.a" "$LIB"; do
     exit 1
   fi
 done
+
+# brev-mail's `test-hooks` feature (MockTransport and brev-vault's test
+# counters) is for tests only (docs/VAULT_SPLIT_PLAN.md Q5): the archive the
+# app links must not have it. nm's output is captured first (`grep -q` in a
+# pipe could stop it with SIGPIPE under pipefail); Xcode's nm complains about
+# the Rust std objects, so its stderr and exit status are ignored, and the
+# ping symbol proves it read the archive. scripts/test.sh checks the other
+# side: the same pattern finds the hooks in a test build.
+TEST_HOOKS='MockTransport|live_plaintexts|_for_test'
+ARCHIVE_SYMS="$(nm "$TARGET_DIR/release/libbrev_core.a" 2>/dev/null || true)"
+if ! grep -q 'uniffi_brev_core_fn_func_ping' <<<"$ARCHIVE_SYMS"; then
+  echo "error: nm found no ping symbol in libbrev_core.a; the test-hooks check cannot run" >&2
+  exit 1
+fi
+if grep -Eq "$TEST_HOOKS" <<<"$ARCHIVE_SYMS"; then
+  echo "error: libbrev_core.a has test hooks ($TEST_HOOKS): brev-mail was built with test-hooks" >&2
+  exit 1
+fi
 
 # swift-format is optional; without --no-format bindgen prints a warning when
 # it is missing. A plain string (not an array) keeps this valid under `set -u`
@@ -106,7 +125,7 @@ cargo run --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" -p uniffi-bindg
 # Generated/BrevCore.swift; the bridging header imports BrevCoreFFI.h).
 for f in BrevCore.swift BrevCoreFFI.h BrevCoreFFI.modulemap; do
   if [[ ! -f "$STAGE_DIR/$f" ]]; then
-    echo "error: bindgen did not produce $STAGE_DIR/$f (check core/brev-core/uniffi.toml)" >&2
+    echo "error: bindgen did not produce $STAGE_DIR/$f (check core/brev-mail/uniffi.toml)" >&2
     exit 1
   fi
 done

@@ -14,8 +14,8 @@
 #   TouchIDProbe.app                  V51 (Brev's unlock closure, needles);
 #                                     team-signed with Brev's bundle id
 #   TouchIDProbe.app, scrub 0 and 128 V51's negative control and next depth
-#                                     (design §14.2 K): brev-core copied and
-#                                     built with the unlock's deep scrub
+#                                     (design §14.2 K): core/ copied and
+#                                     brev-mail built with the unlock's deep scrub
 #                                     disabled and at 128 KiB
 #   Brev.app, configuration Verify    V1, V2, V39, V50 ($VAPP)
 #
@@ -76,8 +76,9 @@ mkdir -p "$OUT"
 PROBE_SOURCES=("$HERE/touchid-probe/main.swift" "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/Keys/*.swift
                "$REPO_ROOT/app/Sources/App/L10n.swift" "$REPO_ROOT/app/Tests/ecies_needles.swift" "$BINDINGS")
 LAB="$HERE/spikes/input/src"
-# The one line of scrub_stack_deep that V51's variants change (the depth).
-CRYPTO="$REPO_ROOT/core/brev-core/src/crypto.rs"
+# The one line of scrub_stack_deep that V51's variants change (the depth). It
+# is in brev-vault; brev-mail's archive links it.
+CRYPTO="$REPO_ROOT/core/brev-vault/src/crypto.rs"
 SCRUB_LINE='let mut buf = [0xA5u8; 64 * 1024];'
 
 if [[ "$MODE" == check ]]; then
@@ -160,7 +161,7 @@ xcodebuild -project "$HERE/touchid-probe/TouchIDProbe.xcodeproj" -allowProvision
 PROBE="$OUT/touchid-probe/Build/Products/Release/TouchIDProbe.app"
 [[ -d "$PROBE" ]] || { echo "error: $PROBE is missing" >&2; exit 1; }
 
-# V51's variants (design §14.2 K): the same probe linked against brev-core
+# V51's variants (design §14.2 K): the same probe linked against brev-mail
 # with the unlock's deep scrub at 0 KiB (disabled: the negative control) and
 # at 128 KiB. Built from a copy of core/ with only that depth changed, in its
 # own target folder: core/ and the archive Brev links stay untouched.
@@ -170,13 +171,13 @@ rsync -a --delete --exclude /target "$REPO_ROOT/core/" "$SCRUB_CORE/src/"
 PROBES=("$PROBE")
 for kib in 0 128; do
   echo "==> TouchIDProbe.app with the unlock's deep scrub at $kib KiB"
-  sed "s/\[0xA5u8; 64 \* 1024\]/[0xA5u8; $kib * 1024]/" "$CRYPTO" > "$SCRUB_CORE/src/brev-core/src/crypto.rs"
-  if [[ "$(grep -cF "let mut buf = [0xA5u8; $kib * 1024];" "$SCRUB_CORE/src/brev-core/src/crypto.rs")" != 1 ]]; then
+  sed "s/\[0xA5u8; 64 \* 1024\]/[0xA5u8; $kib * 1024]/" "$CRYPTO" > "$SCRUB_CORE/src/brev-vault/src/crypto.rs"
+  if [[ "$(grep -cF "let mut buf = [0xA5u8; $kib * 1024];" "$SCRUB_CORE/src/brev-vault/src/crypto.rs")" != 1 ]]; then
     echo "error: the scrub depth in the copy of crypto.rs was not changed to $kib KiB" >&2
     exit 1
   fi
   MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --manifest-path "$SCRUB_CORE/src/Cargo.toml" --target-dir "$SCRUB_CORE/target" \
-    --release -p brev-core --quiet
+    --release -p brev-mail --quiet
   cp "$SCRUB_CORE/target/release/libbrev_core.a" "$SCRUB_CORE/libbrev_core-scrub$kib.a"
   xcodebuild -project "$HERE/touchid-probe/TouchIDProbe.xcodeproj" -allowProvisioningUpdates -scheme TouchIDProbe \
     -configuration Release -destination "platform=macOS,arch=$ARCH" -derivedDataPath "$OUT/touchid-probe-scrub$kib" \

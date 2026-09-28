@@ -173,15 +173,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "brev-core"
+name = "brev-mail"
 version = "0.0.1"
 dependencies = [
+ "brev-mail",
  "brev-proto",
  "brev-relay",
- "chacha20poly1305",
+ "brev-vault",
  "hkdf",
  "p256",
- "poly1305",
  "rand",
  "reqwest",
  "rusqlite",
@@ -190,13 +190,13 @@ dependencies = [
  "uniffi",
  "x25519-dalek",
  "zeroize",
- "zeroizing-alloc",
 ]
 
 [[package]]
 name = "brev-proto"
 version = "0.0.1"
 dependencies = [
+ "brev-vault",
  "p256",
  "sha2",
 ]
@@ -213,6 +213,19 @@ dependencies = [
  "rusqlite",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "brev-vault"
+version = "0.0.1"
+dependencies = [
+ "chacha20poly1305",
+ "poly1305",
+ "rand",
+ "rusqlite",
+ "thiserror",
+ "zeroize",
+ "zeroizing-alloc",
 ]
 
 [[package]]

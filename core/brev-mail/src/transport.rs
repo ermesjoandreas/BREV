@@ -5,6 +5,7 @@
 //! is stored or permanently refused (docs/PHASE3_DESIGN.md §5.3), so a letter
 //! that fails for a local reason is fetched again.
 
+#[cfg(any(test, feature = "test-hooks"))]
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::Envelope;
@@ -40,12 +41,15 @@ pub trait Transport {
 }
 
 /// In-process transport for two parties: what one end sends, the other end
-/// polls and acknowledges. Used by the Phase 1 tests.
+/// polls and acknowledges. Used by the Phase 1 tests; test builds only
+/// (`cfg(test)` or the feature `test-hooks`).
+#[cfg(any(test, feature = "test-hooks"))]
 pub struct MockTransport {
     inbox: Arc<Mutex<Vec<Envelope>>>,
     peer_inbox: Arc<Mutex<Vec<Envelope>>>,
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 impl MockTransport {
     /// Two connected ends.
     pub fn pair() -> (MockTransport, MockTransport) {
@@ -64,6 +68,7 @@ impl MockTransport {
     }
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 impl Transport for MockTransport {
     fn send(&self, envelope: &Envelope) -> Result<(), NetError> {
         guard(&self.peer_inbox).push(envelope.clone());
@@ -81,6 +86,7 @@ impl Transport for MockTransport {
 }
 
 /// A poisoned queue still holds valid envelopes (ciphertext), so keep going.
+#[cfg(any(test, feature = "test-hooks"))]
 fn guard(m: &Mutex<Vec<Envelope>>) -> MutexGuard<'_, Vec<Envelope>> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }

@@ -68,8 +68,9 @@ Two languages, strict separation:
 ```
 brev/
 ├── core/                 # Rust workspace — all logic, storage, crypto
-│   ├── brev-core/        # library crate, exposed to Swift via UniFFI
-│   ├── brev-proto/       # wire format + envelope (shared with relay)
+│   ├── brev-vault/       # store, DEK + lock state, column crypto, padding, zeroing allocator; no UniFFI, no network
+│   ├── brev-mail/        # mail on top of the vault (library `brev_core`), exposed to Swift via UniFFI
+│   ├── brev-proto/       # wire format + envelope (shared with relay); re-exports the vault's padding
 │   └── brev-relay/       # minimal relay server (axum), Phase 3
 ├── app/                  # Swift + AppKit macOS app (Xcode project via XcodeGen)
 │   ├── project.yml
@@ -81,14 +82,22 @@ brev/
     └── THREAT_MODEL.md   # copy of §1–§2, kept in sync
 ```
 
-### 3.1 Rust core (`brev-core`) — owns everything that touches content
+### 3.1 Rust core (`brev-vault` + `brev-mail`) — owns everything that touches content
+
+The core is two crates (docs/VAULT_SPLIT_PLAN.md). What lives where:
+
+* `brev-vault` knows nothing about mail: the SQLite file and its hardening (absolute path, 0600, connection pragmas, exact schema check, rollback journal), the DEK in one buffer with the `Locked`/`Unlocked` state and its single gate, column encryption (XChaCha20-Poly1305 with the row in the AD), the padding, `Plaintext` and the chunked `Text` that a lock closes, the stack scrubs, the OS RNG, and the zeroing global allocator (feature `zeroing-allocator`, on by default). What a store is (file name, `application_id`, schema, schema version) comes from the caller in a `VaultConfig`. An rlib with no UniFFI; `scripts/check-vault-deps.sh` fails on any dependency outside its whitelist.
+* `brev-mail` keeps `[lib] name = "brev_core"`, so the UniFFI symbols, `libbrev_core.a` and the generated `BrevCore.swift` keep their names. It holds the schema (`brev.db`, "BREV", v3) and its rows: identity, contacts, threads and letters. It also holds the message crypto (X25519, HKDF, the contact tag), the relay client and the whole UniFFI surface (`ffi.rs`: `Brev`, `OpenText`, records, `BrevError`). It turns the vault's allocator on. Its `test-hooks` feature (tests only, never in the app's archive) carries `MockTransport` and the vault's test counters.
+* `brev-proto` re-exports the vault's padding with the same API, so the relay uses one implementation (without the allocator).
+
+The rest of this section is the core as a whole:
 
 * Data model: `Contact`, `Message`, `Thread`, `Envelope`.
 * Encrypted store: SQLite via `rusqlite` (bundled). Every content column is a ciphertext BLOB, padded before encryption to the same buckets as envelopes (§5 Phase 3), so stored lengths show only the bucket. Metadata that must be queryable (contact id, timestamp, read flag) may be plaintext, but never subject lines or bodies.
 * Crypto (see §4): identity keys, message encryption/decryption, envelope signing/verification.
 * Session state: an `Unlocked` / `Locked` state machine. When locked, the data-encryption key and all plaintext are zeroized and every content call returns `Err(Locked)`.
-* Transport trait: `trait Transport { send(&Envelope) -> Result<(), NetError>; poll() -> Result<Vec<Envelope>, NetError>; ack(&[[u8; 32]]) -> Result<(), NetError> }`. `poll` deletes nothing; the receiver acknowledges each envelope after it is stored (or refused for good), and the relay deletes it then. `MockTransport` (in-process, Phase 1 tests) and `RelayTransport` (blocking HTTP to `http://127.0.0.1:<port>` only, never under the session mutex; Phase 3).
-* Exposed to Swift with UniFFI (`uniffi` crate, proc-macro style). The Swift side never sees raw keys; it passes opaque handles. `brev-core` uses a zeroing global allocator (`zeroizing-alloc`), so every freed Rust buffer, including UniFFI's, is wiped. `scripts/gen-bindings.sh` patches the generated Swift so byte buffers are wiped before they are freed; the build fails if a patch no longer applies.
+* Transport trait: `trait Transport { send(&Envelope) -> Result<(), NetError>; poll() -> Result<Vec<Envelope>, NetError>; ack(&[[u8; 32]]) -> Result<(), NetError> }`. `poll` deletes nothing; the receiver acknowledges each envelope after it is stored (or refused for good), and the relay deletes it then. `MockTransport` (in-process, Phase 1 tests; behind brev-mail's `test-hooks` feature) and `RelayTransport` (blocking HTTP to `http://127.0.0.1:<port>` only, never under the session mutex; Phase 3).
+* Exposed to Swift with UniFFI (`uniffi` crate, proc-macro style), from `brev-mail`. The Swift side never sees raw keys; it passes opaque handles. The app's archive has a zeroing global allocator (`zeroizing-alloc`, from `brev-vault`), so every freed Rust buffer, including UniFFI's, is wiped. `scripts/gen-bindings.sh` patches the generated Swift so byte buffers are wiped before they are freed; the build fails if a patch no longer applies.
 
 ### 3.2 Swift app (`app/`) — owns only what must be Mac-native
 

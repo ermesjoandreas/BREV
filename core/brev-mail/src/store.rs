@@ -1,4 +1,6 @@
-//! The encrypted store and the `Locked`/`Unlocked` state machine.
+//! The mail store: identity, contacts, threads and messages in a
+//! brev-vault [`Vault`], which holds the file, the DEK and the
+//! `Locked`/`Unlocked` state (the gate in `Core::dek` is the vault's).
 //!
 //! Every content column is a ciphertext BLOB sealed under the DEK, with the
 //! row's immutable fields in the AEAD associated data. Only ids, timestamps,
@@ -10,16 +12,17 @@
 //! that never changes; a sender is found by the keyed tag of its identity id,
 //! so the file holds neither a contact's identity id nor its address.
 
-use std::fs::{self, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Weak;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use brev_proto::body::{self, is_valid_address};
 use brev_proto::{identity_code, sig, IDENTITY_CODE_LEN, SIG_LEN};
-use rusqlite::config::DbConfig;
-use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension};
-use zeroize::{Zeroize, Zeroizing};
+use brev_vault::{check_path, DekSlot, Text, Vault, VaultConfig};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use zeroize::Zeroizing;
 
 use crate::crypto::{self, column_ad, Plaintext};
 use crate::{Envelope, Error};
@@ -60,6 +63,15 @@ CREATE TABLE messages (
 ) STRICT;
 CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
 ";
+
+/// The user's store: `brev.db` in the folder the app passes, with the
+/// schema above.
+pub(crate) const MAIL: VaultConfig = VaultConfig {
+    file_name: "brev.db",
+    application_id: APPLICATION_ID,
+    schema: SCHEMA,
+    schema_version: SCHEMA_VERSION,
+};
 
 /// Layout of the decrypted `identity.keys`: X25519 secret, X25519 public,
 /// signing key, relay token.
@@ -214,11 +226,8 @@ impl Letter {
 
 /// One user's encrypted store plus session state.
 pub struct Core {
-    db: Connection,
-    /// The DEK. Allocated once per `Core` and never moved or reallocated, so
-    /// `lock()` wipes the only copy the core holds.
-    dek: Box<Zeroizing<[u8; 32]>>,
-    unlocked: bool,
+    /// The file, the DEK and the lock state.
+    v: Vault,
 }
 
 /// The own identity, decrypted for one operation.
@@ -238,73 +247,50 @@ impl Core {
     /// removed. The file is created with mode 0600 (SQLite gives its journal
     /// the same mode). The new core is unlocked.
     pub fn create(path: &Path, dek: &mut [u8; 32], signing_key: &[u8]) -> Result<Core, Error> {
-        let mut slot = Box::new(Zeroizing::new([0u8; 32]));
-        slot.copy_from_slice(dek);
-        dek.zeroize();
+        let slot = DekSlot::take(dek);
         check_path(path)?;
-        if crypto::is_zero(&slot) {
+        if slot.is_zero() {
             return Err(Error::Malformed);
         }
         let signing_key = sig::check_key(signing_key).map_err(|_| Error::Malformed)?;
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)?;
-        let result = Core::init(path, slot, signing_key);
-        if result.is_err() {
-            let _ = fs::remove_file(path);
-        }
-        result
+        Core::init(path, slot, signing_key)
     }
 
     /// Opens an existing store, locked. Refuses a file that is not a Brev
     /// store of this schema version, before writing anything to it.
     pub fn open(path: &Path) -> Result<Core, Error> {
-        check_path(path)?;
-        let core = Core::connect(path, Box::new(Zeroizing::new([0u8; 32])))?;
-        verify_store(&core.db).map_err(not_a_store)?;
-        set_journal_mode(&core.db)?;
-        Ok(core)
+        Ok(Core {
+            v: Vault::open(path, &MAIL)?,
+        })
     }
 
     /// Unlocks with `dek`, which is zeroed before this returns. An all-zero
     /// DEK, or one that cannot open the identity row, gives `WrongKey`; any
     /// failure leaves the core locked.
     pub fn unlock(&mut self, dek: &mut [u8; 32]) -> Result<(), Error> {
-        self.dek.copy_from_slice(dek);
-        dek.zeroize();
-        if crypto::is_zero(&self.dek) {
-            self.lock();
-            return Err(Error::WrongKey);
-        }
-        self.unlocked = true;
         // Opening the identity row is the key check. The X25519 secret is
         // not needed, so it is never built and never copied onto the stack.
-        match self.identity_keys() {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                self.lock();
-                Err(if matches!(e, Error::Crypto) {
+        self.v.unlock(dek, |db, k| {
+            open_identity(db, k).map(drop).map_err(|e| {
+                if matches!(e, Error::Crypto) {
                     Error::WrongKey
                 } else {
                     e
-                })
-            }
-        }
+                }
+            })
+        })
     }
 
-    /// Zeroes the DEK and locks. Idempotent. The core holds no other key or
-    /// plaintext between calls, so this is all there is to wipe.
+    /// Closes the texts handed out, zeroes the DEK and locks. Idempotent.
+    /// The core holds no other key or plaintext between calls, so this is
+    /// all there is to wipe.
     pub fn lock(&mut self) {
-        self.dek.zeroize();
-        self.unlocked = false;
-        crypto::scrub_stack();
+        self.v.lock();
     }
 
     /// True while locked.
     pub fn is_locked(&self) -> bool {
-        !self.unlocked
+        self.v.is_locked()
     }
 
     /// This identity's public bundle, as registered at the relay.
@@ -321,11 +307,15 @@ impl Core {
     pub fn address(&self) -> Result<Plaintext, Error> {
         let dek = self.dek()?;
         let (id, sealed): ([u8; 32], Vec<u8>) =
-            self.db
+            self.db()
                 .query_row("SELECT id, address FROM identity", [], |r| {
                     Ok((r.get(0)?, r.get(1)?))
                 })?;
-        crypto::open_column(dek, &column_ad("identity.address", &[&id]), &sealed)
+        Ok(crypto::open_column(
+            dek,
+            &column_ad("identity.address", &[&id]),
+            &sealed,
+        )?)
     }
 
     /// True once an address is registered.
@@ -346,7 +336,7 @@ impl Core {
         }
         let id = self.my_id()?;
         let sealed = crypto::seal_column(dek, &column_ad("identity.address", &[&id]), address)?;
-        self.db
+        self.db()
             .execute("UPDATE identity SET address = ?1", [sealed])?;
         Ok(())
     }
@@ -399,7 +389,7 @@ impl Core {
         if &self.address()?[..] == address {
             return Err(Error::Malformed);
         }
-        let mut stmt = self.db.prepare("SELECT id, address FROM contacts")?;
+        let mut stmt = self.db().prepare("SELECT id, address FROM contacts")?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, [u8; 16]>(0)?, r.get::<_, Vec<u8>>(1)?))
         })?;
@@ -442,7 +432,7 @@ impl Core {
             crypto::seal_column(dek, &column_ad("contacts.address", &[&id]), address)?;
         let pending = crypto::seal_column(dek, &column_ad("contacts.pending", &[&id]), &[])?;
         // Any uniqueness conflict: the same identity (tag) is already there.
-        let n = self.db.execute(
+        let n = self.db().execute(
             "INSERT INTO contacts (id, tag, bundle, address, pending) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT DO NOTHING",
             params![&id[..], &tag[..], sealed_bundle, sealed_address, pending],
@@ -457,7 +447,7 @@ impl Core {
     pub fn contacts(&self) -> Result<Vec<Contact>, Error> {
         let dek = self.dek()?;
         let mut stmt = self
-            .db
+            .db()
             .prepare("SELECT id, address FROM contacts ORDER BY rowid")?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, [u8; 16]>(0)?, r.get::<_, Vec<u8>>(1)?))
@@ -480,12 +470,16 @@ impl Core {
     /// One contact's address.
     pub fn contact_address(&self, contact: ContactId) -> Result<Plaintext, Error> {
         let dek = self.dek()?;
-        let sealed: Vec<u8> = self.db.query_row(
+        let sealed: Vec<u8> = self.db().query_row(
             "SELECT address FROM contacts WHERE id = ?1",
             [&contact.0[..]],
             |r| r.get(0),
         )?;
-        crypto::open_column(dek, &column_ad("contacts.address", &[&contact.0]), &sealed)
+        Ok(crypto::open_column(
+            dek,
+            &column_ad("contacts.address", &[&contact.0]),
+            &sealed,
+        )?)
     }
 
     /// The pinned bundle of `contact`. It must open under the row's AD
@@ -494,7 +488,7 @@ impl Core {
     /// caught.
     pub fn contact_bundle(&self, contact: ContactId) -> Result<PublicBundle, Error> {
         let dek = self.dek()?;
-        let (tag, sealed): ([u8; 32], Vec<u8>) = self.db.query_row(
+        let (tag, sealed): ([u8; 32], Vec<u8>) = self.db().query_row(
             "SELECT tag, bundle FROM contacts WHERE id = ?1",
             [&contact.0[..]],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -511,7 +505,7 @@ impl Core {
     /// changed and the change is not accepted yet.
     pub fn pending_bundle(&self, contact: ContactId) -> Result<Option<PublicBundle>, Error> {
         let dek = self.dek()?;
-        let sealed: Vec<u8> = self.db.query_row(
+        let sealed: Vec<u8> = self.db().query_row(
             "SELECT pending FROM contacts WHERE id = ?1",
             [&contact.0[..]],
             |r| r.get(0),
@@ -561,7 +555,7 @@ impl Core {
         }
         let tag = crypto::contact_tag(dek, &pending.id().0);
         let taken: Option<i64> = self
-            .db
+            .db()
             .query_row(
                 "SELECT 1 FROM contacts WHERE tag = ?1 AND id != ?2",
                 params![&tag[..], &contact.0[..]],
@@ -577,7 +571,7 @@ impl Core {
             &pending.to_bytes(),
         )?;
         let empty = crypto::seal_column(dek, &column_ad("contacts.pending", &[&contact.0]), &[])?;
-        self.db.execute(
+        self.db().execute(
             "UPDATE contacts SET tag = ?1, bundle = ?2, pending = ?3 WHERE id = ?4",
             params![&tag[..], sealed_bundle, empty, &contact.0[..]],
         )?;
@@ -647,7 +641,7 @@ impl Core {
         if !letter.is_signed() {
             return Err(Error::Malformed);
         }
-        let tx = self.db.transaction()?;
+        let tx = self.db_mut().transaction()?;
         tx.execute(
             "INSERT INTO threads (id, contact_id, created_at, subject) VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -673,7 +667,7 @@ impl Core {
     /// All threads, oldest first.
     pub fn threads(&self) -> Result<Vec<Thread>, Error> {
         let dek = self.dek()?;
-        let mut stmt = self.db.prepare(
+        let mut stmt = self.db().prepare(
             "SELECT id, contact_id, created_at, subject FROM threads ORDER BY created_at, rowid",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -702,7 +696,7 @@ impl Core {
     /// Metadata of the messages in `thread`, oldest first. Decrypts nothing.
     pub fn messages(&self, thread: ThreadId) -> Result<Vec<Message>, Error> {
         self.dek()?;
-        let mut stmt = self.db.prepare(
+        let mut stmt = self.db().prepare(
             "SELECT id, created_at, outgoing, read FROM messages WHERE thread_id = ?1 ORDER BY created_at, rowid",
         )?;
         let rows = stmt.query_map([&thread.0[..]], |r| {
@@ -726,21 +720,21 @@ impl Core {
             bool,
             i64,
             Vec<u8>,
-        ) = self.db.query_row(
+        ) = self.db().query_row(
             "SELECT m.thread_id, t.contact_id, m.outgoing, m.created_at, m.body
                  FROM messages m JOIN threads t ON t.id = m.thread_id WHERE m.id = ?1",
             [&message.0[..]],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
         let ad = body_ad(&message.0, &thread, &contact, outgoing, created_at);
-        crypto::open_column(dek, &ad, &body)
+        Ok(crypto::open_column(dek, &ad, &body)?)
     }
 
     /// The thread a message belongs to. Metadata only: decrypts nothing, but
     /// goes through the gate like every other call.
     pub fn thread_of(&self, message: MessageId) -> Result<ThreadId, Error> {
         self.dek()?;
-        Ok(ThreadId(self.db.query_row(
+        Ok(ThreadId(self.db().query_row(
             "SELECT thread_id FROM messages WHERE id = ?1",
             [&message.0[..]],
             |r| r.get(0),
@@ -750,7 +744,7 @@ impl Core {
     /// Marks a message read.
     pub fn mark_read(&mut self, message: MessageId) -> Result<(), Error> {
         self.dek()?;
-        let n = self.db.execute(
+        let n = self.db().execute(
             "UPDATE messages SET read = 1 WHERE id = ?1",
             [&message.0[..]],
         )?;
@@ -787,7 +781,7 @@ impl Core {
             }
             let tag = crypto::contact_tag(dek, &env.sender);
             let contact: [u8; 16] =
-                self.db
+                self.db()
                     .query_row("SELECT id FROM contacts WHERE tag = ?1", [&tag[..]], |r| {
                         r.get(0)
                     })?;
@@ -809,7 +803,7 @@ impl Core {
             let (id, thread, subject, body) = decode_payload(&payload)?;
 
             let existing: Option<([u8; 16], i64, Vec<u8>)> = self
-                .db
+                .db()
                 .query_row(
                     "SELECT contact_id, created_at, subject FROM threads WHERE id = ?1",
                     [&thread[..]],
@@ -820,7 +814,7 @@ impl Core {
                 Some((owner, created_at, sealed)) => {
                     // Authenticates `owner` before trusting it.
                     crypto::open_column(dek, &subject_ad(&thread, &owner, created_at), &sealed)
-                        .map_err(local)?;
+                        .map_err(|e| local(e.into()))?;
                     if owner != contact {
                         return Err(Error::Malformed);
                     }
@@ -842,7 +836,7 @@ impl Core {
             )
         };
 
-        let tx = self.db.transaction()?;
+        let tx = self.db_mut().transaction()?;
         if let Some(subject) = new_subject {
             tx.execute(
                 "INSERT INTO threads (id, contact_id, created_at, subject) VALUES (?1, ?2, ?3, ?4)",
@@ -861,17 +855,13 @@ impl Core {
         Ok(MessageId(id))
     }
 
-    /// Second half of `create`, after the file exists.
-    fn init(
-        path: &Path,
-        slot: Box<Zeroizing<[u8; 32]>>,
-        signing_key: &[u8; sig::KEY_LEN],
-    ) -> Result<Core, Error> {
-        let mut core = Core::connect(path, slot)?;
-        set_journal_mode(&core.db)?;
-        // The X25519 secret and the token live only inside this block, so
-        // they are gone before the commit.
-        let (id, keys, address) = {
+    /// Second half of `create`: the vault makes the file (mode 0600) and
+    /// the schema, and the identity row goes in with them. The file is
+    /// removed on any failure.
+    fn init(path: &Path, slot: DekSlot, signing_key: &[u8; sig::KEY_LEN]) -> Result<Core, Error> {
+        // The X25519 secret and the token live only inside `seal`, so they
+        // are gone before the commit.
+        let seal = |dek: &[u8; 32]| -> Result<_, Error> {
             let mut secret = Zeroizing::new([0u8; 32]);
             crypto::fill(secret.as_mut_slice())?;
             let mut token = Zeroizing::new([0u8; 32]);
@@ -879,64 +869,47 @@ impl Core {
             let x25519 = crypto::public_key(&*crypto::static_secret(secret.as_slice())?);
             let id = brev_proto::identity_id(signing_key, &x25519);
             let keys = identity_row(&secret, &x25519, signing_key, &token);
-            let sealed =
-                crypto::seal_column(&core.dek, &column_ad("identity.keys", &[&id]), &keys)?;
-            let address =
-                crypto::seal_column(&core.dek, &column_ad("identity.address", &[&id]), &[])?;
-            (id, sealed, address)
+            let sealed = crypto::seal_column(dek, &column_ad("identity.keys", &[&id]), &keys)?;
+            let address = crypto::seal_column(dek, &column_ad("identity.address", &[&id]), &[])?;
+            Ok((id, sealed, address))
         };
-        let tx = core.db.transaction()?;
-        tx.pragma_update(None, "application_id", APPLICATION_ID)?;
-        tx.execute_batch(SCHEMA)?;
-        tx.execute(
-            "INSERT INTO identity (id, keys, address) VALUES (?1, ?2, ?3)",
-            params![&id[..], keys, address],
-        )?;
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        tx.commit()?;
-        core.unlocked = true;
-        Ok(core)
-    }
-
-    /// Opens the file without CREATE, then applies the per-connection
-    /// settings. Writes nothing to the file. The bundled SQLite parses any
-    /// name starting with `file:` as a URI whatever the flags say, so only
-    /// absolute paths get here (`check_path`).
-    fn connect(path: &Path, slot: Box<Zeroizing<[u8; 32]>>) -> Result<Core, Error> {
-        let db = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        db.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
-        db.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
-        db.pragma_update(None, "secure_delete", "ON")?;
-        db.pragma_update(None, "temp_store", "MEMORY")?;
-        db.pragma_update(None, "foreign_keys", "ON")?;
-        db.pragma_update(None, "cell_size_check", "ON")?;
-        // On macOS plain fsync() does not flush the drive's cache, so a power
-        // cut mid-commit could corrupt the only copy of the history.
-        db.pragma_update(None, "fullfsync", "ON")?;
+        let insert = |tx: &Transaction<'_>, (id, keys, address): ([u8; 32], Vec<u8>, Vec<u8>)| {
+            tx.execute(
+                "INSERT INTO identity (id, keys, address) VALUES (?1, ?2, ?3)",
+                params![&id[..], keys, address],
+            )?;
+            Ok::<_, Error>(())
+        };
         Ok(Core {
-            db,
-            dek: slot,
-            unlocked: false,
+            v: Vault::create(path, slot, &MAIL, seal, insert)?,
         })
     }
 
     /// The single gate: every content call goes through here.
     fn dek(&self) -> Result<&[u8; 32], Error> {
-        if self.unlocked {
-            Ok(&self.dek)
-        } else {
-            Err(Error::Locked)
-        }
+        Ok(self.v.dek()?)
+    }
+
+    /// The connection: ids, metadata and ciphertext only.
+    fn db(&self) -> &Connection {
+        self.v.db()
+    }
+
+    /// The connection, for a transaction.
+    fn db_mut(&mut self) -> &mut Connection {
+        self.v.db_mut()
+    }
+
+    /// Wraps `p` in a text that [`Core::lock`] closes.
+    pub(crate) fn open_text(&mut self, p: Plaintext) -> Arc<Text> {
+        self.v.open_text(p)
     }
 
     /// Own identity id (plaintext column), behind the gate.
     fn my_id(&self) -> Result<[u8; 32], Error> {
         self.dek()?;
         Ok(self
-            .db
+            .db()
             .query_row("SELECT id FROM identity", [], |r| r.get(0))?)
     }
 
@@ -944,13 +917,7 @@ impl Core {
     /// public || signing key || relay token).
     fn identity_keys(&self) -> Result<([u8; 32], Plaintext), Error> {
         let dek = self.dek()?;
-        let (id, sealed): ([u8; 32], Vec<u8>) =
-            self.db
-                .query_row("SELECT id, keys FROM identity", [], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })?;
-        let keys = crypto::open_column(dek, &column_ad("identity.keys", &[&id]), &sealed)?;
-        Ok((id, keys))
+        open_identity(self.db(), dek)
     }
 
     /// Decrypts the own identity for one operation; the secret is wiped on drop.
@@ -974,7 +941,7 @@ impl Core {
         let dek = self.dek()?;
         let sealed =
             crypto::seal_column(dek, &column_ad("contacts.pending", &[&contact.0]), bundle)?;
-        self.db.execute(
+        self.db().execute(
             "UPDATE contacts SET pending = ?1 WHERE id = ?2",
             params![sealed, &contact.0[..]],
         )?;
@@ -983,13 +950,30 @@ impl Core {
 
     #[cfg(test)]
     fn dek_for_test(&self) -> [u8; 32] {
-        **self.dek
+        self.v.dek_for_test()
     }
 
     #[cfg(test)]
     fn dek_addr_for_test(&self) -> usize {
-        self.dek.as_ptr().addr()
+        self.v.dek_addr_for_test()
     }
+
+    /// Test only: the texts handed out and not yet closed by a lock.
+    #[cfg(test)]
+    pub(crate) fn open_texts_for_test(&self) -> &[Weak<Text>] {
+        self.v.open_texts_for_test()
+    }
+}
+
+/// The ungated half of `Core::identity_keys`: the own id and the identity
+/// row opened with `dek`. Also the key check of `unlock`.
+fn open_identity(db: &Connection, dek: &[u8; 32]) -> Result<([u8; 32], Plaintext), Error> {
+    let (id, sealed): ([u8; 32], Vec<u8>) =
+        db.query_row("SELECT id, keys FROM identity", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+    let keys = crypto::open_column(dek, &column_ad("identity.keys", &[&id]), &sealed)?;
+    Ok((id, keys))
 }
 
 /// True for the [`Core::receive`] errors that are the letter's fault: it is
@@ -1010,17 +994,6 @@ fn local(e: Error) -> Error {
     match e {
         Error::Crypto | Error::Malformed | Error::NotFound => Error::Corrupt,
         e => e,
-    }
-}
-
-/// SQLite reads a name that starts with `file:` as a URI (the bundled build
-/// sets SQLITE_USE_URI), and `:memory:` or `""` as no file at all. An
-/// absolute path starts with `/`, so it is always taken literally.
-fn check_path(path: &Path) -> Result<(), Error> {
-    if path.is_absolute() {
-        Ok(())
-    } else {
-        Err(Error::Malformed)
     }
 }
 
@@ -1048,56 +1021,6 @@ fn body_ad(
             &created_at.to_be_bytes(),
         ],
     )
-}
-
-/// `application_id`, `user_version` and the exact schema must match what
-/// `create` writes, so a planted trigger, view or index is refused.
-fn verify_store(db: &Connection) -> Result<(), Error> {
-    let app: i32 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let expected = Connection::open_in_memory()?;
-    expected.execute_batch(SCHEMA)?;
-    if app != APPLICATION_ID || version != SCHEMA_VERSION || schema_of(db)? != schema_of(&expected)?
-    {
-        return Err(Error::Corrupt);
-    }
-    Ok(())
-}
-
-/// A file SQLite cannot parse (random bytes, an encrypted or damaged
-/// database, a header naming an unsupported schema format) is not a Brev
-/// store either: `Corrupt`, not `Storage`.
-fn not_a_store(e: Error) -> Error {
-    match &e {
-        Error::Storage(s)
-            if matches!(
-                s.sqlite_error_code(),
-                // `Unknown` is plain SQLITE_ERROR: "unsupported file format".
-                Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt | ErrorCode::Unknown)
-            ) =>
-        {
-            Error::Corrupt
-        }
-        _ => e,
-    }
-}
-
-type SchemaRow = (String, String, String, Option<String>);
-
-fn schema_of(db: &Connection) -> Result<Vec<SchemaRow>, Error> {
-    let mut stmt =
-        db.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")?;
-    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-    Ok(rows.collect::<Result<_, _>>()?)
-}
-
-/// Rollback journal, deleted after every transaction: no -wal or -shm files.
-fn set_journal_mode(db: &Connection) -> Result<(), Error> {
-    let mode: String = db.pragma_update_and_check(None, "journal_mode", "DELETE", |r| r.get(0))?;
-    if mode != "delete" {
-        return Err(Error::Corrupt);
-    }
-    Ok(())
 }
 
 /// The identity row: `X25519 secret (32) || X25519 public (32) || signing

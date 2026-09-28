@@ -1,9 +1,11 @@
 //! Unit tests of the store: the ones that need the private accessors, the
 //! SQL trace or the test-build counters.
 
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use rusqlite::config::DbConfig;
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
 
 use super::*;
@@ -99,7 +101,7 @@ fn lock_zeroes_the_dek_buffer() {
     assert_eq!(core.dek_for_test(), original, "positive control");
     let addr = core.dek_addr_for_test();
     // A core dropped without lock() wipes the DEK too (compile time).
-    crypto::wiped_on_drop(&*core.dek);
+    crypto::wiped_on_drop(core.v.dek_cell_for_test());
 
     core.lock();
     assert_eq!(core.dek_for_test(), [0u8; 32]);
@@ -137,7 +139,7 @@ fn lock_zeroes_the_dek_buffer() {
     // the identity row gone.
     right = original;
     core.unlock(&mut right).unwrap();
-    core.db.execute("DELETE FROM identity", []).unwrap();
+    core.db().execute("DELETE FROM identity", []).unwrap();
     right = original;
     assert!(matches!(core.unlock(&mut right), Err(Error::NotFound)));
     assert!(core.is_locked());
@@ -153,13 +155,8 @@ fn lock_zeroes_the_dek_buffer() {
 #[test]
 fn unlock_refuses_all_zero_dek() {
     let path = temp_path();
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .unwrap();
     let key = TestKey::new();
-    drop(Core::init(&path, Box::new(Zeroizing::new([0u8; 32])), &key.public).unwrap());
+    drop(Core::init(&path, DekSlot::take(&mut [0u8; 32]), &key.public).unwrap());
     let mut core = Core::open(&path).unwrap();
     let mut zero = [0u8; 32];
     assert!(matches!(core.unlock(&mut zero), Err(Error::WrongKey)));
@@ -173,7 +170,7 @@ fn schema_v3_pragmas() {
     let p = party();
     let core = Core::open(&p.path).unwrap();
     let q = |name: &str| -> String {
-        core.db
+        core.db()
             .pragma_query_value(None, name, |r| r.get::<_, rusqlite::types::Value>(0))
             .map(|v| format!("{v:?}"))
             .unwrap()
@@ -188,13 +185,13 @@ fn schema_v3_pragmas() {
     assert_eq!(q("application_id"), format!("Integer({APPLICATION_ID})"));
     assert_eq!(q("user_version"), "Integer(3)");
     assert!(core
-        .db
+        .db()
         .db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
         .unwrap());
     // The tables of design §6.1, column by column.
     let columns = |table: &str| -> Vec<String> {
         let mut stmt = core
-            .db
+            .db()
             .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
             .unwrap();
         let rows = stmt.query_map([], |r| r.get(0)).unwrap();
@@ -292,7 +289,7 @@ fn sqlite_never_receives_plaintext() {
     let (mut a, mut b) = (party(), party());
     for c in [&a, &b] {
         c.core
-            .db
+            .db()
             .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(record));
     }
     a.core.set_address(MINE).unwrap();
@@ -320,7 +317,7 @@ fn sqlite_never_receives_plaintext() {
     }
     // Positive control: a bound marker is visible in the trace.
     a.core
-        .db
+        .db()
         .query_row("SELECT ?1", [MARKER], |_| Ok(()))
         .unwrap();
     let log = std::mem::take(&mut *SQL_LOG.lock().unwrap());
@@ -358,7 +355,7 @@ fn receive_rejects_thread_owned_by_another_contact() {
     // the damaged row is a local failure.
     let c_at_b = b.core.contacts().unwrap()[1].id;
     b.core
-        .db
+        .db()
         .execute(
             "UPDATE threads SET contact_id = ?1 WHERE id = ?2",
             params![&c_at_b.0[..], &t.0[..]],
@@ -433,7 +430,7 @@ fn nothing_decrypted_is_alive_while_receive_commits() {
     let (b_at_a, _) = befriend(&mut a, &mut b);
     let first = send(&mut a, b_at_a, b"s", b"x");
     b.core
-        .db
+        .db()
         .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(at_commit));
     // The first letter makes a new thread, the second joins it.
     let m = b.core.receive(&first).unwrap();
@@ -623,7 +620,7 @@ fn local_row_failures_are_corrupt() {
     // A known thread whose subject no longer opens.
     let subject: Vec<u8> = b
         .core
-        .db
+        .db()
         .query_row(
             "SELECT subject FROM threads WHERE id = ?1",
             [&t.0[..]],
@@ -633,7 +630,7 @@ fn local_row_failures_are_corrupt() {
     let mut bad = subject.clone();
     bad[30] ^= 1;
     b.core
-        .db
+        .db()
         .execute(
             "UPDATE threads SET subject = ?1 WHERE id = ?2",
             params![bad, &t.0[..]],
@@ -815,7 +812,7 @@ fn column_ad_uses_local_contact_id() {
     let dek = *a.core.dek().unwrap();
     let (created_at, subject): (i64, Vec<u8>) = a
         .core
-        .db
+        .db()
         .query_row(
             "SELECT created_at, subject FROM threads WHERE id = ?1",
             [&t.0[..]],
@@ -835,7 +832,7 @@ fn column_ad_uses_local_contact_id() {
     for column in ["bundle", "address", "pending"] {
         let sealed: Vec<u8> = a
             .core
-            .db
+            .db()
             .query_row(
                 &format!("SELECT {column} FROM contacts WHERE id = ?1"),
                 [&b_at_a.0[..]],
@@ -849,7 +846,7 @@ fn column_ad_uses_local_contact_id() {
     // After a key change is accepted, the history opens unchanged.
     let before: Vec<u8> = a
         .core
-        .db
+        .db()
         .query_row("SELECT subject FROM threads", [], |r| r.get(0))
         .unwrap();
     let b2 = party();
@@ -858,7 +855,7 @@ fn column_ad_uses_local_contact_id() {
     a.core.accept_new_key(b_at_a, &new.code()).unwrap();
     let after: Vec<u8> = a
         .core
-        .db
+        .db()
         .query_row("SELECT subject FROM threads", [], |r| r.get(0))
         .unwrap();
     assert_eq!(before, after, "no re-encryption");

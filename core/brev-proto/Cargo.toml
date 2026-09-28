@@ -10,6 +10,9 @@ publish.workspace = true
 [dependencies]
 p256 = { workspace = true }
 sha2 = { workspace = true }
+# The padding lives in the vault and is re-exported here. No allocator: the
+# relay gets none through this line (docs/VAULT_SPLIT_PLAN.md §4).
+brev-vault = { path = "../brev-vault", default-features = false }
 
 [lints]
 workspace = true

@@ -5,6 +5,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Weak;
 
 use brev_relay::{parse_listen, Decision, Endpoint, Policy, Relay, Server};
 
@@ -391,7 +392,7 @@ fn lock_closes_every_open_text() {
         assert!(matches!(t.chunk(0), Err(BrevError::Locked)));
         t.close(); // idempotent
     }
-    assert!(guard(&a.b.s).open.is_empty());
+    assert!(guard(&a.b.s).me.open_texts_for_test().is_empty());
 }
 
 /// `sign_request` needs the ticket of a `prepare_send` for that contact,

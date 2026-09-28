@@ -2,8 +2,9 @@
 # Runs every check that can run on this machine, in order. On macOS first the
 # patched bindings (gen-bindings.sh) and the Xcode project (xcodegen), so
 # every later step sees the current core. Then Rust formatting, clippy,
-# tests, the zeroize, allocator and crate-feature checks, the check that no
-# production code makes a P-256 signing key, the FFI surface and
+# tests, the zeroize, allocator and crate-feature checks, brev-vault's
+# dependency whitelist, the check that no production code makes a P-256
+# signing key, the FFI surface and
 # patch-marker checks (macOS), the forbidden-API grep, the check that
 # AVFoundation, CoreMedia and CoreVideo stay in the protected layer, the
 # check that the Xcode minimum is stated alike, the dependency audit, a relay
@@ -76,23 +77,37 @@ cargo fmt --manifest-path "$MANIFEST" --all --check
 
 echo "==> cargo clippy (warnings are errors)"
 cargo clippy --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace --all-targets -- -D warnings
+# Also with every feature on (brev-vault's and brev-mail's `test-hooks`,
+# docs/VAULT_SPLIT_PLAN.md §4).
+echo "==> cargo clippy --all-features (warnings are errors)"
+cargo clippy --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace --all-targets --all-features -- -D warnings
 
 echo "==> cargo test"
 cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --workspace
 
 # scrub_stack() and scrub_stack_deep() must survive the optimiser, so their
-# tests also run optimised (the filter matches both test names).
+# tests also run optimised (the filter matches both test names, which live in
+# brev-vault; both must run, docs/VAULT_SPLIT_PLAN.md §4).
 echo "==> cargo test --release (scrub_stack, scrub_stack_deep)"
-cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-core --lib scrub_stack
+SCRUB_OUT="$(cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-vault --lib scrub_stack 2>&1)" || {
+  echo "$SCRUB_OUT"
+  exit 1
+}
+echo "$SCRUB_OUT" | grep -E '^test |^test result'
+if ! grep -q '^test result: ok\. 2 passed' <<<"$SCRUB_OUT"; then
+  echo "error: the release scrub test did not run both scrub_stack tests (expected '2 passed')" >&2
+  exit 1
+fi
 
 # Wipe-on-drop of every key the crypto crates hold depends on their `zeroize`
 # features (CLAUDE.md §1.10). Memory cannot be inspected without `unsafe`, so
-# check that each feature is actually enabled in brev-core's build. Every
+# check that each feature is actually enabled in brev-mail's build (the app's
+# archive; the ciphers reach it through brev-vault). Every
 # line for the crate must have it: a second version without the feature
 # (poly1305's direct dependency only works while both resolve to one version)
 # must fail the check, not hide behind the copy that has it.
 echo "==> zeroize features and zeroing allocator"
-FEATURES="$(cargo tree --manifest-path "$MANIFEST" -p brev-core -e normal -f '{p} [{f}]')"
+FEATURES="$(cargo tree --manifest-path "$MANIFEST" -p brev-mail -e normal -f '{p} [{f}]')"
 for crate in chacha20poly1305 chacha20 poly1305 x25519-dalek curve25519-dalek sha2 block-buffer; do
   LINES="$(grep -E "(^|[^a-z0-9_-])$crate v" <<<"$FEATURES" || true)"
   if [[ -z "$LINES" ]] || grep -Evq "(^|[^a-z0-9_-])$crate v[^ ]+ \[[^]]*zeroize" <<<"$LINES"; then
@@ -100,26 +115,36 @@ for crate in chacha20poly1305 chacha20 poly1305 x25519-dalek curve25519-dalek sh
     exit 1
   fi
 done
-# brev-core's global allocator zeroes every freed heap block, including the
-# buffers Swift frees through UniFFI (CLAUDE.md §3.1).
+# The global allocator (brev-vault, feature zeroing-allocator, which brev-mail
+# turns on) zeroes every freed heap block, including the buffers Swift frees
+# through UniFFI (CLAUDE.md §3.1).
 if ! grep -Eq "(^|[^a-z0-9_-])zeroizing-alloc v" <<<"$FEATURES"; then
-  echo "error: brev-core does not depend on zeroizing-alloc" >&2
+  echo "error: brev-mail does not depend on zeroizing-alloc" >&2
   exit 1
 fi
 # The dependency alone proves nothing: without `#[global_allocator]` every
 # check above still passes, and no safe test can read freed memory. The
-# crate's `WIPER` is linked only when `ZeroAlloc` frees, so require it in the
-# release test binary built above (no rebuild here). nm's output is captured
-# first: `grep -q` in a pipe could stop nm with SIGPIPE under pipefail.
-TESTBIN="$(cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-core --lib --no-run --message-format=json \
+# crate's `WIPER` is linked only when `ZeroAlloc` frees, so require it in
+# brev-mail's release test binary. nm's output is captured first: `grep -q` in
+# a pipe could stop nm with SIGPIPE under pipefail. This build also rebuilds
+# brev-mail's library with `test-hooks` (its dev-dependency on itself) in
+# core/target/release/deps; the archive the app links is not replaced, and
+# cargo rebuilds that library without the feature on the next gen-bindings.sh.
+TESTBIN="$(cargo test --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-mail --lib --no-run --message-format=json \
   | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p')"
 if [[ ! -f "$TESTBIN" ]]; then
-  echo "error: no release test binary of brev-core found" >&2
+  echo "error: no release test binary of brev-mail found" >&2
   exit 1
 fi
 SYMBOLS="$(nm "$TESTBIN")"
 if ! grep -q "zeroizing_alloc5WIPER" <<<"$SYMBOLS"; then
-  echo "error: brev-core's global allocator is not zeroizing_alloc::ZeroAlloc" >&2
+  echo "error: brev-mail's global allocator is not zeroizing_alloc::ZeroAlloc" >&2
+  exit 1
+fi
+# The control of gen-bindings.sh's check that the app's archive has no test
+# hooks: the same pattern (TEST_HOOKS there) finds them in this test build.
+if ! grep -Eq 'MockTransport|live_plaintexts|_for_test' <<<"$SYMBOLS"; then
+  echo "error: the test-hooks pattern finds nothing in brev-mail's test binary; fix the check in scripts/gen-bindings.sh" >&2
   exit 1
 fi
 
@@ -129,16 +154,21 @@ fi
 # SigningKey helpers beyond ecdsa's, no PEM, no serde), and reqwest with only
 # `blocking` (no TLS, no system proxy, no JSON, no cookies). Every line of the
 # crate must match, and each must be found.
-echo "==> p256 and reqwest features in brev-core"
+echo "==> p256 and reqwest features in brev-mail"
 for pin in 'p256 v[^ ]+ \[arithmetic,digest,ecdsa,ecdsa-core,sha2,sha256\]' 'reqwest v[^ ]+ \[blocking\]'; do
   crate="${pin%% *}"
   LINES="$(grep -E "(^|[^a-z0-9_-])$crate v" <<<"$FEATURES" || true)"
   if [[ -z "$LINES" ]] || grep -Evq "(^|[^a-z0-9_-])$pin( |\$)" <<<"$LINES"; then
-    echo "error: $crate in brev-core's graph has other features than docs/PHASE3_DESIGN.md allows:" >&2
+    echo "error: $crate in brev-mail's graph has other features than docs/PHASE3_DESIGN.md allows:" >&2
     echo "${LINES:-(not found)}" >&2
     exit 1
   fi
 done
+
+# brev-vault takes only the dependencies docs/VAULT_SPLIT_PLAN.md §4 lists:
+# no network, no UniFFI, no mail crypto. The script checks its own control.
+echo "==> brev-vault dependency whitelist"
+"$REPO_ROOT/scripts/check-vault-deps.sh"
 
 # Swift signs, Rust only verifies (docs/PHASE3_DESIGN.md §3.3): no production
 # source makes a P-256 signing key. Test signers live in each crate's
@@ -149,8 +179,8 @@ if (cd "$REPO_ROOT" && grep -rn 'SigningKey' core/*/src | grep -v '/src/test_key
   echo "error: the lines above name SigningKey outside src/test_keys.rs (docs/PHASE3_DESIGN.md §3.3)" >&2
   exit 1
 fi
-if ! (cd "$REPO_ROOT" && grep -q 'SigningKey' core/brev-core/src/test_keys.rs); then
-  echo "error: the SigningKey grep finds nothing in core/brev-core/src/test_keys.rs; fix the check" >&2
+if ! (cd "$REPO_ROOT" && grep -q 'SigningKey' core/brev-mail/src/test_keys.rs); then
+  echo "error: the SigningKey grep finds nothing in core/brev-mail/src/test_keys.rs; fix the check" >&2
   exit 1
 fi
 
@@ -223,7 +253,7 @@ fi
 # ways to make a String from bytes or units, the mutable string classes, the
 # copying CFString constructor (the NoCopy one does not match) and the other
 # logging calls. URLSession and NSURLConnection (docs/PHASE3_DESIGN.md §5.5):
-# the relay is reached only through brev-core's client, so Swift never opens
+# the relay is reached only through brev-mail's client, so Swift never opens
 # a second network path, which App Transport Security would govern.
 echo "==> forbidden APIs in app/Sources"
 FORBIDDEN=(NSPasteboard NSTextView NSTextField NSTextInputClient .characters 'String(decoding' 'NSString('

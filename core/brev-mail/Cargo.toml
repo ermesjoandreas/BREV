@@ -1,16 +1,19 @@
 [package]
-name = "brev-core"
-description = "Brev core: storage, crypto and session state, exposed to Swift via UniFFI"
+name = "brev-mail"
+description = "Brev mail: identity, contacts, letters and the relay client on top of brev-vault, exposed to Swift via UniFFI"
 version.workspace = true
 edition.workspace = true
 # Not the workspace's 1.85: reqwest -> url -> idna -> idna_adapter 1.2.2 ->
-# ICU4X 2.3 declares 1.88 (docs/PHASE3_DESIGN.md §0). brev-proto and
-# brev-relay stay at 1.85.
+# ICU4X 2.3 declares 1.88 (docs/PHASE3_DESIGN.md §0). brev-vault, brev-proto
+# and brev-relay stay at 1.85.
 rust-version = "1.88"
 license.workspace = true
 publish.workspace = true
 
 [lib]
+# Kept from brev-core: the UniFFI checksums, the `uniffi_brev_core_*`
+# symbols, libbrev_core.a and the generated Swift all carry this name
+# (docs/VAULT_SPLIT_PLAN.md §2).
 name = "brev_core"
 # `lib` for Rust tests and the relay, `staticlib` for the macOS app,
 # `cdylib` so `uniffi-bindgen --library` can read metadata on any host.
@@ -20,22 +23,32 @@ crate-type = ["lib", "staticlib", "cdylib"]
 uniffi = { workspace = true }
 thiserror = { workspace = true }
 brev-proto = { path = "../brev-proto" }
+# The store, its DEK, column encryption, padding and the zeroing allocator.
+brev-vault = { path = "../brev-vault", default-features = false, features = ["zeroing-allocator"] }
 rusqlite = { workspace = true }
-chacha20poly1305 = { workspace = true }
-poly1305 = { workspace = true }  # only for its `zeroize` feature (see core/Cargo.toml)
 x25519-dalek = { workspace = true }
 hkdf = { workspace = true }
 sha2 = { workspace = true }
-rand = { workspace = true }
 zeroize = { workspace = true }
-zeroizing-alloc = { workspace = true }
 # The relay client (src/relay.rs): blocking, no TLS, no proxy, no JSON.
 reqwest = { workspace = true }
 
+[features]
+default = []
+# `MockTransport` and the vault's test counters and accessors, for the tests
+# (docs/VAULT_SPLIT_PLAN.md Q5). Never in the app's archive: gen-bindings.sh
+# builds with the default features.
+test-hooks = ["brev-vault/test-hooks"]
+
 [dev-dependencies]
+# Turns on `test-hooks` for this crate's own tests, the integration tests in
+# tests/ included.
+brev-mail = { path = ".", default-features = false, features = ["test-hooks"] }
 # Test signers for the identity key (src/test_keys.rs and tests/ only;
 # production code never builds a signing key).
 p256 = { workspace = true }
+# The random bytes of tests/common.
+rand = { workspace = true }
 # The relay in-process on 127.0.0.1:0 for the network tests.
 brev-relay = { path = "../brev-relay" }
 # `trace` (a no-dependency feature of an approved crate) lets one test record

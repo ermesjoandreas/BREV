@@ -2,4 +2,4 @@
 # Maps each UniFFI crate to its root so its per-crate `uniffi.toml` is found
 # without depending on `cargo metadata` discovery from the current directory.
 [crate-roots]
-brev_core = "brev-core"
+brev_core = "brev-mail"
