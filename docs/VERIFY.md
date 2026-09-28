@@ -1,4 +1,4 @@
-# Brev — Phase 2 and Phase 3 verification
+# Brev — Phase 2, Phase 3 and Phase 4 verification
 
 The manual checklist that CLAUDE.md §5 (Phase 2) asks for, built from
 `docs/PHASE2_DESIGN.md` §10. Its results are recorded in D-0053 (the design's
@@ -13,6 +13,15 @@ retired with the echo contacts; V57 replaces it. Phase 3's WP6 runs the rows
 and records the results in the Phase 3 design's D-0053 (its §10 numbers
 follow Phase 2's entries).
 
+Phase 4 ("Human-only guarantees") adds V71–V80 from `docs/PHASE4_DESIGN.md`
+§8 and V81 for *Blokker* (the owner's answer 6 at the end of that design).
+It rewrites V14, V66 and V69, and V15 if spike P1 takes variant (b)
+(Legend). Phase 4's WP5 and WP6 run the rows; the results go to Phase 4's
+decision entries (design §10). From Phase 4's WP5 on, `ContactSheet`
+replaces `AddContactSheet`, adding a contact sends a request, and
+registering needs an invite. The other rows keep their text: Phase 3's WP6
+runs its rows on the Phase 3 build, and V71–V81 check the Phase 4 flows.
+
 Status: written in WP0, 2026-09-27, and revised after its review. WP4
 (2026-09-28) built the tools in `tools/verify/` and ran every row a machine
 can run without Touch ID; the results are in `docs/VERIFY-RESULTS.md`. Rows
@@ -26,7 +35,8 @@ still to come (`docs/USER_SESSION.md`). The Phase 3 rows were written in
 Phase 3's WP0 (2026-09-28) and revised after its review. After the vault
 split (D-0066 to D-0068), the rows a machine can run ran again at `60d4e1b`
 (`docs/VERIFY-RESULTS.md`); of the Phase 3 rows, that covers V53, V66 and
-V69.
+V69. The Phase 4 rows were written in Phase 4's WP0 (2026-09-28), before
+any Phase 4 code.
 
 ## Setup
 
@@ -51,7 +61,8 @@ V69.
   uses them as its control. Brev's contact is Brev B, so `$ADDR_B` is the
   contact address marker: the name in Brev's contacts pane and header. Both
   follow the address rules (a–z, 0–9 and `-`, 3–32 characters, first a
-  letter; design Q3), and neither contains the other.
+  letter; design Q3), and no address marker contains another (Phase 4
+  adds `$ADDR_C` and `$ADDR_D`).
 - Phase 3 needs the relay and a second instance, Brev B (design §7). Build
   the relay with `cargo build --release -p brev-relay` in `core/`, and Brev B
   with `scripts/build.sh --instance b`. Before the first launch, start the
@@ -75,6 +86,21 @@ V69.
   the relay as that user (`sudo pkill -x brev-relay`,
   `sudo -u _brevrelay "$RELAY" serve …`, or `launchctl` for a LaunchDaemon);
   run `sudo -v` just before it, so it does not wait at a password prompt.
+- Phase 4 (`docs/PHASE4_DESIGN.md`): registering needs an invite code
+  (design §3.1). An identity that nobody invites uses a root invite, which
+  the operator mints with the relay running:
+  `"$RELAY" invite --db "$RDB" > "$R/root-1"` writes one code (`brev1.`
+  and 26 characters). Each code works once and lives 7 days. Phase 4's run
+  mints three, `root-1` to `root-3` ("Order of a run (Phase 4)").
+  `pbcopy < "$R/root-1"` puts one on the pasteboard for ⌘V on the address
+  page. The files are test secrets in `$R`; V80 uses them.
+- Phase 4: the relay runs with its default limits (owner answer 3: per
+  identity and UTC day 50 letters, 10 requests and 3 invites made; 5 open
+  invites; 16 pending requests per recipient; invites live 7 days). Only
+  V78 restarts it with `--letters-per-day`. The block below adds two
+  address markers for Brev B's second and third identities, `$ADDR_C` and
+  `$ADDR_D` (the order of the run says why), and `rq`, a read-only query of
+  the relay's file.
 - Start Brev with `open "$APP"`, not `open -a Brev`: the Debug build in
   DerivedData has the same name and bundle id.
 - Paste the block below into two terminals (three in Phase 3: the third runs
@@ -119,6 +145,12 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 }
 waiting() {  # the number of letters the relay holds (Phase 3; read-only)
   sqlite3 -readonly "$RDB" 'select count(*) from envelopes'
+}
+# Phase 4 (docs/PHASE4_DESIGN.md): Brev B's later identities, and read-only queries of the relay's file
+ADDR_C='brev-secret-new'                                    # Brev B's second identity (Order of a run (Phase 4), pair 2)
+ADDR_D='brev-secret-last'                                   # Brev B's third identity (pair 3)
+rq() {  # rq SQL: one read-only query of the relay's file (Phase 4)
+  sqlite3 -readonly "$RDB" "$1"
 }
 ```
 
@@ -166,6 +198,18 @@ waiting() {  # the number of letters the relay holds (Phase 3; read-only)
   `lsof` needs `sudo` to see its sockets. Q1 (B) changes where the relay's
   files are and who runs the relay: the commands of Setup's Q1 item and V63's
   stop and restart.
+- **P1 (WP5)** (Phase 4): spike P1 (`docs/PHASE4_DESIGN.md` §6.2) decides
+  how ⌘V reaches `ContactField`: variant (a) handles ⌘V in `keyDown` and
+  reads the pasteboard there, with no Edit menu; variant (b) adds a
+  «Rediger» menu with only «Lim inn» (`paste:`), enabled only in
+  `ContactField`. WP5 records the variant and whether macOS showed a
+  pasteboard alert. Update the row from it before the run.
+- **self-clear (WP5)** (Phase 4): an open item, not a result. Design §6.2
+  clears Brev's pasteboard entry after 60 s or when Brev locks. Brev locks
+  as soon as another app is active (V22), so a code that Brev copied is
+  gone before it can be pasted into any other app: Brev B in V71 and V77,
+  and Messages or Mail in real use. WP5 settles the rule with the owner.
+  Update the row from that answer before the run.
 - Only V1, V2, V45, V50, V53, V66, V69, the `sdef` half of V3 and the binary
   half of V21 need no human and no running Brev. Every other row needs a
   store or a running Brev, and a human sets that up with Touch ID.
@@ -187,8 +231,8 @@ waiting() {  # the number of letters the relay holds (Phase 3; read-only)
 | V11 | AX dump | `$T/axdump Brev`: all attributes and parameterized attributes of every element; marker absent; control: title "Brev" present | A (H grants AX) | per D-0052 (U3) |
 | V12 | GUI scripting | System Events `entire contents of window 1`: marker absent; control: the button titles are listed | A | per D-0052 (U3) |
 | V13 | AX press refused | `$T/axdump Brev --press` on *Send* (compose sheet open, marker typed) and *Lås opp med Touch ID*, and during V38 on *Slett alt og start på nytt* and `ConfirmSheet`'s *Slett alt*: the files in `$D` are unchanged (a send rewrites `brev.db`, an unlock rewrites `biometry.state`, a reset deletes files), no Touch ID prompt appears, and the `AXError` axdump prints is recorded. Menu items: only harmless actions; control: pressing *Lås Brev* through AX locks | A + H looks | per D-0052 (U3) |
-| V14 | ⌘C, ⌘X, ⌘A, ⌘V | `printf PB-CONTROL \| pbcopy` first; in the letter and compose views nothing happens and ⌘V inserts nothing; `pbpaste` still prints `PB-CONTROL` | H + A | – |
-| V15 | Menus | only Brev and Arkiv next to the Apple menu, so no Edit menu with Copy or Paste; right-click in content shows no menu | H | – |
+| V14 | ⌘C, ⌘X, ⌘A, ⌘V | `printf PB-CONTROL \| pbcopy` first; in the letter and compose views nothing happens and ⌘V inserts nothing; `pbpaste` still prints `PB-CONTROL`. Phase 4: the same in the contacts list and the requests section. ⌘V pastes only in `ContactField` (`ContactSheet` and the address page), where it inserts `pb-control` (the field folds A–Z; the control that the pasteboard held the text); ⌘C, ⌘X and ⌘A in `ContactField` copy nothing, so `pbpaste` still prints `PB-CONTROL` | H + A | P1 (WP5) |
+| V15 | Menus | only Brev and Arkiv next to the Apple menu, so no Edit menu with Copy or Paste; right-click in content shows no menu. Phase 4, only if P1 takes variant (b): also «Rediger», with only «Lim inn», enabled only while `ContactField` has focus; no Kopier, Klipp ut or Merk alt in any menu; right-click in `ContactField` shows no menu either | H | P1 (WP5) |
 | V16 | Drag | dragging in a letter, onto TextEdit and the Finder, moves nothing out | H | – |
 | V17 | No plaintext on disk | `strings -a` and a UTF-16LE grep over every file in the container and in Brev's per-user cache and temp folders: the letter marker, the contact address marker `$ADDR_B` and Brev's own address `$ADDR_A` absent (no `Ekko` or `Speil` since Phase 3); control: `SQLite format 3` found in `brev.db`. Run while unlocked, again after V44's quit, and again after V20's crash | A | – |
 | V18 | Padding | `$T/padcheck`: every sealed column length in `brev.db`, the one store of schema v4, is nonce + bucket + tag; control: it checked more than 0 columns | A | – |
@@ -239,11 +283,22 @@ waiting() {  # the number of letters the relay holds (Phase 3; read-only)
 | V63 | Relay down | stop the relay: `sync failed: Network` logged once, not every 5 s; *Send* shows `net.error` and keeps the draft. After a restart, *Prøv igjen* sends once, with no second Touch ID: it appears only when the relay fails after signing, so the relay is stopped while the send dialog is up, and restarted, by a timed command (Terminal in front would lock Brev and clear the signed letter) | H + A | – |
 | V64 | No requests while locked | relay with `--trace`: no line while Brev and Brev B are locked; controls: `/v1/inbox` lines while one of them is unlocked, and a `/v1/health` request right after the quiet minute adds one line (the relay was up and tracing) | A | – |
 | V65 | Heap residue with the network | V39 rewritten, with both of its halves: on the Verify build, write a marker letter to Brev B and send it (*Send*, one Touch ID), and read the new marker letter Brev B sent over the relay (it arrives on the first sync after unlock); lock with that letter open: log `selfscan u8=0 u16=0 glyph=0 scribble=0 probe=<n>` with n > 0 (V39's scribble probe), with V39's control line (at the start of the lock, the letter still open: u16 > 0 and needle > 0; its glyph is 0). `SelfScan`'s needle is the letter marker only, so this row does not measure address residue after lock | H + A | Q4; per D-0052 (M) |
-| V66 | No ATS, no URLSession, no pasteboard | `plutil -p Info.plist` has no `NSAppTransportSecurity`; `nm -u Brev` has no `NSURLSession`; the forbidden-API grep passes with `allowed-apis.txt`'s pasteboard lines unchanged (only OpaqueView's Services override) | A | – |
+| V66 | No ATS, no URLSession, no pasteboard outside the contact screen | `plutil -p Info.plist` has no `NSAppTransportSecurity`; `nm -u Brev` has no `NSURLSession`; the forbidden-API grep passes, and `allowed-apis.txt`'s pasteboard lines are OpaqueView's Services override and, from Phase 4's WP5 on, `ContactPasteboard.swift`'s lines, nothing else. Phase 4: test.sh's pasteboard greps pass too (design §6.2): `ContactPasteboard` appears only in `ContactField.swift`, `ContactSheet.swift`, `AddressViewController.swift` and the lock hook that clears it; `copy:`, `cut:` and `selectAll:` appear nowhere; `paste:` appears only in `ContactField.swift`, and only under P1's variant (b) | A | P1 (WP5) |
 | V67 | New controls | V9 (window exclusion) on the address page, `AddContactSheet` and the accept `ConfirmSheet`; V13 (AX press refused) on *Registrer* with `$ADDR_A` typed, *Legg til* with `$ADDR_B` typed (a valid address, so that a press that gets through shows a dialog, a request or a new contact, not an address error), *Godta ny kode* and the accept `ConfirmSheet`'s *Godta*: no Touch ID dialog, no `/v1/register` or `/v1/lookup` in the relay trace, no new sheet, `$D` unchanged; record the `AXError` | A (H opens and looks, as in V9 and V13) | per D-0052 (U3) |
 | V68 | No contact data in AX or capture | with a contact whose address is a marker (`$ADDR_B`, selected, so the header shows both addresses and codes): V11's AX dump has neither address marker nor any identity code (6 groups of 5 of A–Z and 2–7); V5–V7's capture (`capture-probe` with the header's protected view as a `--pane`) shows the header blank, while a control `--pane` over one of the header's labels shows ink in every path that captures the window, and Brev does not lock during the run (`--pane` turns off the probe's own check for that); controls as in V11 and V6 | A | per D-0052 (U1, U3) |
-| V69 | The view host's checks | no Brev needed; on the Release commit, nobody using the Mac: the view host (`tools/viewhost`: Brev's mail window, compose sheet, lock sequence and triggers with fake letters and a software KEK) prints PASS in mail mode (`--hold 1 --scan --post`: the protected layer, `draw(_:)` empty, pixel buffers zeroed on scroll-out and on lock, the Rust session locked, hardened sheets and child windows, a posted key dropped, the scribble probe), compose mode (`--compose --hold 1 --scan --post`: key-only typing, the ways in that must fail, secure input, the sheet wiped and freed after a send, Escape and a lock) contacts mode (`--contacts --hold 1`, Phase 3: the address page, `AddContactSheet`, the contact header, a changed key and the accept `ConfirmSheet`, each hardened, with *Registrer*, *Legg til*, *Godta ny kode* and *Godta* refusing a click made in code and an AX press (no signature, no `/v1/register` or `/v1/lookup` in the relay's trace), no address marker or identity code in the accessibility tree, addresses and codes only in the protected layer, and the lock sequence wiping all of it: the machine half of V67 and V68, run in process; during its three holds a driver can also run `$T/windows`, `$T/axdump` and `$T/axdump --press` against it) and `--triggers switch` (switching app locks, not while an unlock is in flight, which logs U4's measurement line). The compose and switch runs make the view host active, and the switch run brings the Finder to the front | A | – |
+| V69 | The view host's checks | no Brev needed; on the Release commit, nobody using the Mac: the view host (`tools/viewhost`: Brev's mail window, compose sheet, lock sequence and triggers with fake letters and a software KEK) prints PASS in mail mode (`--hold 1 --scan --post`: the protected layer, `draw(_:)` empty, pixel buffers zeroed on scroll-out and on lock, the Rust session locked, hardened sheets and child windows, a posted key dropped, the scribble probe), compose mode (`--compose --hold 1 --scan --post`: key-only typing, the ways in that must fail, secure input, the sheet wiped and freed after a send, Escape and a lock) contacts mode (`--contacts --hold 1`; Phase 4, design §8: the address page with its invite step (`ContactField`, ⌘V, *Fortsett*, «Invitert av») and *Registrer*; `ContactSheet`, which replaces Phase 3's `AddContactSheet` (*Kopier adressen min*, *Lag invitasjon*, the code, *Kopier koden*, `ContactField`, *Legg til*, *Godta invitasjonen*); the requests section with *Godta* and *Avslå*; the contact header with *Blokker*; and Phase 3's changed key with *Godta ny kode* and the accept `ConfirmSheet`. Each is hardened, and each of those buttons refuses a click made in code and an AX press: no signature, no pasteboard write, no new line in the relay's trace. The accessibility tree holds no address marker, identity code or invite code; addresses, codes and requests are only in the protected layer; the pasteboard is read only in `ContactField`; its self-clear runs after a shortened timer; under P1's variant (b), the `pasteboardDisabled` probe reports false while `ContactSheet` is key and true after it closes (design §5.5); and the lock sequence wipes all of it. This is the machine half of V67, V68 and V79, run in process; during its holds a driver can also run `$T/windows`, `$T/axdump` and `$T/axdump --press` against it) and `--triggers switch` (switching app locks, not while an unlock is in flight, which logs U4's measurement line). The compose and switch runs make the view host active, and the switch run brings the Finder to the front | A | P1 (WP5) |
 | V70 | Open-documents event | Brev running (onboarding or the lock screen), and again unlocked with the compose sheet open and a field focused (start with a delay): `open -a "$APP" <any file>` adds no window to `$T/windows Brev` (AppKit's "cannot open" alert would be an unhardened window with sharing state 1 that takes key from the sheet and turns secure input off); with the sheet open, `kCGSSessionSecureInputPID` is still Brev's PID; log `open event ignored count=1` | A (H opens) | – |
+| V71 | Invite onboarding | the relay empty and `root-1` minted (Setup). Brev, on the address page: `pbcopy < "$R/root-1"`, then ⌘V into the field and *Fortsett*: `invite.root`; then `$ADDR_A` and *Registrer* (one Touch ID dialog, as V55). Brev, *Kontakter*: *Lag invitasjon* shows a code (protected, two lines) with no Touch ID dialog (owner answer 7); then *Kopier koden*. Brev B, on its address page: ⌘V and *Fortsett*: «Invitert av:» with `$ADDR_A` and Brev's identity code (protected; the same as the own code in Brev's header, V61); then `$ADDR_B` and *Registrer* (one dialog, «Brev B»). After one sync each, each contact list shows the other with «Bekreftet med invitasjon», with no request and no *Godta*; a marker letter each way arrives. The relay: Brev's `invited_by` is empty, Brev B's is Brev's id | H + A | self-clear (WP5) |
+| V72 | P1: paste without an alert | the first ⌘V in `ContactField` (V71's root code, on Brev's address page): the code appears in the field, and macOS shows no pasteboard alert. Record the variant WP5 built and any alert (design §6.2: if both variants alert, one alert is accepted and recorded) | H | P1 (WP5) |
+| V73 | Pasteboard only on the contact screen | right after *Kopier koden* (and the same after *Kopier adressen min*): the general pasteboard's types are `public.utf8-plain-text`, `org.nspasteboard.ConcealedType` and `org.nspasteboard.TransientType`; 60 s later, with Brev in front and unlocked the whole time, it has no types. After *Kopier adressen min* and ⌘L: no types right away. ⌘V in the compose and letter views inserts nothing (V14). A letter sent right after *Kopier adressen min*, with the sheet closed, goes out without `compose.environment`: `pasteboardDisabled` is true at *Send* (class A needs it) | H + A | P1 (WP5), self-clear (WP5) |
+| V74 | Request and approval | pair 2 (Order of a run (Phase 4)): Brev, *Kontakter*: `$ADDR_C`, *Legg til*: `request.sent`, and the contact shows «Venter på svar»; the relay holds one event, a request. Brev B: «Forespørsler» lists it (address and code in the protected layer, `request.body`); *Godta*: one click, no Touch ID dialog, no confirm; Brev is at once an ordinary contact there. Brev's next sync clears «Venter på svar», and after it the relay holds no event. A marker letter each way arrives on the recipient's first sync after unlock (immediate delivery, D-0030) | H + A | – |
+| V75 | Decline | pair 3: Brev adds `$ADDR_D` as in V74. Brev B: *Avslå*: one click, no Touch ID dialog; the request leaves the list and does not come back at the next syncs; the relay holds no event, and its link from Brev B to Brev is declined (state 2). Brev's *Send* to Brev B: `compose.notapproved`, no Touch ID dialog, `waiting` unchanged, no `/v1/envelopes` line in the trace. Nothing tells Brev about the decline (owner answer 5): the contact still shows «Venter på svar». Brev adds `$ADDR_D` again: `contact.error.duplicate`, and no `/v1/requests` line (a declined requester's later requests are relay test 6, in V45) | H + A | – |
+| V76 | Unapproved sender (DoD) | relay test 5 (`unapproved_sender_cannot_reach_an_inbox`) and brev-mail test 4 (`a_stranger_cannot_reach_an_inbox`, whose forced submit reaches a relay on 127.0.0.1 over HTTP and gets 409) pass in V45 and by name (Commands). The app half, in V74 before *Godta*: Brev's *Send* to Brev B shows `compose.notapproved` with no Touch ID dialog; the trace has `/v1/lookup` and no `/v1/envelopes`; `waiting` unchanged | A (H sends) | – |
+| V77 | Wrong fingerprint (DoD) | brev-mail test 1 (`invite_with_wrong_fingerprint_is_rejected`) passes in V45 and by name (Commands). In V71, before the right code: on Brev B's address page, ⌘V, then ⌘→, ← 27 times (the caret now stands at the end of the fingerprint, before `.` and the secret), ⌫ and another letter of a–z or 2–7, then *Fortsett*: `invite.error.mismatch`, and no «Invitert av»; since the paste, the trace has `/v1/invites/open` and no `/v1/register` or `/v1/invites/redeem`. Then empty the field for V71 | H + A | self-clear (WP5) |
+| V78 | Rate limit | pair 2, after V74: restart the relay with `--letters-per-day` set to one more than Brev's letters that UTC day (Commands; the same file). One more letter from Brev goes. The next: one Touch ID dialog (the relay decides after the signature), then `compose.ratelimited`; the draft stays; `waiting` and Brev's count are unchanged. Then restart the relay with its defaults | H + A | – |
+| V79 | New UI hardened; no contact data in AX or capture | V67 and V68 for Phase 4's new UI. V9 (window exclusion) with `ContactSheet` open, and on the address page's invite step. V13 (AX press refused) on *Fortsett* (a code pasted), *Kopier adressen min*, *Lag invitasjon*, *Kopier koden* (a code shown), *Legg til* (`$ADDR_C` typed), *Godta* and *Avslå* (a request pending, before a human answers it) and *Blokker* (before V81): no Touch ID dialog, no new line in the relay trace, no new sheet, `$D` (or `$DB`) unchanged, and the pasteboard's change count unchanged; record the `AXError`. V68's AX dump with `ContactSheet` open and a code shown, and with a request selected: no address marker, no identity code, no `brev1.`; V68's capture with the code's view and the request's header as `--pane`s: blank, with a label as the control. *Godta invitasjonen* is V69's (this run redeems no code while registered) | A (H opens and looks) | – |
+| V80 | Relay file | after the run's last letter: the hex of each `relay.db*` file (`xxd -p`, joined into one line) holds neither `s` nor `a` of any of the three root codes, nor the letter marker; control: the hex of each code's `SHA-256(a)` is found (Commands) | A | – |
+| V81 | Blokker | pair 2, after V78: Brev B, on Brev's contact, *Blokker*: one click, no Touch ID dialog; the relay's link from Brev B to Brev is declined (state 2). Brev's *Send* to Brev B: `compose.notapproved`, no Touch ID dialog, `waiting` unchanged. Brev B cannot write to Brev: no Touch ID dialog, no `/v1/envelopes` line. The relay test and the brev-mail test for *Blokker* (owner answer 6) pass in V45 | H + A | – |
 
 ## Commands
 
@@ -437,7 +492,8 @@ grep -o 'selfscan .*' "$R/stream.log"                      # after the lock: sel
 # V66 (the forbidden-API grep itself runs in V45)
 for A in "$APP" "$VAPP"; do plutil -p "$A/Contents/Info.plist" | grep -c NSAppTransportSecurity; done   # 0 twice
 nm -u "$APP/Contents/MacOS/Brev" | grep -Eci 'URLSession|NSURLConnection'                             # 0
-grep -v '^#' scripts/allowed-apis.txt | grep -i pasteboard | cut -d'|' -f1   # app/Sources/UI/OpaqueView.swift twice, nothing else
+grep -v '^#' scripts/allowed-apis.txt | grep -i pasteboard | cut -d'|' -f1   # app/Sources/UI/OpaqueView.swift twice; from Phase 4's WP5 on
+                                                           # also app/Sources/UI/ContactPasteboard.swift; nothing else
 
 # V67: V9's command with the address page, AddContactSheet and the accept ConfirmSheet open. V13's command for Registrer
 # ($ADDR_A typed on the address page first), Legg til ($ADDR_B typed in AddContactSheet first), Godta ny kode and the
@@ -483,6 +539,76 @@ sleep 30; "$T/windows" Brev > "$R/v70-before.txt"; open -a "$APP" "$R/v70.txt"; 
 ioreg -l -w 0 | grep kCGSSessionSecureInputPID              # with the sheet open: Brev's PID
 diff "$R/v70-before.txt" "$R/v70-after.txt"                # no output
 grep -c 'open event ignored count=1' "$R/stream.log"       # > 0
+
+# Phase 4 (V71 to V81; docs/PHASE4_DESIGN.md §8). The relay runs in the third terminal (Setup).
+id_of() {  # id_of ADDRESS: the relay's id for an address, as SQL
+  printf "(select id from identities where address = '%s')" "$1"
+}
+
+# Root invites (Setup), with the relay running
+for i in 1 2 3; do "$RELAY" invite --db "$RDB" > "$R/root-$i"; done
+cat "$R"/root-*                                             # three lines, each brev1. and 26 characters
+pbcopy < "$R/root-1"                                        # before ⌘V on Brev's address page (V71, V72); root-2 and root-3 for Brev B's later identities
+
+# V71 (both registered)
+rq "select address, invited_by is null from identities order by address"   # brev-secret-me|1, brev-secret-peer|0
+rq "select (select invited_by from identities where address = '$ADDR_B') = $(id_of "$ADDR_A")"   # 1: Brev invited Brev B
+
+# V73: the pasteboard's types while Brev is in front (types only; nothing reads the text). Start the line, switch to
+# Brev, and press Kopier koden within 30 s; stay on Brev, unlocked, until the second file is written (95 s).
+PBT='ObjC.import("AppKit"); JSON.stringify(ObjC.deepUnwrap($.NSPasteboard.generalPasteboard.types) || [])'
+sleep 30; osascript -l JavaScript -e "$PBT" > "$R/v73-copied"; sleep 65; osascript -l JavaScript -e "$PBT" > "$R/v73-60s"
+cat "$R/v73-copied"                                        # public.utf8-plain-text, org.nspasteboard.ConcealedType, org.nspasteboard.TransientType
+cat "$R/v73-60s"                                           # []
+osascript -l JavaScript -e "$PBT"                          # after Kopier adressen min and ⌘L: []
+# V79: the change count before and after an AX press on Kopier adressen min or Kopier koden: the same number
+osascript -l JavaScript -e 'ObjC.import("AppKit"); $.NSPasteboard.generalPasteboard.changeCount'
+
+# V74 (after Legg til; again after Brev's next sync that follows Godta)
+rq 'select kind from events'                               # 1 (a request); after the sync: nothing
+# V75 and V81: the link from the one who declined or blocked (P) to Brev
+P="$ADDR_D"                                                # V75; P="$ADDR_C" for V81
+rq "select state from links where owner = $(id_of "$P") and peer = $(id_of "$ADDR_A")"   # 2
+rq 'select count(*) from events'                           # 0 (V75)
+
+# V75, V76 and V81: note the trace's length, switch to Brev, press Send, come back
+n="$(wc -l < "$R/relay.log")"
+tail -n +"$((n + 1))" "$R/relay.log" | grep -c '/v1/envelopes'   # 0
+tail -n +"$((n + 1))" "$R/relay.log" | grep -c '/v1/lookup'      # > 0 (control: Brev asked the relay)
+
+# V77: note the trace's length before the edited code's Fortsett on Brev B's address page; after it:
+tail -n +"$((n + 1))" "$R/relay.log" | grep -cE '/v1/register|/v1/invites/redeem'   # 0
+tail -n +"$((n + 1))" "$R/relay.log" | grep -c '/v1/invites/open'                   # > 0 (control)
+
+# V76, V77, V78 and immediate delivery: the design's DoD tests by name (they also run in V45)
+cargo test --manifest-path core/Cargo.toml --target-dir core/target --workspace --no-default-features -- \
+  cannot_reach_an_inbox invite_with_wrong_fingerprint_is_rejected letters_are_rate_limited_per_identity_per_day \
+  approved_envelope_is_delivered_on_the_next_poll 2>&1 | grep -E '^test .* \.\.\. '
+                                                           # five lines, each ending "ok": unapproved_sender_cannot_reach_an_inbox,
+                                                           # a_stranger_cannot_reach_an_inbox, invite_with_wrong_fingerprint_is_rejected,
+                                                           # letters_are_rate_limited_per_identity_per_day, approved_envelope_is_delivered_on_the_next_poll
+
+# V78 (pair 2, after V74): Brev's letters this UTC day, then ⌃C the relay and start it with a limit of one more
+day=$(($(date +%s) / 86400))
+nl="$(rq "select n from counts where kind = 1 and day = $day and identity = $(id_of "$ADDR_A")")"; nl="${nl:-0}"; echo "$nl"
+"$RELAY" serve --db "$RDB" --listen 127.0.0.1:8787 --trace --letters-per-day $((nl + 1)) >> "$R/relay.log"
+# (another terminal) one letter goes; before the next Send and after its compose.ratelimited:
+waiting                                                     # the same number both times
+rq "select n from counts where kind = 1 and day = $day and identity = $(id_of "$ADDR_A")"   # nl + 1, both times
+# then ⌃C, and the relay again as in Setup, with >> instead of >
+
+# V80 (after the run's last letter): the hex of each file on one line, then each root code's s, a and SHA-256(a)
+for f in "$RD"/relay.db*; do xxd -p "$f" | tr -d '\n'; echo; done > "$R/v80-db.hex"
+for i in 1 2 3; do python3 - "$(cat "$R/root-$i")" <<'EOF'
+import sys, base64, hashlib
+s = base64.b32decode(sys.argv[1].strip().split('.')[-1].upper() + '======')   # the secret: 26 base32 characters, 16 bytes
+a = hashlib.sha256(b'brev/invite/relay\0' + s).digest()
+print(s.hex(), a.hex(), hashlib.sha256(a).hexdigest())
+EOF
+done > "$R/v80-needles"
+while read -r s a h; do echo "$(grep -c "$s" "$R/v80-db.hex") $(grep -c "$a" "$R/v80-db.hex") $(grep -c "$h" "$R/v80-db.hex")"; done < "$R/v80-needles"
+                                                           # three lines "0 0 <k>", k > 0: s and a absent; SHA-256(a) found (control)
+grep -c "$(printf %s "$M" | xxd -p | tr -d '\n')" "$R/v80-db.hex"   # 0: the letter marker
 ```
 
 ## Tools
@@ -497,10 +623,10 @@ grep -c 'open event ignored count=1' "$R/stream.log"       # > 0
 | `$T/poster` | posts synthetic keys (`key`) and clicks (`click`) in every variant of V32; the session and HID taps and `IOHIDPostEvent` need `--global` and post only while the target is in front | V32, V33 |
 | `$T/keylisten` | listen-only event tap + IOHIDManager; prints only whether a key value was seen | V31 |
 | `$T/padcheck` | checks every sealed column length in `brev.db`, read-only (Phase 2's version read the three stores) | V18 |
-| `$RELAY` (`core/target/release/brev-relay`) | the relay (Phase 3 design §4): `serve` listens on `127.0.0.1` only, and with `--trace` prints one line per request (path and status; nothing stored); `release --db <path> <address>` frees an address and deletes its waiting letters | V54, V57–V60, V62–V64, V67 |
+| `$RELAY` (`core/target/release/brev-relay`) | the relay (Phase 3 design §4): `serve` listens on `127.0.0.1` only, and with `--trace` prints one line per request (path and status; nothing stored); `release --db <path> <address>` frees an address and deletes its waiting letters. Phase 4 (design §4.6): `invite --db <path>` prints one root invite code and stores only `SHA-256(a)`; `serve` takes a flag for each limit (`--letters-per-day` and the others of design §4.4); `release` also deletes the identity's links, events, invites and counts | V54, V57–V60, V62–V64, V67, V71, V78, V80 |
 | `TouchIDProbe.app` (`$T/touchid-probe/Build/Products/Release/`) | runs Brev's unlock closure (`UnlockService`) with a real Enclave KEK and scans for the DEK and ECIES needles; `--dry` stops before the prompt. Also built against a copy of brev-core with the unlock's deep scrub disabled (`$T/touchid-probe-scrub0/…`, the negative control) and at 128 KiB (`$T/touchid-probe-scrub128/…`); each prints its `scrub=` depth | V51 |
 | `$T/InputLab.app`, `tools/verify/spikes/` | the GUI-spike lab and the spikes' sources (design §14.2); the rogue-Brev and anchor probes were dropped with D-0035 | – |
-| `tools/viewhost` (`tools/viewhost/build.sh` prints its path) | Brev's mail window, compose sheet, lock sequence and lock triggers with fake letters and a software KEK (no keychain, no Touch ID), and in-process checks of them; SelfScan compiled in, as in the Verify build | V69 |
+| `tools/viewhost` (`tools/viewhost/build.sh` prints its path) | Brev's mail window, compose sheet, lock sequence and lock triggers with fake letters and a software KEK (no keychain, no Touch ID), and in-process checks of them; SelfScan compiled in, as in the Verify build. Phase 4's WP5 extends `--contacts` to the new contact screen (V69) | V69, V79 |
 | `app/Tests/Lock` (the lock probe; scripts/test.sh builds and runs it) | a CLI without a window on screen: a synthetic key that `BrevApplication` drops, in `sendEvent` and posted to the probe itself through `nextEvent`, does not move the idle clock (the drop log is the control; the posted part is skipped if the process may not post events), a discarded unlock and the lock sequence lock the Rust session, the lock sequence zeroes every content view's pixel buffers, `draw(_:)` of a content view draws nothing, `UnlockService` locks Rust when its closure fails after `Brev.unlock` | V45 |
 
 ## Coverage
@@ -603,6 +729,46 @@ New mechanisms in the Phase 3 design:
 | Two instances by bundle id (§7) | V57 |
 | Echo peers removed (§1.2) | V17, V41 |
 
+CLAUDE.md §5, Phase 4 (`docs/PHASE4_DESIGN.md` §1.1 and the owner's
+answers). V45 includes the Rust tests of design §8 and harness case 9, the
+invite round trip:
+
+| §5 line | Rows |
+|---|---|
+| Letters only from approved contacts | V76, V74, V75, V45 |
+| One request otherwise, with no text; approved or declined with one click | V74, V75, V79, V69 |
+| The requester is not told about a decline | V75, V45 |
+| *Blokker*: one click undoes an approval | V81, V79, V69, V45 |
+| Invite codes: one-time text codes with the inviter's address and fingerprint | V71, V77, V80, V45 |
+| Redeeming makes both approved contacts, the inviter's key verified | V71, V77, V45 |
+| A new identity needs an invite to register; the relay tracks the invite graph | V71, V45 |
+| Creating an invite: one human click, no Touch ID | V71, V79 |
+| Codes are text, never links; copy and paste of addresses and codes only on the contact screen | V73, V72, V14, V15, V66, V69 |
+| Rate limits per identity and day, enforced by the relay | V78, V45 |
+| Delivery on the next poll, nothing held (D-0030) | V74, V45 |
+| App Attest stub behind a feature flag; `IdentityVerifier` with `DevVerifier` | V45 (relay test 11) |
+| Definition of done: an unapproved sender cannot reach an inbox | V76 |
+| Definition of done: a code whose fingerprint does not match is rejected | V77 |
+| Definition of done: rate limits and immediate delivery in relay tests | V78, V45 |
+
+New mechanisms in the Phase 4 design:
+
+| Mechanism (design §) | Rows |
+|---|---|
+| Invite code text, base32 decoding, `a` and the tag (§3.1) | V45, V77, V80 |
+| Registration v2 and its check order, no directory probe (§3.2, §4.3) | V71, V45 |
+| Both directions of a code's check; forged *invited* events dropped (§3.4) | V71, V77, V45 |
+| Submit carries the sender's token (§3.2, §4.3) | V45 |
+| Relay schema v2: links, events, invites, counts; no `s` or `a` in the file (§4.2) | V80, V71, V74, V75, V81, V45 |
+| Uniform 202 for requests, the pending cap, events in kind order (§4.3, §4.4) | V45 |
+| Mail schema v5: sealed flags and local invites; requests and opened invites only in the session (§5.1) | V45 |
+| Contact states «Venter på svar» and «Bekreftet med invitasjon» (§5.2) | V74, V75, V71 |
+| `ContactSheet`, `ContactField`, the address page's invite step, the requests section, the header's buttons (§6.1) | V71, V74, V75, V81, V79, V69 |
+| `ContactPasteboard`: two writers, Concealed and Transient types, the self-clear, reads only in `ContactField` (§6.2) | V73, V72, V66, V14, V69 |
+| `pasteboardDisabled` at *Send* (§5.5) | V73, V69 |
+| FFI additions and the four new errors (§5.4) | V45 |
+| App Attest stub and `IdentityVerifier` (§7) | V45 |
+
 ## Order of a run
 
 The order below is Phase 3's run. V26 holds for the whole run.
@@ -644,6 +810,48 @@ The order below is Phase 3's run. V26 holds for the whole run.
    V48's fingerprint step as the very last (it also makes Brev B's keys
    unusable).
 
+### Order of a run (Phase 4)
+
+Phase 4's WP6 runs after Phase 3's run is signed off (owner answer 1),
+with no `$D`, no `$DB` and an empty relay: Phase 4 refuses Phase 3's
+stores and relay file (design §1.2). V26 holds for the whole run. The rows
+need three pairs of identities that the relay has not linked yet. An invite
+links a pair when the invitee registers (V71). A pair's request can be
+answered only once: after *Godta* or *Avslå*, the requester keeps its row
+(adding again is `contact.error.duplicate`), and a request the other way is
+approved at once, with no click (design §4.3). So Brev onboards once and
+Brev B three times, reset by V38's method on `$DB` between pairs, each time
+with a new address. The design (§9, WP6) counted two onboardings.
+
+A code stays shown only while Brev stays unlocked, and a `pbcopy` in
+Terminal replaces it on the pasteboard, so pair 1 brings Brev B to its
+address page before Brev makes the code.
+
+1. Before any launch: V45 (and the tests of V76, V77 and V78 by name), V66,
+   V69, and V1, V2 and V53 on the new builds. Build the relay and Brev B,
+   start the relay empty with its trace (Setup), mint `root-1` to `root-3`,
+   and start the V19 stream.
+2. Pair 1, by invite. Brev's onboarding; on the address page V72 (the first
+   ⌘V, with `root-1`), V79's press on *Fortsett*, then the rest of V71's
+   first half; then V14. Brev B's
+   onboarding, up to its address page. Back in Brev, *Kontakter*: V79's
+   presses on *Kopier adressen min* and *Lag invitasjon*, then
+   *Lag invitasjon* (the code V71 uses); with the code shown, V79's press on
+   *Kopier koden*, its AX dump and capture, and V73's first part (Brev stays
+   in front and unlocked, so the code stays shown). Then *Kopier koden* once
+   more, and in Brev B: V77, then V71's second half with `$ADDR_B`, and a
+   marker letter each way (V73's letter part in Brev). Then V73's lock
+   part.
+3. Pair 2, by request. Reset Brev B; its onboarding registers `$ADDR_C` with
+   `root-2`. In Brev, V79's press on *Legg til* with `$ADDR_C` typed, then
+   V74 up to the request. Before Brev B answers: V76's app half, and in
+   Brev B V79's presses on *Godta* and *Avslå* and its AX dump and capture
+   with the request selected. Then the rest of V74, V78, V79's *Blokker*
+   press, and V81.
+4. Pair 3, the decline. Reset Brev B; its onboarding registers `$ADDR_D`
+   with `root-3`. V75.
+5. Last: V80, and V15 if P1 took variant (b).
+
 ## Failures and results
 
 A row passes only as written. A failed row is fixed and run again, or it gets
@@ -655,7 +863,9 @@ capture leak), that area stops until the owner answers.
 Results go to D-0053: the macOS build, the commit, and for each row pass,
 fail, or the D-entry that accepts it. `docs/VERIFY-RESULTS.md` holds the
 machine-run part (WP4). Phase 3's results go to the Phase 3 design's D-0053
-(renumbered after Phase 2's entries, design §10) in the same form.
+(renumbered after Phase 2's entries, design §10) in the same form. Phase 4's
+go to the Phase 4 design's D-0080 (its §10: numbered after Phase 3's WP6
+entries), in the same form.
 
 One open item was not a row: on a Mac that holds Brev's team signing key,
 any same-user process can sign itself into Brev's App ID and keychain group
@@ -831,3 +1041,46 @@ design, it is here:
   (V45) pins Phase 3's surface: `scripts/ffi-surface.txt` lists its exports
   and converter uses. D-0053 and the Phase 2 summary name V69 and V70 V53
   and V54, as D-0063 does.
+
+### Phase 4 (`docs/PHASE4_DESIGN.md` §8)
+
+The rows follow the design's list and table, with the owner's answers at
+the end of the design. Where they say more than the design, it is here:
+
+- V81 is new: owner answer 6 adds *Blokker*. Its button is also in V79 and
+  V69.
+- Order of a run (Phase 4): three pairs of identities, so Brev B onboards
+  three times and two more address markers exist (`$ADDR_C`, `$ADDR_D`).
+  With the design's two onboardings, V71, V74 and V75 cannot all run.
+- V76: Brev never sends a stranger's envelope. `prepare_send` stops at the
+  lookup's status with `NotApproved`, before any digest (design §5.3), so
+  the run's trace can show no 409 from Brev. The row checks that the trace
+  has no `/v1/envelopes` line, and takes the 409 from relay test 5 and from
+  brev-mail test 4, whose forced submit goes over HTTP to a relay on
+  127.0.0.1.
+- V75: the design's "A's new request does not appear at B" has no path in
+  the app. After the decline, Brev keeps its row («Venter på svar», design
+  §5.2), and adding the same address again ends in Phase 3's
+  `contact.error.duplicate` before any request. The row checks that, and
+  the relay's `links` and `events`; relay test 6 covers a declined
+  requester's later requests.
+- V71, V74, V75 and V81 also read the relay's file (`rq`, read-only, as
+  `waiting` does): `invited_by`, `events` and `links`.
+- V77 says which character to change: the fingerprint's last one, with the
+  arrow keys in `ContactField`. The secret stays right, so the relay
+  answers; a changed secret would give `invite.error.invalid` instead.
+- V78 sets the limit to one more than Brev's letters that UTC day, not to
+  2: earlier rows have sent letters by then, and the count is per day.
+- V80 uses the root codes, which the operator's command writes to `$R`: a
+  code Brev makes reaches a CLI only through the pasteboard. The design's
+  "harness's byte scan" is this `xxd` and `grep` scan, with its positive
+  control.
+- V79 leaves *Godta invitasjonen* to V69, because the run redeems no code
+  while registered. It also checks the pasteboard's change count after the
+  presses on *Kopier …*.
+- V14 gets a positive control: ⌘V in `ContactField` inserts `pb-control`.
+- V73 checks the self-clear at lock with ⌘L, and `pasteboardDisabled` at
+  *Send* through the letter going out in class A.
+- Open for WP5 (Legend, "self-clear (WP5)"): the design's self-clear at
+  lock empties the pasteboard as soon as the user switches to another app,
+  so V71 and V77 cannot paste Brev's code into Brev B as written.
