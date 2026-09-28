@@ -12,8 +12,8 @@
 // 2. and 3. `accessibilityPerformPress` returns false on the button and on
 //    its cell, so an AX press does nothing at all. (AXUIElementPerformAction
 //    still reports success; the effect is what counts.)
-// Used for every button that unlocks, creates keys, confirms or resets,
-// including the onboarding checkbox.
+// Used for every button that unlocks, creates keys, confirms, resets or
+// sends, including the onboarding checkbox.
 
 import AppKit
 

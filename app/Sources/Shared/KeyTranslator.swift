@@ -10,9 +10,13 @@
 // caller in a stack buffer that is wiped before `translate` returns. A dead
 // key (´ ` ¨ ^ ~ on the Norwegian layout) gives no units and waits for the
 // next key; `reset` drops it when the view loses focus, and a layout switch
-// before the next key drops it too. No AppKit: compiled
-// into the app and the CLI harness, which injects a named layout. Main
-// thread only (Text Input Sources).
+// before the next key drops it too. A held key repeats as UCKeyTranslate's
+// auto-key action, so a held dead key stays one waiting accent. The input
+// spike (macOS 26.2; D-0060 in the shifted numbering) found that the state
+// keeps upper bits after a finished composition (0x10000 after ´ e), so
+// "waiting" is no units with a state that is not 0, not the state alone. No
+// AppKit: compiled into the app and the CLI harness, which injects a named
+// layout. Main thread only (Text Input Sources).
 
 import Carbon.HIToolbox
 import CoreGraphics
@@ -48,12 +52,14 @@ final class KeyTranslator {
         }
     }
 
-    /// True while a dead key waits for the next key.
-    var hasDeadKey: Bool { deadKeyState != 0 }
+    /// True while a dead key waits for the next key: the last key gave no
+    /// units and left a state.
+    private(set) var hasDeadKey = false
 
     /// Drops a waiting dead key.
     func reset() {
         deadKeyState = 0
+        hasDeadKey = false
     }
 
     /// The Carbon modifier bits UCKeyTranslate takes: shift, option and caps
@@ -66,18 +72,20 @@ final class KeyTranslator {
         return m
     }
 
-    /// Translates one key-down (its key code and its CGEvent flags) and
-    /// calls `body` with the units it types: none for a dead key, a key
-    /// without text or a layout without Unicode data, else 1 to 4. The
-    /// buffer is wiped when `body` returns, so `body` copies what it keeps
-    /// (EditModel.insert).
-    func translate<R>(keyCode: UInt16, flags: CGEventFlags, _ body: (UnsafeBufferPointer<UInt16>) -> R) -> R {
-        translate(in: fixed ?? TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(), keyCode: keyCode, flags: flags, body)
+    /// Translates one key-down (its key code and its CGEvent flags; a
+    /// repeat of a held key if `isRepeat`) and calls `body` with the units
+    /// it types: none for a dead key, a key without text or a layout without
+    /// Unicode data, else 1 to 4. The buffer is wiped when `body` returns, so
+    /// `body` copies what it keeps (EditModel.insert).
+    func translate<R>(keyCode: UInt16, flags: CGEventFlags, isRepeat: Bool = false,
+                      _ body: (UnsafeBufferPointer<UInt16>) -> R) -> R {
+        translate(in: fixed ?? TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(), keyCode: keyCode,
+                  flags: flags, isRepeat: isRepeat, body)
     }
 
     /// `translate` in the given layout. The harness calls it to switch
     /// layouts between keys, which it must not do to the user's own.
-    func translate<R>(in source: TISInputSource?, keyCode: UInt16, flags: CGEventFlags,
+    func translate<R>(in source: TISInputSource?, keyCode: UInt16, flags: CGEventFlags, isRepeat: Bool = false,
                       _ body: (UnsafeBufferPointer<UInt16>) -> R) -> R {
         var buf: (UInt16, UInt16, UInt16, UInt16) = (0, 0, 0, 0)
         defer { _ = withUnsafeMutableBytes(of: &buf) { memset_s($0.baseAddress, $0.count, 0, $0.count) } }
@@ -95,9 +103,10 @@ final class KeyTranslator {
                 guard let source, let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData),
                       let bytes = CFDataGetBytePtr(Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue())
                 else { return OSStatus(paramErr) }
+                let action = UInt16(isRepeat ? kUCKeyActionAutoKey : kUCKeyActionDown)
                 return withExtendedLifetime(source) {
                     bytes.withMemoryRebound(to: UCKeyboardLayout.self, capacity: 1) { layout in
-                        UCKeyTranslate(layout, keyCode, UInt16(kUCKeyActionDown), (Self.carbonModifiers(flags) >> 8) & 0xFF,
+                        UCKeyTranslate(layout, keyCode, action, (Self.carbonModifiers(flags) >> 8) & 0xFF,
                                        UInt32(LMGetKbdType()), 0, &deadKeyState, 4, &len, out)
                     }
                 }
@@ -108,6 +117,7 @@ final class KeyTranslator {
             len = 0
         }
         let n = min(max(len, 0), 4)
+        hasDeadKey = n == 0 && deadKeyState != 0
         return withUnsafePointer(to: &buf) { tuple in
             tuple.withMemoryRebound(to: UInt16.self, capacity: 4) { body(UnsafeBufferPointer(start: $0, count: n)) }
         }

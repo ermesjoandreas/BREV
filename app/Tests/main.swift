@@ -14,7 +14,7 @@
 //
 // Case numbers are those of §11. Case 2 has two parts: the app shell's
 // (InputFilter, LockState, LaunchGuard, UnlockFailure) is `shell`, the compose core's
-// (EditModel, KeyTranslator) is `compose`. Output is content-free: check
+// (EditModel, ComposeKey, KeyTranslator) is `compose`. Output is content-free: check
 // names and hit counts only.
 
 import Carbon.HIToolbox
@@ -580,7 +580,7 @@ func caseArgumentDomain() {
           LaunchGuard.unsafeDefaults(defaults).isEmpty && cf == nil)
 }
 
-// MARK: - Case 2, the compose core's part: EditModel, KeyTranslator
+// MARK: - Case 2, the compose core's part: EditModel, ComposeKey, KeyTranslator
 
 /// Non-content test units into `m`, as one keystroke.
 func typeUnits(_ m: EditModel, _ s: String) -> Bool {
@@ -595,7 +595,41 @@ func atBoundary(_ m: EditModel) -> Bool {
 func caseCompose() {
     requireScribble(true)
     caseEditModel()
+    caseComposeKey()
     caseKeyTranslator()
+}
+
+func caseComposeKey() {
+    let none: CGEventFlags = [], cmd = CGEventFlags.maskCommand, ctrl = CGEventFlags.maskControl
+    let shift = CGEventFlags.maskShift, opt = CGEventFlags.maskAlternate
+    // Arrow keys carry the fn and numeric-pad flags from the hardware.
+    let arrow: CGEventFlags = [.maskSecondaryFn, .maskNumericPad]
+    func of(_ k: Int, _ f: CGEventFlags) -> ComposeKey { ComposeKey.of(keyCode: UInt16(k), flags: f) }
+    check("ComposeKey: ⌘↩ and ⌘Enter send", of(kVK_Return, cmd) == .send && of(kVK_ANSI_KeypadEnter, cmd) == .send)
+    check("ComposeKey: ⌘← ⌘→ go to the line's start and end, ⌘↑ ⌘↓ to the text's",
+          of(kVK_LeftArrow, cmd.union(arrow)) == .lineStart && of(kVK_RightArrow, cmd.union(arrow)) == .lineEnd
+            && of(kVK_UpArrow, cmd.union(arrow)) == .documentStart && of(kVK_DownArrow, cmd.union(arrow)) == .documentEnd)
+    let editing = [kVK_ANSI_C, kVK_ANSI_V, kVK_ANSI_X, kVK_ANSI_A, kVK_ANSI_Z, kVK_ANSI_W, kVK_Delete, kVK_Tab, kVK_Space]
+    check("ComposeKey: every other ⌘ key does nothing (⌘C ⌘V ⌘X ⌘A ⌘Z ⌘⇧Z ⌘⌥V ⌘⌫ ⌘Tab ⌘Space)",
+          editing.allSatisfy { of($0, cmd) == .ignore } && of(kVK_ANSI_Z, cmd.union(shift)) == .ignore
+            && of(kVK_ANSI_V, cmd.union(opt)) == .ignore)
+    check("ComposeKey: every ⌃ key does nothing, ⌘ or not",
+          [kVK_ANSI_A, kVK_ANSI_V, kVK_Return, kVK_Tab, kVK_Delete, kVK_LeftArrow, kVK_Escape].allSatisfy {
+              of($0, ctrl) == .ignore && of($0, ctrl.union(cmd)) == .ignore
+          })
+    var named = true
+    for f in [none, shift, opt, shift.union(opt), .maskAlphaShift] {
+        named = named && of(kVK_Return, f) == .newline && of(kVK_ANSI_KeypadEnter, f) == .newline
+            && of(kVK_Delete, f) == .deleteBackward && of(kVK_ForwardDelete, f.union(arrow)) == .deleteForward
+            && of(kVK_LeftArrow, f.union(arrow)) == .left && of(kVK_RightArrow, f.union(arrow)) == .right
+            && of(kVK_UpArrow, f.union(arrow)) == .up && of(kVK_DownArrow, f.union(arrow)) == .down
+            && of(kVK_Tab, f) == .otherField && of(kVK_Escape, f) == .cancel
+    }
+    check("ComposeKey: named keys go by key code, whatever ⇧, ⌥ or Caps Lock is held", named)
+    check("ComposeKey: letters, digits, space, the dead keys and the function keys are text for KeyTranslator",
+          [kVK_ANSI_A, kVK_ANSI_4, kVK_Space, kVK_ANSI_Equal, kVK_ANSI_RightBracket, kVK_Home, kVK_F5].allSatisfy {
+              of($0, none) == .text && of($0, shift) == .text && of($0, opt) == .text && of($0, .maskAlphaShift) == .text
+          })
 }
 
 func caseEditModel() {
@@ -820,6 +854,21 @@ func caseKeyTranslator() {
     nb.reset()
     let plain = nb.translate(keyCode: 14, flags: none) { Array($0) }
     check("KeyTranslator: reset drops the dead key, so e stays e", plain == Array("e".utf16) && !nb.hasDeadKey)
+    // The state keeps upper bits after ´ e (input spike): nothing waits then.
+    _ = typed([(24, none), (14, none)])
+    check("KeyTranslator: nothing waits after a finished composition (´ then e)", !nb.hasDeadKey)
+    // A held key repeats as the auto-key action: a held ´ stays one waiting
+    // accent, a held letter repeats it.
+    nb.reset()
+    var held: [UInt16] = []
+    nb.translate(keyCode: 24, flags: none) { held += $0 }
+    for _ in 0..<3 { nb.translate(keyCode: 24, flags: none, isRepeat: true) { held += $0 } }
+    let waits = nb.hasDeadKey
+    nb.translate(keyCode: 14, flags: none) { held += $0 }
+    nb.translate(keyCode: 0, flags: none) { held += $0 }
+    for _ in 0..<2 { nb.translate(keyCode: 0, flags: none, isRepeat: true) { held += $0 } }
+    check("KeyTranslator: a held ´ waits as one accent (´ held, e gives é); a held a repeats a",
+          waits && held == Array("éaaa".utf16), held.map { String($0, radix: 16) }.joined(separator: " "))
     // A layout switch between a dead key and the next key (the input menu,
     // ⌃Space): the state Norwegian ¨ leaves makes U.S. e give è.
     let usFilter = [kTISPropertyInputSourceID as String: "com.apple.keylayout.US"] as CFDictionary

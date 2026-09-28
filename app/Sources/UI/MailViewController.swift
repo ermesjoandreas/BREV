@@ -31,8 +31,8 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     /// A human pressed Lås.
     var onLock: () -> Void = {}
     /// A human asked for a new letter to the selected contact (Nytt brev,
-    /// ⌘N). Set by the compose sheet's owner (WP8); while nil, Nytt brev is
-    /// disabled.
+    /// ⌘N): AppDelegate shows the compose sheet. While nil, Nytt brev is
+    /// disabled; while a sheet is up, it does nothing.
     var onNewLetter: ((ContactItem) -> Void)? {
         didSet { updateButtons() }
     }
@@ -228,6 +228,15 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         letters.scroll(origin)
     }
 
+    /// A letter to `contact` started `thread`: if that contact is still
+    /// selected, its threads are read again with the new one selected, and
+    /// its letter shows from the top.
+    func showSent(thread: Data, contact: Data) {
+        guard selectedContact?.id == contact else { return }
+        showThreads(keeping: thread)
+        letters.scroll(.zero)
+    }
+
     private var selectedContact: ContactItem? {
         contactList.selected.flatMap { contacts.indices.contains($0) ? contacts[$0] : nil }
     }
@@ -275,8 +284,9 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
 
     // MARK: - Actions (HumanButton: human input only; ⌘N from the menu)
 
+    /// One compose sheet at a time (⌘N can reach this while the sheet is key).
     @objc func newLetter(_ sender: Any?) {
-        guard let contact = selectedContact, let onNewLetter else { return }
+        guard !composing, let contact = selectedContact, let onNewLetter else { return }
         onNewLetter(contact)
     }
 
@@ -285,8 +295,12 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(newLetter(_:)) { return canWriteNewLetter }
+        if menuItem.action == #selector(newLetter(_:)) { return canWriteNewLetter && !composing }
         return true
+    }
+
+    private var composing: Bool {
+        view.window?.attachedSheet != nil
     }
 
     private var canWriteNewLetter: Bool {

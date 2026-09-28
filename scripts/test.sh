@@ -288,7 +288,7 @@ if [[ "$DARWIN" == yes ]]; then
   }
   run_harness "case 1 (units)" scribble units
   run_harness "case 2 (InputFilter, LockState, UnlockFailure, LaunchGuard)" scribble shell
-  run_harness "case 2 (EditModel, KeyTranslator)" scribble compose
+  run_harness "case 2 (EditModel, ComposeKey, KeyTranslator)" scribble compose
   run_harness "case 3 (DEK hand-off, ECIES needles)" scribble dek
   for n in 64 200 4096 65000; do
     run_harness "case 4 (content path, $n units)" scribble content "$n"

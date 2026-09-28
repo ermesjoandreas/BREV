@@ -5,26 +5,37 @@
 // the stores live in a temporary folder and the DEK is wrapped to a software
 // P-256 key, as in the CLI harness (app/Tests). It sends fake, non-secret
 // letters to Ekko and Speil, lets them echo, and shows the real
-// MailViewController in a hardened MainWindow without activating itself.
-// Every letter carries the test marker of app/Tests/scan.c, built from its
-// XORed bytes, so no String copy of it exists here.
+// MailViewController in a hardened MainWindow without activating itself
+// (with --compose it asks to be active). Every letter carries the test
+// marker of app/Tests/scan.c, built from its XORed bytes, so no String copy
+// of it exists here.
 //
 // Timeline: ready → (hold) → checks, a wider window, a divider dragged right
 // and a narrow window, a posted ↓ key, the letter pane scrolled through and
 // then down, a new letter → the sync timer shows its echo → the real lock
 // sequence → exit.
+// With --compose: Nytt brev opens the real compose sheet, wired as
+// AppDelegate wires it, and the marker is typed into the subject and the
+// body by key-downs made here with source PID 0, delivered as AppKit
+// delivers a real key (key codes found with KeyTranslator). The ways in
+// that must fail are tried (events with a source PID, ⌘C ⌘X ⌘A ⌘V ⌘Z, ⌃V,
+// insertText, a click made in code, an AX press, and with --post keys
+// posted to this process), and secure event input is checked → ready →
+// (hold) → ⌘↩ sends → its echo → Escape discards a second letter → the lock
+// sequence discards a third → exit.
 // Output is check names and counts only; "ready pid=<n> window=<n>
 // frame=<x,y,w,h>" tells a driver when to run an AX dump, AX presses or a
 // capture against the window during the hold, and the "rect <name>
 // <x,y,w,h>" lines after it (global points, origin top left) name the
-// three panes and, with --control, the backdrop and the control window.
+// three panes, with --control the backdrop and the control window, and
+// with --compose the recipient, subject and body fields.
 // SelfScan is compiled in with BREV_SELFSCAN, as in the Verify build: the
 // lock sequence runs it, and --scan counts with it. The content views draw
 // into the protected layer (ContentView, D-0034), so a capture shows their
 // panes without content, and so do the snapshots below.
 //
 // usage: ViewHost [--hold <s>] [--frame <x,y,w,h>] [--control] [--snapshot <dir>]
-//                 [--capturable] [--unprotected] [--scan] [--post]
+//                 [--capturable] [--unprotected] [--scan] [--post] [--compose]
 //   --hold <s>      seconds to wait after ready before the checks (default 3)
 //   --frame <r>     the window's frame (global points, origin top left)
 //                   instead of centred
@@ -35,18 +46,23 @@
 //   --snapshot <d>  write unlocked.png, after-sync.png and locked.png (drawn
 //                   offscreen with cacheDisplay; no screen capture)
 //   --capturable    sharingType .readOnly (the default keeps Hardening's
-//                   .none): only the protected layer keeps content out
+//                   .none), for the compose sheet too: only the protected
+//                   layer keeps content out
 //   --unprotected   preventsCapture = false on every content view's layer,
-//                   also those made later; with --capturable, the negative
-//                   control: a capture must see the fake letters
+//                   also those made later and the compose sheet's; with
+//                   --capturable, the negative control: a capture must see
+//                   the fake letters
 //   --scan          scan this process for the marker before and after the
 //                   lock, with SelfScan's needle control while the letters
 //                   are shown (run with MallocScribble=1, as Brev runs)
 //   --post          post a ↓ key to this process (CGEventPostToPid): the
-//                   input filter must drop it
+//                   input filter must drop it; with --compose, a, ⌘↩ and
+//                   Escape while the body has focus
+//   --compose       the compose sheet's timeline instead (above)
 
 import AppKit
 import AVFoundation
+import Carbon.HIToolbox
 import Security
 
 setvbuf(stdout, nil, _IOLBF, 0)
@@ -77,6 +93,7 @@ func screenRect(_ text: String) -> NSRect? {
 let frameArg = value("--frame").flatMap(screenRect)
 let scanning = args.contains("--scan")
 let posting = args.contains("--post")
+let composing = args.contains("--compose")
 
 // MARK: - Fake letters
 
@@ -320,7 +337,10 @@ check("every content view has a protected layer", !contentViews.isEmpty && conte
     $0.protectedLayer.preventsCapture && $0.protectedLayer.superlayer === $0.layer && $0.wantsUpdateLayer
 })
 // The negative control reaches the letter views a reload makes later, too.
-func unprotect() { all(ContentView.self, in: mail.view).forEach { $0.protectedLayer.preventsCapture = false } }
+func unprotect() {
+    let sheetViews = window.attachedSheet?.contentView.map { all(ContentView.self, in: $0) } ?? []
+    (all(ContentView.self, in: mail.view) + sheetViews).forEach { $0.protectedLayer.preventsCapture = false }
+}
 if unprotected {
     unprotect()
     _ = commonModeTimer(every: 0.05, unprotect)
@@ -337,20 +357,363 @@ _ = lock.state.endUnlock(generation, succeeded: true, appActive: true)
 let lists = all(SecureListView.self, in: mail.view)
 let letters = all(LetterStackView.self, in: mail.view).first!
 func shownLetters() -> Int { all(SecureTextView.self, in: letters).count }
-// The window's frame in global display coordinates (origin top left), for
-// a driver's AX hit tests.
-let screenTop = NSScreen.screens.first?.frame.maxY ?? 0
-let f = window.frame
-print("ready pid=\(getpid()) window=\(window.windowNumber) frame=\(Int(f.minX)),\(Int(screenTop - f.maxY)),\(Int(f.width)),\(Int(f.height))")
-mail.view.layoutSubtreeIfNeeded()
-for (name, v) in zip(["contacts", "threads", "letters"], [lists[0], lists[1], letters] as [NSView]) {
-    if let scroll = v.enclosingScrollView {
-        print("rect \(name) \(globalText(window.convertToScreen(scroll.convert(scroll.bounds, to: nil))))")
+
+/// Prints the ready line and the panes' rects for a driver, then calls
+/// `next` after the hold.
+func announceReady(then next: @escaping () -> Void) {
+    // The window's frame in global display coordinates (origin top left),
+    // for a driver's AX hit tests.
+    let screenTop = NSScreen.screens.first?.frame.maxY ?? 0
+    let f = window.frame
+    print("ready pid=\(getpid()) window=\(window.windowNumber) frame=\(Int(f.minX)),\(Int(screenTop - f.maxY)),\(Int(f.width)),\(Int(f.height))")
+    mail.view.layoutSubtreeIfNeeded()
+    for (name, v) in zip(["contacts", "threads", "letters"], [lists[0], lists[1], letters] as [NSView]) {
+        if let scroll = v.enclosingScrollView {
+            print("rect \(name) \(globalText(window.convertToScreen(scroll.convert(scroll.bounds, to: nil))))")
+        }
+    }
+    for (name, w) in zip(["backdrop", "control"], plainWindows) { print("rect \(name) \(globalText(w.frame))") }
+    if let sheet = window.attachedSheet as? ComposeSheet {
+        for (name, v) in [("recipient", sheet.recipient), ("subject", sheet.subject), ("body", sheet.body)] as [(String, NSView)] {
+            let shown = v.enclosingScrollView ?? v
+            print("rect \(name) \(globalText(sheet.convertToScreen(shown.convert(shown.bounds, to: nil))))")
+        }
+        print("state active=\(NSApp.isActive) sheetKey=\(sheet.isKeyWindow) secureInput=\(SecureInput.isOn)"
+              + " sessionSecureInput=\(IsSecureEventInputEnabled())")
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + hold, execute: next)
+}
+
+// MARK: - The compose sheet (--compose)
+
+/// "sent" or "closed" for each compose sheet that ended.
+var composeEvents: [String] = []
+/// Secure event input is session-wide: another app's counts too.
+let secureInputBefore = IsSecureEventInputEnabled()
+
+/// The key code and flags that type each unit on the current layout, found
+/// with KeyTranslator (the view's own translator), and Return for U+000A.
+/// Single units only: no copy of the marker.
+let keyMap: [UInt16: (UInt16, CGEventFlags)] = {
+    var map: [UInt16: (UInt16, CGEventFlags)] = [0x0A: (36, [])]
+    guard let t = KeyTranslator(.current) else { return map }
+    for f in [CGEventFlags(), .maskShift] {
+        for k in UInt16(0)..<51 {
+            t.reset()
+            t.translate(keyCode: k, flags: f) { u in
+                if u.count == 1, map[u[0]] == nil { map[u[0]] = (k, f) }
+            }
+        }
+    }
+    return map
+}()
+
+/// The current keyboard layout's input source id (not content).
+let layoutID: String = TISCopyCurrentKeyboardLayoutInputSource().flatMap { source in
+    TISGetInputSourceProperty(source.takeRetainedValue(), kTISPropertyInputSourceID)
+        .map { Unmanaged<CFString>.fromOpaque($0).takeUnretainedValue() as String }
+} ?? "none"
+
+/// A key-down made in this process as the hardware's arrives, with source
+/// PID 0; or with `pid` (a CGEvent made in a process gets that process's
+/// PID, docs/PHASE2_DESIGN.md §0).
+func hardwareKey(_ code: UInt16, _ flags: CGEventFlags = [], pid: Int64 = 0) -> NSEvent? {
+    guard let cg = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true) else { return nil }
+    cg.flags = flags
+    cg.setIntegerValueField(.eventSourceUnixProcessID, value: pid)
+    return NSEvent(cgEvent: cg)
+}
+
+/// `e` into AppKit: through BrevApplication.sendEvent when this app is
+/// active and `w` is its key window, as a real key arrives; otherwise to
+/// `w.sendEvent`, which hands it to the first responder.
+func deliver(_ e: NSEvent?, to w: NSWindow) {
+    guard let e else { return }
+    if NSApp.isActive && NSApp.keyWindow === w { NSApp.sendEvent(e) } else { w.sendEvent(e) }
+}
+
+/// Types `t` into `w`'s focused field, one key-down per unit; false if the
+/// layout has no key for one of them.
+func typeKeys(_ t: SecretText, into w: NSWindow) -> Bool {
+    for i in 0..<t.length {
+        guard let k = keyMap[t.units[i]] else { return false }
+        deliver(hardwareKey(k.0, k.1), to: w)
+    }
+    return true
+}
+
+func same(_ a: SecretText, _ b: SecretText) -> Bool {
+    a.length == b.length && (0..<a.length).allSatisfy { a.units[$0] == b.units[$0] }
+}
+
+/// Empty, and every unit of the buffer 0.
+func zeroed(_ t: SecretText) -> Bool {
+    t.length == 0 && (0..<t.maxUnits).allSatisfy { t.units[$0] == 0 }
+}
+
+/// Whether a responder from `w`'s first responder up answers `action`.
+func chainAnswers(_ w: NSWindow, _ action: Selector) -> Bool {
+    var r: NSResponder? = w.firstResponder
+    while let x = r {
+        if x.responds(to: action) { return true }
+        r = x.nextResponder
+    }
+    return false
+}
+
+func composeSheet() -> ComposeSheet? { window.attachedSheet as? ComposeSheet }
+
+/// Secure event input is on: Brev's flag, and the session's.
+func secureInputOn() -> Bool { SecureInput.isOn && IsSecureEventInputEnabled() }
+/// Secure event input is off: Brev's flag, and the session's unless another
+/// app had it on before this run.
+func secureInputOff() -> Bool { !SecureInput.isOn && (secureInputBefore || !IsSecureEventInputEnabled()) }
+
+/// The first compose sheet, once it is sent: it must be freed.
+weak var sentSheet: ComposeSheet?
+
+/// --compose: Nytt brev opens the real compose sheet on Ekko, wired as
+/// AppDelegate wires it. Keys are key-downs made here with source PID 0,
+/// delivered as AppKit delivers a real key. This app asks to be active, so
+/// that the sheet is key and secure event input can go on.
+func composeStart() {
+    print("layout \(layoutID)")
+    mail.onNewLetter = { contact in
+        let id = contact.id
+        ComposeSheet.present(on: window, to: contact, session: session) { thread in
+            composeEvents.append(thread == nil ? "closed" : "sent")
+            if let thread { mail.showSent(thread: thread, contact: id) }
+        }
+    }
+    NSApp.activate(ignoringOtherApps: true)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        guard let sheet = composeOpen() else { finish() }
+        let after = { announceReady { composeAfterHold(sheet) } }
+        guard posting else { return after() }
+        composePost(sheet, then: after)
     }
 }
-for (name, w) in zip(["backdrop", "control"], plainWindows) { print("rect \(name) \(globalText(w.frame))") }
 
-DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
+/// The sheet opens with the marker typed; everything that needs no driver.
+func composeOpen() -> ComposeSheet? {
+    if !NSApp.isActive {
+        print("skip compose: this app is not active, so keys go to the sheet's sendEvent and secure input stays off")
+    }
+    mail.newLetter(nil)
+    guard let sheet = composeSheet() else {
+        check("compose: Nytt brev opens the compose sheet", false)
+        return nil
+    }
+    check("compose: Nytt brev opens the compose sheet with the subject focused", sheet.firstResponder === sheet.subject)
+    mail.newLetter(nil)
+    check("compose: Nytt brev does nothing while the sheet is up", window.sheets.count == 1)
+    check("compose: the sheet has Hardening's settings",
+          sheet.sharingType == .none && !sheet.isRestorable && sheet.isExcludedFromWindowsMenu
+              && sheet.tabbingMode == .disallowed)
+    if capturable { sheet.sharingType = .readOnly }
+    let ekkoName = Array("Ekko".utf16)
+    check("compose: the recipient is the contact's name",
+          sheet.recipient.name.map { n in n.length == 4 && (0..<4).allSatisfy { n.units[$0] == ekkoName[$0] } } ?? false)
+    checkOpaque("SecureComposeView", sheet.body)
+    checkOpaque("RecipientView", sheet.recipient)
+    let f = sheet.body
+    var off = [f.autocorrectionType, f.spellCheckingType, f.grammarCheckingType, f.smartQuotesType,
+               f.smartDashesType, f.smartInsertDeleteType, f.textReplacementType, f.dataDetectionType,
+               f.linkDetectionType, f.textCompletionType, f.inlinePredictionType].allSatisfy { $0 == .no }
+    if #available(macOS 15.0, *) { off = off && f.writingToolsBehavior == .none && f.mathExpressionCompletionType == .no }
+    if #available(macOS 15.2, *) { off = off && f.writingToolsCoordinator == nil && sheet.subject.writingToolsCoordinator == nil }
+    check("compose: every text input trait off, Writing Tools none, no coordinator, no input context, no Touch Bar",
+          off && f.inputContext == nil && sheet.subject.inputContext == nil && f.makeTouchBar() == nil)
+    let edits = ["copy:", "cut:", "paste:", "pasteAsPlainText:", "selectAll:", "startSpeaking:"]
+    check("compose: no responder from a field up answers " + edits.joined(separator: " "),
+          edits.allSatisfy { !chainAnswers(sheet, NSSelectorFromString($0)) })
+
+    // Typing: the subject, Tab, the body, through keyDown and KeyTranslator.
+    let norwegian = layoutID == "com.apple.keylayout.Norwegian"
+    if !norwegian { print("skip compose: the layout is \(layoutID); the æøå and dead-key checks need Norwegian") }
+    let subject = fake(["Hei ", nil]), body = fake(norwegian ? ["Kjære deg,\n\n", nil, " æøå\nHilsen"] : ["Hei,\n\n", nil])
+    defer { subject.wipe(); body.wipe() }
+    let typedSubject = typeKeys(subject, into: sheet)
+    deliver(hardwareKey(48), to: sheet)
+    let tabbed = sheet.firstResponder === sheet.body
+    let typedBody = typeKeys(body, into: sheet)
+    check("compose: keys type the subject, Tab goes to the body, keys type the body",
+          typedSubject && tabbed && typedBody && same(sheet.subject.model.text, subject)
+              && same(sheet.body.model.text, body))
+    if norwegian {
+        deliver(hardwareKey(24), to: sheet)   // ´, then Delete
+        deliver(hardwareKey(51), to: sheet)
+        let dropped = same(sheet.body.model.text, body)
+        deliver(hardwareKey(24), to: sheet)   // ´, then e
+        deliver(hardwareKey(14), to: sheet)
+        let b = sheet.body.model.text
+        let acute = b.length == body.length + 1 && b.units[b.length - 1] == 0xE9
+        deliver(hardwareKey(51), to: sheet)
+        check("compose: ´ then Delete drops only the accent; ´ then e gives é, and Delete removes it",
+              dropped && acute && same(sheet.body.model.text, body))
+    }
+    if NSApp.isActive && sheet.isKeyWindow {
+        check("compose: secure event input is on while a field has focus in the key sheet", secureInputOn())
+        check("compose: no text input context is current while a field has focus", NSTextInputContext.current == nil)
+        _ = sheet.makeFirstResponder(nil)
+        let offWithoutField = secureInputOff()
+        _ = sheet.makeFirstResponder(sheet.body)
+        check("compose: secure event input goes off when no field has focus, and on again with the body",
+              offWithoutField && secureInputOn())
+    }
+
+    // No other way in: events made here that keep this process's PID (the
+    // app's filter, and the view's own check when the window gets them
+    // directly), ⌘C ⌘X ⌘A ⌘V ⌘Z and ⌃V, insertText up the responder chain,
+    // and the pasteboard.
+    let pasteboard = NSPasteboard.general.changeCount
+    deliver(hardwareKey(0, pid: Int64(getpid())), to: sheet)
+    sheet.sendEvent(hardwareKey(0, pid: Int64(getpid()))!)
+    sheet.sendEvent(hardwareKey(0, pid: 1)!)
+    for k: UInt16 in [8, 7, 0, 9, 6] { deliver(hardwareKey(k, .maskCommand), to: sheet) }
+    deliver(hardwareKey(9, .maskControl), to: sheet)
+    sheet.body.insertText("x")
+    _ = sheet.firstResponder?.tryToPerform(#selector(NSResponder.insertText(_:)), with: "x")
+    check("compose: nothing else types: events with a source PID, ⌘C ⌘X ⌘A ⌘V ⌘Z, ⌃V, insertText; pasteboard untouched",
+          same(sheet.subject.model.text, subject) && same(sheet.body.model.text, body)
+              && NSPasteboard.general.changeCount == pasteboard)
+
+    // Send refuses what no human did: a click made in code, an AX press.
+    sheet.sendButton?.performClick(nil)
+    let pressed = sheet.sendButton?.accessibilityPerformPress() ?? true
+    check("compose: Send refuses a click made in code and an AX press",
+          !pressed && composeSheet() === sheet && composeEvents.isEmpty && sheet.body.model.text.length == body.length)
+    return sheet
+}
+
+/// --post: keys posted to this process (CGEventPostToPid) while the body
+/// has focus: a, ⌘↩ and Escape. Nothing may type, send or close. That they
+/// arrived and were dropped shows in the log (BrevApplication:
+/// "dropped synthetic 10 pid=<this process>").
+func composePost(_ sheet: ComposeSheet, then next: @escaping () -> Void) {
+    guard CGPreflightPostEventAccess() else {
+        print("skip --post: this process may not post events")
+        return next()
+    }
+    let length = (sheet.subject.model.text.length, sheet.body.model.text.length)
+    let keys: [(UInt16, CGEventFlags)] = [(0, []), (36, .maskCommand), (53, [])]
+    for (k, f) in keys {
+        for down in [true, false] {
+            guard let e = CGEvent(keyboardEventSource: nil, virtualKey: k, keyDown: down) else { continue }
+            e.flags = f
+            e.postToPid(getpid())
+        }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+        check("compose: posted a, ⌘↩ and Escape did nothing (no text, no send, no close)",
+              composeSheet() === sheet && composeEvents.isEmpty
+                  && (sheet.subject.model.text.length, sheet.body.model.text.length) == length)
+        next()
+    }
+}
+
+/// After the hold: the driver changed nothing; the fields are pixels in
+/// the protected layer; ⌘↩ sends; the echo arrives.
+func composeAfterHold(_ sheet: ComposeSheet) {
+    check("compose: the hold changed nothing (a driver's AX dump and presses): no send, no close",
+          composeSheet() === sheet && composeEvents.isEmpty && sheet.body.model.text.length > 0)
+    let wanted = NSApp.isActive && sheet.isKeyWindow && sheet.firstResponder === sheet.body
+    check("compose: secure event input is on exactly while a field has focus in the key sheet of the active app",
+          wanted ? secureInputOn() : secureInputOff(),
+          "active=\(NSApp.isActive) key=\(sheet.isKeyWindow) on=\(SecureInput.isOn)")
+    let views: [ContentView] = [sheet.recipient, sheet.subject, sheet.body]
+    check("compose: the recipient, subject and body are pixels in their buffers and on their layers",
+          views.allSatisfy { $0.pool.contains(where: hasPixels) && showsPixels($0) })
+    if let rep = sheet.body.bitmapImageRepForCachingDisplay(in: sheet.body.visibleRect) {
+        sheet.body.cacheDisplay(in: sheet.body.visibleRect, to: rep)
+        let data = rep.bitmapData.map { UnsafeBufferPointer(start: $0, count: rep.bytesPerPlane) }
+        check("compose: cacheDisplay of the body draws nothing", data.map { !$0.contains { $0 != 0 } } ?? false)
+    }
+    if scanning {
+        let h = SelfScan.scan()
+        check("compose: the typed marker is in memory (positive control)", h.u16 > 0, "\(h)")
+    }
+    let threads = lists[1].count
+    let buffers = views.flatMap { $0.pool }
+    deliver(hardwareKey(36, .maskCommand), to: sheet)
+    check("compose: ⌘↩ sends: the sheet closes, the new thread is selected and its letter shown",
+          composeSheet() == nil && composeEvents == ["sent"] && lists[1].count == threads + 1
+              && lists[1].selected == 0 && shownLetters() == 1,
+          "events \(composeEvents), threads \(threads) -> \(lists[1].count), letters \(shownLetters())")
+    check("compose: after the send the recipient, subject and body are wiped, their pixels zero, secure input off",
+          sheet.recipient.name == nil && zeroed(sheet.subject.model.text) && zeroed(sheet.body.model.text)
+              && !buffers.contains(where: hasPixels) && secureInputOff() && !sheet.subject.hasFocus
+              && !sheet.body.hasFocus)
+    sentSheet = sheet
+    DispatchQueue.main.asyncAfter(deadline: .now() + MailViewController.syncInterval + 1) {
+        check("compose: the echo arrives in the new thread, which stays selected",
+              lists[1].count == threads + 1 && lists[1].selected == 0 && shownLetters() == 2)
+        composeCancelAndLock()
+    }
+}
+
+/// Escape discards a letter; the lock sequence discards another.
+func composeCancelAndLock() {
+    check("compose: a sent sheet is freed", sentSheet == nil)
+    let threads = lists[1].count
+    mail.newLetter(nil)
+    guard let second = composeSheet() else {
+        check("compose: a second sheet opens", false)
+        finish()
+    }
+    let ekkoName = Array("Ekko".utf16)
+    check("compose: the name the first sheet wiped was its own copy (the second sheet shows it again)",
+          second.recipient.name.map { n in n.length == 4 && (0..<4).allSatisfy { n.units[$0] == ekkoName[$0] } } ?? false)
+    let draft = fake(["Utkast"])
+    let typed = typeKeys(draft, into: second)
+    draft.wipe()
+    deliver(hardwareKey(53), to: second)
+    check("compose: Escape closes the sheet without sending, and wipes it",
+          typed && composeSheet() == nil && composeEvents.last == "closed" && lists[1].count == threads
+              && second.recipient.name == nil && zeroed(second.subject.model.text) && secureInputOff())
+
+    mail.newLetter(nil)
+    guard let third = composeSheet() else {
+        check("compose: a third sheet opens", false)
+        finish()
+    }
+    let body = fake(["Til låsen: ", nil])
+    deliver(hardwareKey(48), to: third)
+    let typedBody = typeKeys(body, into: third)
+    let typedRight = same(third.body.model.text, body)
+    body.wipe()
+    check("compose: the marker is typed into the third sheet's body", typedBody && typedRight)
+    let wasOn = NSApp.isActive && third.isKeyWindow ? secureInputOn() : true
+    // One display pass, so the fields hold pixels before the lock.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        let views: [ContentView] = [third.recipient, third.subject, third.body]
+        let buffers = views.flatMap { $0.pool }
+        check("before lock: the sheet's fields hold pixels (control), secure input on if active",
+              buffers.contains(where: hasPixels) && wasOn)
+        lock.lock(.manual)
+        check("lock: the compose sheet ended without sending, wiped, its pixels zero, secure input off",
+              composeSheet() == nil && composeEvents.last == "closed" && composeEvents.filter { $0 == "sent" }.count == 1
+                  && third.recipient.name == nil && zeroed(third.subject.model.text) && zeroed(third.body.model.text)
+                  && !buffers.contains(where: hasPixels) && views.allSatisfy { !$0.pool.contains(where: hasPixels) }
+                  && secureInputOff())
+        check("lock: the session is locked and the lock screen shows",
+              session.brev.isLocked() && window.root.child is NoticeViewController)
+        if scanning {
+            let h = SelfScan.scan()
+            check("after lock: no copy (UTF-8, UTF-16, glyphs), compose included", h.u8 == 0 && h.u16 == 0 && h.glyph == 0,
+                  "\(h)")
+        }
+        finish()
+    }
+}
+
+if composing {
+    composeStart()
+} else {
+    announceReady(then: mailChecks)
+}
+
+func mailChecks() {
     snapshot(mail.view, "unlocked.png")
     check("no button action ran during the hold (a driver's AX presses)", events.isEmpty, "\(events)")
     check("two contacts, the first selected", lists.count == 2 && lists[0].count == 2 && lists[0].selected == 0)

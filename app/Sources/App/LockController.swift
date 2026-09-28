@@ -94,13 +94,14 @@ final class LockController: NSObject {
         SelfScan.run(control: true)
         #endif
         // 1. New generation (an unlock in flight is discarded); timers
-        //    stop; an open menu closes.
+        //    stop; secure event input off; an open menu closes.
         let wasUnlocked = state.lock()
         idleTimer?.invalidate()
         idleTimer = nil
+        SecureInput.disable()
         NSApp.mainMenu?.cancelTracking()
-        // 2, 3. The screen wipes its content, including a compose sheet's,
-        //    and every sheet ends. Every content view zeroes its pixel
+        // 2, 3. The screen wipes its content, a compose sheet wipes its
+        //    own, and every sheet ends. Every content view zeroes its pixel
         //    buffers in place and shows a blank frame (D-0034).
         window?.root.wipeContent()
         ContentView.blankAll()

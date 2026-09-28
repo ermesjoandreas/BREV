@@ -207,12 +207,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The unlocked screen: contacts, threads and letters, and the sync
-    /// timer (docs/PHASE2_DESIGN.md §7.2). Nytt brev stays disabled until
-    /// the compose sheet (WP8) sets `onNewLetter`.
+    /// timer (docs/PHASE2_DESIGN.md §7.2). Nytt brev opens the compose sheet
+    /// on the main window (§7.3); after a send the mail screen selects the
+    /// new thread.
     private func showMail() {
         guard let session else { return }
         let mail = MailViewController(session: session)
         mail.onLock = { [weak self] in self?.lock.lockNow(nil) }
+        mail.onNewLetter = { [weak self, weak mail] contact in
+            guard let window = self?.mainWindow, let session = self?.session else { return }
+            let id = contact.id
+            ComposeSheet.present(on: window, to: contact, session: session) { thread in
+                if let thread { mail?.showSent(thread: thread, contact: id) }
+            }
+        }
         present(mail)
         mail.start()
     }
