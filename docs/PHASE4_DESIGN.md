@@ -408,3 +408,15 @@ Numbered after D-0068. **Collision:** DECISIONS.md reserves the numbers after D-
 5. **Does a requester learn a decline?** **Recommended: no** (built as uniform 202; letters show «ikke godtatt ennå»). Alternative: tell the requester.
 6. **Removing or blocking an approved contact.** Not in §5; without it an approval, or a stolen invite code, cannot be undone in Phase 4. (a) Defer to Phase 5. (b) Add *Blokker* now: one relay call sets `links(me, them)` declined, a sealed local flag blocks sending and receiving; one endpoint, one flag, one button, two tests. **Recommended: (b)**, because the invite code is a bearer secret on the general pasteboard and same-user agents are in scope (§2).
 7. **Touch ID to create an invite?** (a) No: one `HumanButton` click; the invitee's registration is signed and the inviter checks the invitee's tag. (b) Yes: one prompt per invite, and the relay keeps the inviter's signature on the graph edge. **Recommended: (a).**
+
+## Owner answers (2026-09-28)
+
+Yes to all seven recommendations:
+1. Phase order (b): Phase 4 WP0–WP2 (docs, brev-proto, relay) now on branch `claude/phase4`; WP3 onward after the Phase 3 DoD run (Phase 3 WP6) is signed off.
+2. A contact request carries no text (address and safety code only); a short note may come later.
+3. Limits per identity per UTC day: 50 letters, 10 requests, 3 invites made; 5 open invites; 16 pending requests per recipient; invites live 7 days. Relay flags.
+4. The relay keeps the approval graph; CLAUDE.md §2's local-relay line covers Phases 3 and 4.
+5. A requester is not told about a decline (uniform 202; letters show «ikke godtatt ennå»).
+6. *Blokker* is added now: one relay endpoint (links set to declined), a sealed local flag that blocks sending and receiving, one button, one relay test and one brev-mail test.
+7. Creating an invite needs one human click, no Touch ID.
+Decision entries are written with Phase 4's WP6 (numbers after whatever Phase 3 WP6 writes first).
