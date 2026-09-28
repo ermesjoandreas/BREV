@@ -2652,3 +2652,431 @@ Not proven, or open until the human run or the owner decides:
 **Next:** Phase 3 (real transport) has started on its own branch. Phase 2
 closes when the human run passes, or each failure has an entry the owner
 accepts.
+
+---
+
+## Phase 3 — owner answers and the vault split (2026-09-28)
+
+Phase 3's own entries (`docs/PHASE3_DESIGN.md` §10) come with its WP6. Two
+things are recorded here first: the owner's answers, which the design plans
+as its first entry (its D-0036), and the split of brev-core into brev-vault
+and brev-mail (`docs/VAULT_SPLIT_PLAN.md`, owner answers at its end). The
+design's other entries take numbers after D-0068, in its order.
+
+### D-0065 — Owner answers to Phase 3's questions; the signing key accepted for test letters (closes D-0062)
+
+- **Date:** 2026-09-28
+- **Decision:**
+  1. **Q1, the local relay:** option (A). In Phase 3 the relay runs as the
+     user on this Mac, so any same-user program can act as the relay: edit
+     `relay.db`, take its port while it is down, or hand out its own key at
+     first contact or at a key change. This is accepted residual risk for
+     Phase 3 only, which carries test letters only; a remote relay with TLS
+     replaces it. CLAUDE.md §2 has the line since `e4f8e1a`. Option (B), the
+     relay as a hidden `_brevrelay` user, is not built: `scripts/relay.sh`
+     keeps the relay's folder in the user's Library.
+  2. **Q4, a second App ID:** approved (`e4f8e1a`'s message). WP6 may
+     register `no.brev.app.b` in team `AV26DNQ5SC` through automatic
+     signing, for Brev B in the two-instance run: its own container,
+     `.lock`, Enclave keys and wrapped DEK, in group
+     `AV26DNQ5SC.no.brev.app.b`. The fallback, a second macOS user account,
+     is not needed.
+  3. **Q2, letters from people not added** (a stranger, or a contact's new
+     key before it is accepted): dropped and acknowledged; both people add
+     each other first; Phase 4's contact requests replace this. **Q3,
+     addresses:** 3 to 32 characters of `a–z`, `0–9` and `-`, the first a
+     letter; one per identity; permanent, so only the operator's
+     `brev-relay release` frees one. Both are the design's recommendations
+     (§11), and Phase 3's WP2, WP3 and WP5 built them.
+  4. **The signing key on this Mac (D-0062):** accepted on 2026-09-28 while
+     Brev holds only test letters (`1aeccc5`). Nothing changes on this Mac;
+     real letters go only on a Mac without the team signing key. The other
+     remedy D-0062 named, the key behind a password prompt, is not taken.
+     CLAUDE.md §2 lists the item as accepted residual risk, so D-0062 is
+     closed.
+  5. **The §2 edits these answers caused:** the relay line (`e4f8e1a`), the
+     signing-key line (`1aeccc5`), and the two echo edits Phase 3 left for
+     the owner (`ba70411`: file substitution names only `brev.db`, and the
+     Phase 2 echo line is gone). `docs/THREAT_MODEL.md` was re-synced in
+     each.
+- **Reasoning:** Q1 is a §1 conflict. A program that acts as the relay can
+  pin its own key for a contact and read the letters to it, and comparing
+  codes, which is optional, is the only defence. So it was asked, not
+  decided (design §11). The owner accepted it because Phase 3 carries test
+  letters only, and this Mac cannot hold real letters anyway (item 4). Q4:
+  a second bundle id gives Brev B its own container and keychain group
+  without a runtime switch, which LaunchGuard would refuse (design §7). Q2
+  keeps Phase 3 free of a stranger inbox before Phase 4's approval. Q3:
+  ASCII addresses have no look-alikes and need no Unicode normalisation.
+  D-0062 had left the signing-key item open, and an open §2 item kept Phase
+  2 from being signed off (`docs/VERIFY.md`, "Failures and results").
+- **Verified:**
+  - `git show --stat e4f8e1a 1aeccc5 ba70411`: each changes only CLAUDE.md
+    §2 and the same lines of `docs/THREAT_MODEL.md` (one line each in the
+    first two, two in the third). `e4f8e1a`'s message records Q1 and Q4,
+    `1aeccc5`'s the answer to D-0062.
+  - At `60d4e1b`, 2026-09-28: CLAUDE.md §1–§2, extracted with `awk`, diffed
+    against `docs/THREAT_MODEL.md`: identical but for one trailing blank
+    line of the extraction.
+  - Q2 and Q3 in the code: `strangers_are_dropped_and_acked` (brev-mail
+    `tests/phase3.rs`), `register_rules` and `release_frees_an_address`
+    (brev-relay `tests/relay.rs`) pass in `scripts/test.sh` at `60d4e1b`.
+    The rule is `brev_proto::is_valid_address`.
+  - Not found: a commit or document with the owner's own words on Q2 and
+    Q3. They reached this entry, with Q1 and Q4, as the owner's answers in
+    the form "the design's recommendations"; the owner may correct them
+    here. The comment on `is_valid_address` still says the rule is the
+    design's recommendation "until it is answered".
+
+### D-0066 — The vault split: brev-vault and brev-mail (`docs/VAULT_SPLIT_PLAN.md`, step 1)
+
+- **Date:** 2026-09-28
+- **Decision:** (`15f3e50`; the plan is `573516e`.)
+  1. **Layout.** `core/brev-core` became two crates. `core/brev-vault` is
+     new: an rlib with no UniFFI and no network, `#![forbid(unsafe_code)]`.
+     It holds what knows nothing about mail: the store (`Vault`,
+     `VaultConfig`, `DekSlot`, `check_path`, the pragmas, the exact schema
+     check, the journal mode, file mode 0600), the DEK and its
+     `Locked`/`Unlocked` state with the single gate `Vault::dek`, column
+     encryption (`seal_column`, `open_column`, `column_ad`, `aead_seal`,
+     `aead_open`, `pad`), `Plaintext`, the chunked `Text` that a lock
+     closes (`CHUNK` = 960, with the registry of open texts), the stack
+     scrubs, the OS RNG, the padding (moved from brev-proto) and the zeroing
+     global allocator. `core/brev-mail` is a `git mv` of brev-core and keeps
+     the identity, contacts, threads and letters, the message crypto
+     (X25519, HKDF, the contact tag), the relay client, `MockTransport` and
+     the whole UniFFI surface (`ffi.rs`). `Core` wraps a `Vault`. brev-proto
+     re-exports the vault's padding with the same API. Steps 2 and 3 added
+     the vault's `clock`, `dirlock`, `launch` and `platform` modules
+     (D-0067, D-0068). `docs/ARCHITECTURE-REUSE.md` has the full map.
+  2. **Naming and the module-path rule.** The package is `brev-mail`; its
+     `[lib] name` stays `brev_core`. So the UniFFI symbols
+     (`uniffi_brev_core_*`, `ffi_brev_core_*`) and checksums,
+     `libbrev_core.a`, `uniffi.toml` (`BrevCore`, `BrevCoreFFI`), the patch
+     targets, `app/project.yml`'s archive path and the generated
+     `BrevCore.swift` keep their names, and `ping()` still answers
+     "brev-core". No `#[uniffi::export]` item and no UniFFI type left
+     `brev_core::ffi` or the crate root, because UniFFI's checksums include
+     the module path (plan R1). `core/uniffi-global.toml` maps
+     `brev_core = "brev-mail"`.
+  3. **`VaultConfig`.** What a store is comes from its caller: `file_name`,
+     `application_id`, `schema`, `schema_version`. brev-mail's `MAIL` is
+     `brev.db`, `0x42524556` ("BREV"), its schema, version 3 at the split
+     (4 since D-0068). The Rust `Core` API still takes a full path; the FFI
+     builds it with `MAIL.path_in(dir)`.
+  4. **Features.** brev-vault: `zeroing-allocator` (the
+     `#[global_allocator]`), `launch-guard` (D-0067) and `test-hooks` (test
+     counters and accessors); the first two by default. brev-mail takes the
+     vault with `default-features = false, features = ["zeroing-allocator"]`
+     and has `launch-guard` (default, D-0067), `test-hooks`
+     (`MockTransport` and the vault's hooks; owner answer Q5; its own tests
+     turn it on through a dev-dependency on the crate itself) and
+     `allow-software-keys` (D-0068). brev-proto takes the vault with no
+     features, so the relay has no zeroing allocator.
+  5. **Dependency whitelist.** `scripts/check-vault-deps.sh`, run by
+     `scripts/test.sh`: with every feature on, each direct normal dependency
+     of brev-vault is one of chacha20poly1305, poly1305, rand, rusqlite,
+     thiserror, zeroize and zeroizing-alloc, and its whole normal graph has
+     no reqwest, hyper, tokio, axum, p256, x25519-dalek, curve25519-dalek,
+     hkdf, serde, uniffi or brev-proto. The control runs the same check on
+     brev-mail and must find reqwest. No new dependency: all of these were
+     in CLAUDE.md §4 and in `Cargo.lock` already.
+  6. **Test code stays out of the app.** `scripts/gen-bindings.sh` fails if
+     the app's archive has a `MockTransport`, `live_plaintexts` or
+     `_for_test` symbol, and `scripts/test.sh` checks that the same pattern
+     finds them in a test build.
+  7. **No behaviour change.** Swift, the bindings and the tests stayed as
+     they were, apart from the test lines the plan lists (§7, accepted by
+     the owner as Q1) and those forced by moved code: a test that built a
+     store through the private `init` lets the vault create the file; the
+     registry of open texts is read through a test accessor; the renames
+     `encrypt` → `aead_seal` and `brev_proto::MAX_PADDED` →
+     `crate::padding::MAX_PADDED`.
+  8. **Line counts** (`wc -l` of `src/`; "without tests" leaves out the
+     `tests.rs` files, `test_keys.rs` and the inline
+     `#[cfg(test)] mod tests` blocks):
+
+     | Crate | at `15f3e50` (step 1) | at `60d4e1b` (step 3) |
+     |---|---|---|
+     | brev-vault | 937 (789 without tests) | 2 233 (1 429) |
+     | brev-mail | 4 500 (2 579) | 5 208 (2 893) |
+
+     brev-core before the split (`3ef953b`) had 4 860 (2 870). brev-mail's
+     integration tests (`tests/`) are another 1 972 lines at `15f3e50` and
+     2 029 at `60d4e1b`. The vault is the smaller half with and without
+     tests (plan §9, step 1 check 6).
+- **Reasoning:** The map in ARCHITECTURE-REUSE.md (`a04ca0f`) showed a part
+  of brev-core that knows nothing about mail. Split out, it is a store that
+  a second app can use without UniFFI, the relay client, P-256 or Brev's
+  schema, and the crate that holds the DEK has no network and no FFI in its
+  graph. Keeping the library name keeps Swift, the bindings pipeline and
+  every tool unchanged. `VaultConfig`, not constants in the vault, because
+  a store's identity (file name, magic, schema) is the caller's. The
+  allocator as a feature keeps it out of the relay.
+- **Verified:**
+  - Step 1 at `15f3e50` (its commit message; the plan's §9 step 1 checks):
+    `BrevCore.swift`, `BrevCoreFFI.h` and `BrevCoreFFI.modulemap` equal to
+    the baseline built at `3ef953b` (`cmp`); the `cargo test -- --list`
+    names equal, and 105 tests passing before and after (the three
+    `Plaintext` doctests now in brev_vault); the Release app's 59 UniFFI
+    symbol names, its entitlements and its Info.plist equal to the
+    baseline, with `zeroizing_alloc5WIPER` and no test hook;
+    `scripts/test.sh` green; `tools/verify/build.sh --check` passes.
+  - Run again for this entry, 2026-09-28: `scripts/gen-bindings.sh` in
+    `git archive` copies of `3ef953b` and `15f3e50`, each in its own scratch
+    folder and target dir. `cmp` finds `BrevCore.swift` (71 518 bytes),
+    `BrevCoreFFI.h` (32 500) and `BrevCoreFFI.modulemap` (132) identical;
+    `BrevCore.swift` has the same SHA-256 (`33af68d6…209af9`) in both.
+  - At `60d4e1b`: `grep -rn uniffi core/brev-vault` finds nothing;
+    `cargo tree -p brev-relay -e features | grep -c zeroing-allocator`
+    gives 0, and `zeroizing-alloc` is not in the relay's graph, although
+    brev-vault is. `scripts/test.sh` exits 0 in 3 min 9 s: `check-vault-deps.sh`
+    prints "only whitelisted dependencies (control: brev-mail fails the
+    same check)", clippy passes with the default and with all features, the
+    release scrub run says `2 passed`, the app archive has no test hook,
+    and 136 Rust tests pass; `cargo audit` is clean over 210 crates and
+    1 273 advisories. The Release binary from `scripts/build.sh` has
+    `zeroizing_alloc5WIPER` once and no `MockTransport`, `live_plaintexts`
+    or `_for_test` symbol.
+  - Not tested: the declared minimum Rust with an older toolchain; only
+    1.91.1 is installed (as in D-0015).
+
+### D-0067 — Five checks moved into Rust: folder lock, modes, launch guard, two-step unlock, idle deadline (plan step 2)
+
+- **Date:** 2026-09-28
+- **Decision:** (`64a484c`.) brev-vault now enforces five checks that only
+  Swift made before:
+  1. **One store per folder.** The vault opens the store's folder and holds
+     a flock on it (`File::try_lock`, in `DirLock`) for as long as the
+     `Vault` lives: another open store in it gives `Busy`, any other failure
+     `Io`. The folder is locked, not the file: a flock on the database file
+     broke SQLite's own locking (both connections got `DatabaseBusy` in the
+     plan's re-run), and a lock file would add a name that the tests and
+     Swift's reset list would see. Swift's `.lock` (D-0036) stays.
+  2. **Modes.** The folder must be 0700 (checked on the opened folder,
+     before the lock) and the file 0600 (after `verify_store`, before the
+     journal mode is written): `Unsafe` otherwise. A foreign 0644 file still
+     gives `Corrupt`, and nothing is written to a file whose mode is
+     unchecked. `open` runs `check_path`, the launch check, the folder
+     (open, mode, lock), connect, `verify_store`, the file mode, then the
+     journal mode. `create` runs mail's `Malformed` checks, the launch
+     check, the folder, `create_new` with 0600, then as before; a failed
+     create removes the file while the folder is still locked.
+  3. **Launch guard** (feature `launch-guard`: in brev-mail's default, so
+     in the app's archive; off in `cargo test --no-default-features` and in
+     the test archive). `create`, `open` and `unlock` give `Unsafe` if a
+     variable's name starts with `DYLD_` or `MallocScribble` is not exactly
+     `1`. `unlock` copies and zeroes the caller's DEK first and stays
+     locked. Swift's LaunchGuard strips `DYLD_*` too and re-executes once,
+     and a Debug build logs that it did (owner answer Q2 and its addition).
+  4. **Two-step unlock.** `unlock` and `create` leave the vault `Armed`: the
+     DEK is loaded, but the gate gives `Locked` until `confirm_active()`
+     comes within `CONFIRM_WINDOW` (2 s). Late, it locks and gives `Locked`.
+     Swift confirms in `LockController.endUnlock`, after its own post-unlock
+     rule passed (D-0037); a refusal runs the lock sequence with the new
+     `LockReason.unlockExpired`.
+  5. **Idle deadline.** `Active` lasts `idle_secs` without
+     `note_activity()`; the FFI takes it in `unlock(dek, idle_secs)`, 1 to
+     3600, `Malformed` otherwise. Swift passes `LockState.rustIdleSecs` =
+     320 (owner answer Q3: its own 300 s, plus its 15 s poll, plus 5 s),
+     keeps locking at 300 s, and also locks when `isLocked()` is true while
+     it thinks it is unlocked. `BrevApplication` calls `noteActivity()` at
+     most once a second, and only for input that passed the synthetic-event
+     filter, so posted events cannot keep Rust unlocked.
+  6. **The clock and its timer.** A deadline is kept on two clocks:
+     `Instant`, which on Apple is `CLOCK_UPTIME_RAW` and stops while the Mac
+     sleeps, and the wall clock, which counts only while it has not gone
+     back since the deadline was set. While a deadline is set, the thread
+     `brev-vault-timer` waits at most 1 s at a time, so a deadline the wall
+     clock passed during sleep is seen within a second of waking; while
+     locked, it waits until it is woken. It never holds the clock's mutex
+     while it takes the
+     session's (lock order: session, then clock), and wipes through
+     `Holder::lock_all` if the deadline has passed. `Brev::session()` makes
+     the same check first, so whoever takes the mutex first after a deadline
+     wipes and moves the epoch before anything else runs. The timer holds
+     only a `Weak`. `Brev`'s fields are ordered timer, session, relay
+     client, so dropping `Brev` joins the timer, then drops the session and
+     its flock, before `drop` returns.
+  7. **Errors and FFI.** `Busy` and `Unsafe` are appended after `Refused` in
+     the vault's `Error`, mail's `Error` and `BrevError`, so no index moves.
+     At launch, AppDelegate maps `Unsafe` from `Session.open` to
+     `launch.error.unsafe`, and `Busy` to the second-instance path. The
+     bindings gain `unlock(dek:idleSecs:)`, `confirmActive`,
+     `noteActivity`, `Busy` and `Unsafe`, and nothing else.
+  8. **Builds.** Workspace `rust-version` 1.89 (`File::try_lock`). Rust tests
+     run with `--no-default-features`, plus `cargo test -p brev-vault
+     --features launch-guard --lib launch`. The Swift harness, the lock
+     probe and the view host run without `MallocScribble`, so they link a
+     test archive (`core/target/test-archive`, no default features; with
+     `allow-software-keys` since D-0068). `TouchIDProbe` (V51) keeps the
+     app's archive, guard included. `scripts/test.sh` checks that the guard
+     is in the app archive's feature graph and not in the test archive's,
+     and that the feature has exactly 2 cfg sites.
+- **Reasoning:** ARCHITECTURE-REUSE.md §3 (`a04ca0f`) listed the single
+  instance, the folder mode, launch hygiene, the post-unlock rule and the
+  idle lock as Swift's alone: a Swift bug left Rust open, and Rust could
+  not tell when a lock was missing. Now Rust refuses and wipes on its own,
+  and any app built on the vault gets the same. The limits, from the plan's
+  §10: Rust cannot blank the screen, so Swift's 300 s lock stays first and
+  Rust's 320 s is the backstop, and Swift's 15 s poll blanks the screen if
+  Rust locked first (R3). The 2 s window runs from Rust's `unlock` to
+  main's `endUnlock`, with onboarding's keychain writes inside it (R4). A
+  `Brev` still alive after a reset (a `sync` in flight) makes onboarding's
+  `create` `Busy` for up to 15 s (R9).
+- **Verified:**
+  - Step 2 at `64a484c` (the plan's §9 step 2 checks, as that step
+    reported them): `cargo test --workspace --no-default-features` and the
+    guard-on run pass; the diff of `BrevCore.swift` against step 1's stays
+    within the five FFI changes above; `scripts/test.sh` is green.
+  - At `60d4e1b`, in `scripts/test.sh` (exit 0): brev-vault's
+    `a_directory_holds_one_open_store`,
+    `directory_must_be_0700_and_the_file_0600`,
+    `unlock_is_armed_until_confirmed`, `a_late_confirm_locks_and_wipes`,
+    `the_timer_wipes_an_unconfirmed_unlock`,
+    `the_timer_wipes_when_idle_and_activity_postpones_it`,
+    `activity_while_armed_does_nothing`,
+    `the_timer_waits_for_a_held_holder`,
+    `dropping_the_timer_joins_its_thread`, `armed_confirms_only_in_time`,
+    `idle_deadline_and_activity`,
+    `wall_clock_catches_sleep_but_not_going_back`,
+    `a_deadline_too_far_passes_at_once` and
+    `launch_check_needs_scribble_and_no_dyld`; the guard-on run's
+    `launch_guard_refuses_this_process` (cargo sets
+    `DYLD_FALLBACK_LIBRARY_PATH`); brev-mail's
+    `one_session_per_folder_and_drop_frees_it` (a second `open` and a
+    `create` in the folder give `Busy`; 100 rounds of `drop` then `open`
+    never do), `folder_and_file_modes_are_checked`,
+    `unlock_is_armed_until_confirmed`,
+    `an_unconfirmed_unlock_is_wiped_after_2_s`,
+    `idle_wipes_and_activity_postpones_it` and
+    `a_passed_deadline_moves_the_epoch_before_anything_runs`. The lock
+    probe's 26 checks pass, among them "an unlock opens Rust only once it is
+    confirmed"; it noted 0 ms from `Brev.unlock` to the completion on main,
+    of the 2 000 ms window.
+  - The Release build from `scripts/build.sh` at `60d4e1b`, launched with
+    `open` and ended with SIGTERM (`docs/VERIFY-RESULTS.md`): with
+    `MallocScribble=0` and with `NSZombieEnabled=YES` it re-executed once
+    (`launch unsafe: environment; re-executing`; `ps -wwE` then shows
+    `MallocScribble=1` and `BREV_LAUNCH_CLEANED=1`) and reached `route
+    onboarding`. A second instance (`open -n`) logged `second instance` and
+    exited. With `DYLD_BREV_TEST=1`, `ps -wwE` still lists the variable, but
+    nothing re-executed: dyld takes `DYLD_*` out of the environment of a
+    process with the hardened runtime, so in Release neither LaunchGuard nor
+    Rust ever sees one. Checked with a small probe, ad-hoc signed once with
+    `-o runtime` (neither `ProcessInfo` nor `getenv` saw `DYLD_BREV_TEST`)
+    and once without (both saw it). The stripping of owner answer Q2
+    therefore acts in Debug builds, which have no hardened runtime (D-0013).
+  - Not yet run: the flock inside the App Sandbox container with a real
+    store (plan R10: Brev is not installed on this Mac, so every launch
+    shows onboarding and opens no store), and the confirm window on a real
+    onboarding with Touch ID (R4). Both need the human run
+    (`docs/VERIFY-RESULTS.md`).
+
+### D-0068 — The environment class and the class-A send rule (plan step 3)
+
+- **Date:** 2026-09-28
+- **Decision:** (`60d4e1b`.)
+  1. **Classes** (brev-vault, `platform.rs`). An `EnvironmentReport` holds
+     `key_origin` (`SecureEnclave`, `Tpm`, `Software`, `Unknown`),
+     `biometric_used` and five defences: `capture_excluded`,
+     `secure_input_active`, `synthetic_input_rejected`,
+     `accessibility_opaque` and `pasteboard_disabled`. `classify` gives A
+     for a hardware key (Secure Enclave or TPM), a biometric check and all
+     five; B for the key and the check without all five; C otherwise.
+     `failed_fields` names the fields short of A, and is empty exactly for
+     A. A platform layer reports through the `Platform` trait.
+  2. **The send rule** (brev-mail). `Brev::report_environment(report)` is
+     gated, and the report is kept until the next one or any lock.
+     `prepare_send` checks it after the credentials, so a locked or
+     unregistered session still gets `Locked` or `NotFound`, and before any
+     request. Below class A it gives `BrevError::Environment { failed }`,
+     and the relay sees no request. `failed` names the report's fields short
+     of A; it is empty when no report came since the unlock. `Environment`
+     is the one `BrevError` variant that is not a unit variant. The ticket
+     and the signed letter carry the class, and `store_sent` writes it.
+  3. **Schema v4.** `messages.env_class INTEGER`, plaintext and nullable: 1
+     (A) on a letter the app sent; NULL on received letters and on sends
+     through `Core` in tests. It is not in the body's AD, so the body format
+     is unchanged, and a process that can write the file can change it; it
+     is informational, like `read` (plan R5). No migration: a v3 store opens
+     as `Corrupt` and must be reset (the plan's Q4). `padcheck` and V18
+     expect v4.
+  4. **What Swift reports** (`App/EnvironmentProbe.swift`, on main right
+     before `prepareSend`): the identity key's origin from its own
+     `kSecAttrTokenID`; Touch ID if this unlock's generation unwrapped the
+     DEK with the Secure Enclave KEK (the KEK's access control needs
+     `.biometryCurrentSet`, so the use is inferred, not read from an
+     `LAContext`); every window with `sharingType == .none` and every
+     content view's layer with `preventsCapture`; `SecureInput.isOn` and
+     `IsSecureEventInputEnabled()`; `NSApp is BrevApplication`; every
+     content view without an AX element, value, text or children; no
+     responder for `copy:`, `cut:` or `paste:`. A refusal shows
+     `compose.environment`, «Brevet ble ikke sendt: %@.», with the failed
+     checks by name, for example «opptaksvern av» (owner answer Q6's
+     addition), not the generic compose error.
+  5. **The rule is self-reported.** Rust classifies what Swift says. A
+     program that can call the FFI can send any report, so the rule catches
+     a Swift regression that turns a defence off, not an attacker. Until
+     attestation lands, CLAUDE.md §2 and `docs/THREAT_MODEL.md` carry this
+     as accepted residual risk, in the plan's words (owner addition).
+  6. **Test builds and the release guard.** brev-mail's feature
+     `allow-software-keys` lowers the threshold to C, for the test archive
+     that the harness, the lock probe and the view host link: they have
+     software keys and no Touch ID, and report `.software` as it is. The
+     feature compiles `#[used] static SOFTWARE_KEYS_MARKER =
+     *b"BREV-ALLOW-SOFTWARE-KEYS-1"` into the archive.
+     `scripts/gen-bindings.sh` fails if the app's archive holds the marker.
+     An XcodeGen pre-build phase, "Rust archive has no test features", fails
+     any app build whose linked `libbrev_core.a` holds it, in every
+     configuration (Release, Verify, Debug, and Archive from the IDE).
+     `scripts/test.sh` checks that the test archive has the marker and the
+     app's does not, and that the feature has exactly 3 cfg sites (the
+     threshold, the marker, and a test left out under the feature). This is
+     the owner's earlier addition: a build-time check fails if
+     `allow-software-keys` is on in a release build.
+- **Reasoning:** ARCHITECTURE-REUSE.md §3 (`a04ca0f`) listed every AppKit
+  defence with "Rust knows: nothing", and Rust sent a letter whatever state
+  Swift was in. Now Rust refuses to send while Swift reports a defence
+  missing, and each sent letter records the class it went out in. The owner
+  asked that the rule be described as what it is: until attestation (App
+  Attest, Phase 4), it catches Swift bugs, not attackers. The test archive
+  must send in class C, because its callers have no Secure Enclave key and
+  no Touch ID; the marker and two build-time checks keep that archive out of
+  every app build. Naming the failed checks tells the owner which defence
+  broke.
+- **Verified:**
+  - Step 3 at `60d4e1b`: the one-off proof of the Xcode phase copied the
+    test archive over the app's archive and ran `xcodebuild -configuration
+    Release` with `CODE_SIGNING_ALLOWED=NO` and a scratch derived-data
+    folder: it failed at the phase. The app's archive was restored from a
+    saved copy, and the signed Release build from `scripts/build.sh` ran the
+    phase and passed.
+  - At `60d4e1b`, in `scripts/test.sh` (exit 0): brev-vault's
+    `everything_in_place_is_class_a`, `one_defence_off_is_class_b` (each of
+    the five alone), `a_tpm_counts_as_the_secure_enclave`,
+    `a_software_or_unknown_key_or_no_biometric_is_class_c`,
+    `failed_fields_agree_with_the_class` and `rank_orders_and_code_stores`;
+    brev-mail's `prepare_send_needs_class_a` (B, C and no report give
+    `Environment` with the fields short of A, and the relay's request count
+    does not move), `may_send_compares_ranks`,
+    `the_sent_row_keeps_its_environment_class`,
+    `a_report_needs_the_gate_and_a_lock_forgets_it` and
+    `v3_store_is_refused`; test.sh's marker and cfg-site checks. The view
+    host's compose run (V69) checks the report before ⌘↩: a software key,
+    no Touch ID, and every defence in place.
+  - For this entry: `grep -aq BREV-ALLOW-SOFTWARE-KEYS` finds the marker in
+    `core/target/test-archive/release/libbrev_core.a`, and not in
+    `core/target/release/libbrev_core.a` or the Release binary. The Xcode
+    phase proven again without touching the worktree's archive: a scratch
+    copy of `app/` (sources, bindings, tests, `project.yml`,
+    entitlements), `xcodegen generate`, and the test archive at the path
+    the phase reads (`../core/target/release/libbrev_core.a`).
+    `xcodebuild -configuration Release CODE_SIGNING_ALLOWED=NO` with its own
+    derived-data folder: `** BUILD FAILED **` (exit 65), whose only error is
+    the phase's "was built with allow-software-keys (a test archive)". With
+    the app's archive copied there instead: the phase ran, and `** BUILD
+    SUCCEEDED **`.
+  - CLAUDE.md §1–§2 against `docs/THREAT_MODEL.md`: identical (D-0065).
+  - Not yet run: a letter from the real app, which needs Touch ID (V56 and
+    V57 in the human run). Only then does a real report reach class A.

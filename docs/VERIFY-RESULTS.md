@@ -1,13 +1,135 @@
-# Brev — Phase 2 verification: machine-run results (WP4)
+# Brev — verification: machine-run results
 
-These are the rows of `docs/VERIFY.md` that a machine could run on
-2026-09-28, with nobody at the Mac. D-0053 records them, with WP12's re-run
-of V1, V2, V3 (`sdef`), V21, V45, V50 and V69 (the view host; V53 in
-D-0053) at `fb6f140`. The run of the
-whole checklist with a human is still to come; this file does not replace
-it.
+The rows of `docs/VERIFY.md` that a machine could run with nobody at the
+Mac. Two runs are recorded here: the Phase 3 branch after the vault split
+(below, D-0066 to D-0068), and Phase 2's WP4 run, which D-0053 records with
+WP12's re-run of V1, V2, V3 (`sdef`), V21, V45, V50 and V69 at `fb6f140`.
+The run of the whole checklist with a human is still to come; this file
+does not replace it.
 
-## The run
+## Phase 3 branch after the vault split (`60d4e1b`)
+
+### The run
+
+- 2026-09-28, 17:05 to 17:30. macOS 26.2 (25C56), Xcode 26.2 (17C52),
+  Apple silicon (arm64), rustc 1.91.1. Nobody at the Mac.
+- App code under test: `60d4e1b` (branch `claude/phase3`: Phase 3 WP0 to
+  WP5 and the vault split, steps 1 to 3).
+- `$APP`: the Release build from `scripts/build.sh` (exit 0). `$VAPP`: the
+  Verify build from `tools/verify/build.sh` (exit 0), which also built the
+  tools into `$T` (`core/target/verify`).
+- Brev is not installed on this Mac (no wrapped-DEK item), so every launch
+  showed onboarding (`route onboarding`), and no launch opened a store.
+  Launches used `open`, as in VERIFY's setup, with
+  `log stream --level debug --predicate 'process == "Brev"'` running the
+  whole time; each launch was ended with SIGTERM (no new `Brev*` report in
+  `~/Library/Logs/DiagnosticReports` afterwards, and no Brev, view host or
+  relay process left).
+
+What the run did not do, and why:
+
+- No Touch ID, password, keychain or permission prompt, and no reads in
+  Brev's container (`$D`), as in the WP4 run below. So every row that needs
+  a store, an unlocked Brev, a letter, the compose sheet, Brev B or the
+  relay with letters waits for the human run.
+- No `capture-probe` against Brev: without a letter it can only judge the
+  onboarding window (WP4 did that), and ScreenCaptureKit can bring up the
+  system's periodic screen-recording reminder, which would sit on screen
+  with nobody there. The protected layer was checked in-process by V69.
+- No `osascript` (Automation prompt), no `defaults write -g`, no crash.
+- Before the launch rows, the permissions of this session's responsible
+  app were read with the preflight calls, which never prompt: screen capture,
+  Accessibility, posting and listening to events were all granted, so
+  `axdump` and `windows` ran without a prompt.
+
+### Rows
+
+| # | What ran | Result | Status |
+|---|---|---|---|
+| V1 | `codesign -dv`, `codesign -d --entitlements - --xml` and `codesign --verify --strict` on `$APP` and `$VAPP` | both: `flags=0x10000(runtime)`, `TeamIdentifier=AV26DNQ5SC`; entitlements exactly `app-sandbox`, `network.client`, `keychain-access-groups` = [`AV26DNQ5SC.no.brev.app`], `com.apple.application-identifier`, `com.apple.developer.team-identifier`; no `get-task-allow`; signatures valid | pass |
+| V2 | the V2 commands on `$APP` and `$VAPP` | both: 0 forbidden plist keys; `NSPrincipalClass` = `BrevApplication`; `LSEnvironment.MallocScribble` = `1`; no nested bundle of any listed kind; `Contents` = `_CodeSignature embedded.provisionprofile Info.plist MacOS PkgInfo Resources` | pass |
+| V3 | `sdef "$APP"` | `couldn't get sdef … (error -192)`, exit 1 | partial: the `osascript` half waits for the human run |
+| V9 | `$T/windows Brev` on onboarding | the onboarding window: `kCGWindowSharingState=0`. The same 4 off-screen menu-bar windows (1512×33) with state 1 as in WP4; `windows` exits 1 | **fails as written**, as before (D-0053); the sheet parts wait for the human run |
+| V11 | `$T/axdump Brev` on onboarding | 526 lines; marker 0; `AXTitle = "Brev"` found (control); only interface text: the welcome title and body, *Fortsett*, the menus Brev and Arkiv | partial: no letter |
+| V13 | `$T/axdump Brev --press Fortsett` | `AXError=0`; a second dump still shows «Velkommen til Brev» and not «Dette må du vite»: the press did nothing | partial: *Send* and *Lås opp med Touch ID* need an install |
+| V19 | the log stream from before the first launch, and `log show --info --debug` from the run's start, for `process == "Brev"` | 10 649 and 1 502 lines; the marker 0 times as UTF-8 and as UTF-16LE in each; `lock reason=` 3 times in each (control) | partial: no letter or address was ever written |
+| V21 | the V21 commands | binary half: `otool -L` finds no CoreSpotlight; `nm -u` finds 0 `CSSearchable…`/`NSUserActivity` of 712 undefined symbols. Search half: `mdutil -s /` says "Index is read-only." (WP4 saw "Indexing enabled."; the same with the command sandbox off). `mdfind BREV-SECRET-BODY` finds 18 files, all in the main checkout `/Users/andypandy/BREV` (the same repository: docs, tests, tools), and none elsewhere. This run's checkout is a worktree under `/private/tmp`, which Spotlight does not index, so its own `docs/VERIFY.md` (the control) is not found | partial: the binary half passes; the search half's control ("indexing is enabled") is not met, so it waits for the human run from the main checkout |
+| V22 | Brev in front on onboarding, then `open -b com.apple.finder` | Finder in front; one new log line, `lock reason=resignActive` | partial: the row asks for ⌘-Tab with a letter open |
+| V26 | the on-screen window list before the first launch and after the last (6 launches, one of them `open -n`, and an `open -a` with a file) | the only new owner is the Finder (brought to the front by V22); no Touch ID or other system window was on screen (one that came and went between the two lists would not show) | partial: `osascript activate` not run |
+| V28 | `open "$APP" --args -NSTraceEvents YES`; `open --env NSZombieEnabled=YES "$APP"` | the first: no Brev process after 5 s, log `launch refused: arguments`. The second: log `launch unsafe: environment; re-executing`, then `route onboarding`; `ps -wwE` shows `MallocScribble=1`, `BREV_LAUNCH_CLEANED=1` and no `NSZombieEnabled` | partial: the `defaults write -g` part waits for the human run |
+| V29 | Brev on onboarding, `open -n "$APP"` | the new instance logs `second instance` and exits; `pgrep -x Brev` shows one PID | partial: "files unchanged" needs reads of `$D` |
+| V40 | `security find-generic-password -s no.brev.app` | "could not be found", exit 44 | partial: the rest needs an install and reads of `$D` |
+| V45 | `scripts/test.sh` | exit 0 in 3 min 9 s: fmt; clippy with default and all features; 136 Rust tests with the launch guard off (brev-mail 57 unit, 11 + 9 + 8 integration; brev-vault 28 and 3 doctests; brev-proto 9; brev-relay 11), 2 with it on, and the 2 release scrub tests; the zeroize, allocator, feature-graph, cfg-site, vault-whitelist, FFI-surface, patch, test-archive-marker, forbidden-API, AV/CM/CV and Xcode-minimum checks; `cargo audit` clean over 210 crates and 1 273 advisories; 15 harness lines, each 5 of 5; the lock probe's 26 checks (note: 0 ms from `Brev.unlock` to the completion on main, of the 2 000 ms confirm window); `capture-probe --selftest`; the Debug build | pass |
+| V49 | `open "$APP"`; `open --env MallocScribble=0 "$APP"`; `ps -wwE` | `MallocScribble=1` in both; the second re-executed (log `launch unsafe: environment; re-executing`, `BREV_LAUNCH_CLEANED=1`) | partial: Finder and Dock launches need a human |
+| V50 | `nm` on both binaries | Release: 0 `selfscan`/`brev_scan` symbols; Verify: 10 (control) | pass |
+| V53 | the V53 lines of the V1 loop | both builds: `security.network.client` 1, `security.network.server` 0, group `AV26DNQ5SC.no.brev.app` | pass |
+| V66 | the V66 commands | `NSAppTransportSecurity` 0 in both plists; `URLSession`/`NSURLConnection` 0 in `nm -u` of the Release binary; the pasteboard lines of `allowed-apis.txt` name `app/Sources/UI/OpaqueView.swift` twice and nothing else; the forbidden-API grep passed in V45 | pass |
+| V69 | the four view host runs (`tools/viewhost/build.sh`) | mail (`--hold 1 --scan --post`): 38 checks; compose (`--compose --hold 1 --scan --post`): 49, among them the environment report before ⌘↩ (a software key, no Touch ID, every defence in place); contacts (`--contacts --hold 1`): 63; `--triggers switch`: 23, among them `lock reason=resignActive` once and U4's measurement line once. Each printed PASS and exited 0; no view host or relay process was left | pass |
+| V70 | Brev on onboarding: `$T/windows Brev` before and after `open -a "$APP" <file>` | the window list is unchanged; log `open event ignored count=1`. First run on a Release build (review round 1 ran it on Debug) | partial: the half with the compose sheet open waits for the human run |
+
+Not run, and why: V5, V6 and V7 (capture; above), V12 (System Events needs
+Automation), V17, V18, V20, V41, V54, V58, V59, V64 and V68 (a store, an
+unlocked Brev, Brev B or the relay with letters), V32 and V33 (the compose
+sheet). The other rows need a human.
+
+Also run, with no row of its own:
+
+- **The release guard for `allow-software-keys`** (D-0068). `grep -a` finds
+  the marker in the test archive, and not in the app's archive or the
+  Release binary. The Xcode phase, proven in a scratch copy of `app/` with
+  the test archive at the path it reads: `xcodebuild -configuration Release
+  CODE_SIGNING_ALLOWED=NO` fails with the phase's error (exit 65); with the
+  app's archive there, it succeeds.
+- **Test code in the app** (D-0066). The Release binary has
+  `zeroizing_alloc5WIPER` once and no `MockTransport`, `live_plaintexts` or
+  `_for_test` symbol.
+- **`DYLD_*` at launch** (owner answer Q2, D-0067). `open --env
+  DYLD_BREV_TEST=1 "$APP"`: `ps -wwE` lists the variable, but Brev did not
+  re-execute and went on to `route onboarding`. dyld takes `DYLD_*` out of
+  the environment of a process with the hardened runtime: an ad-hoc probe
+  signed with `-o runtime` saw no `DYLD_BREV_TEST` through `ProcessInfo` or
+  `getenv`, and the same binary without the flag saw it. So in Release
+  neither LaunchGuard nor Rust meets one; the stripping acts in Debug
+  builds.
+- **The split's bindings** (D-0066). `scripts/gen-bindings.sh` in
+  `git archive` copies of `3ef953b` and `15f3e50`: `BrevCore.swift`,
+  `BrevCoreFFI.h` and `BrevCoreFFI.modulemap` are byte-identical.
+
+### What the split changes for the human run
+
+These rows now also exercise the checks Rust took over (D-0067, D-0068):
+
+- **The first launch with a store** (V27, V37, V40, V41, and every row
+  after onboarding) is the first run of Rust's folder lock inside the App
+  Sandbox container (plan R10); no machine run opened a store. A log line
+  `open failed: Io` or `open failed: Unsafe` after a launch is a failure to
+  report, not a damaged store.
+- **The first unlock after onboarding** (V36, V37, V27) runs inside Rust's
+  2 s confirm window, with onboarding's keychain writes in it (plan R4). A
+  lock with `lock reason=unlockExpired` right after Touch ID means the
+  window was missed.
+- **V25**: Swift still locks at 300 s. Rust's own deadline, 320 s, is a
+  backstop and shows only if Swift's lock fails.
+- **V56, V57, V65**: a letter goes out only in environment class A. A
+  refusal says «Brevet ble ikke sendt: …» and names the check that failed;
+  record it. V18's `padcheck` expects schema v4.
+- **V38, V52**: after a reset while a sync is still in flight, onboarding's
+  create can get `Busy` for up to 15 s (plan R9).
+- **V51**: `TouchIDProbe.app` links the app's archive, launch guard
+  included, so Rust refuses to unlock without `MallocScribble=1`. Its
+  `LSEnvironment` sets it when it is started with `open`, as V51's commands
+  do, and the probe itself stops without it.
+- **V28, V49**: in Release, dyld hides `DYLD_*` from Brev (above), so the
+  `DYLD_*` stripping is not visible there.
+
+The rows that need a human and a machine together, for the owner's run
+(`docs/USER_SESSION.md` has the order): V6, V9, V11, V13, V14, V22, V23,
+V28, V30, V31, V37, V38, V46, V49, V51, V52, V56, V60, V62, V63, V65, V67
+and V70.
+
+## WP4 run (Phase 2, `b6f2e3c`)
+
+### The run
 
 - macOS 26.2 (25C56), Xcode 26.2 (17C52), Apple silicon (arm64).
 - App code under test: commit `b6f2e3c` (WP4 adds only tools and docs).
@@ -38,7 +160,7 @@ What the run did not do, and why:
 "Partial" below means: the part a machine could run passed, and the row is
 still open for the human run.
 
-## Rows
+### Rows
 
 | # | What ran | Result | Status |
 |---|---|---|---|
@@ -87,7 +209,7 @@ shows 18 `dropped synthetic` lines, all with the poster's PID: 6 key-downs,
 6 key-ups, 3 mouse-downs, 3 mouse-ups. The 4 keys sent with
 `AXUIElementPostKeyboardEvent` did not arrive. The page did not change.
 
-## Tool checks
+### Tool checks
 
 These check the tools, not Brev. They ran against `tools/viewhost` (Brev's
 real mail window with fake letters, no keychain) where Brev itself needs
@@ -153,7 +275,7 @@ Touch ID.
 - `poster --via session` refuses without `--global`. The session, HID and
   `IOHIDPostEvent` ways were built but not run.
 
-## Found during the run
+### Found during the run
 
 1. **V9 as written fails on macOS 26.2.** Every regular app, Brev included,
    owns 4 off-screen windows of the menu bar's size with sharing state 1.

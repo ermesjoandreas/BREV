@@ -23,7 +23,10 @@ design"). Round 1 numbered its rows V53 and V54, as D-0063 and D-0053 still
 do; Phase 3 already used those numbers, so they are V69 and V70 here. WP12
 ran the Phase 2 machine rows again at `fb6f140` (D-0053); the human run is
 still to come (`docs/USER_SESSION.md`). The Phase 3 rows were written in
-Phase 3's WP0 (2026-09-28) and revised after its review; none has run yet.
+Phase 3's WP0 (2026-09-28) and revised after its review. After the vault
+split (D-0066 to D-0068), the rows a machine can run ran again at `60d4e1b`
+(`docs/VERIFY-RESULTS.md`); of the Phase 3 rows, that covers V53, V66 and
+V69.
 
 ## Setup
 
@@ -64,8 +67,9 @@ Phase 3's WP0 (2026-09-28) and revised after its review; none has run yet.
   relay that still runs and move its folder aside:
   `[ -e "$RD" ] && mv "$RD" "$R/relay-before-$(date +%s)"`. Brev B then
   starts with no `$DB` too (run order step 2).
-- Owner question Q1 (design §11) is open. If the owner picks (B), the relay
-  runs as `_brevrelay` with its folder in `/Library/Application Support/brev-relay`:
+- Owner question Q1 (design §11) is answered (A) in D-0065: the relay runs
+  as the user, with its folder at `RD` in the block below. Only if (B) were
+  built would the relay run as `_brevrelay` with its folder in `/Library/Application Support/brev-relay`:
   change `RD`, and run the commands that read or move that folder, `release`
   and the relay's `lsof` with `sudo`. V63's timed line then stops and starts
   the relay as that user (`sudo pkill -x brev-relay`,
@@ -135,10 +139,11 @@ waiting() {  # the number of letters the relay holds (Phase 3; read-only)
   open questions 1 (file substitution) and 3 (backup exclusion) are answered
   in D-0033 items 2 and 4: onboarding shows the `onboarding.rules.gone`
   warning, and the folder is excluded from backups.
-- **Q4**, **U4 (WP5)** (Phase 3): the row depends on something still open
-  in `docs/PHASE3_DESIGN.md`. Q4 is the owner question on the App ID
-  `no.brev.app.b` for Brev B (design §11); without it the row runs with the
-  design's fallback, a second macOS user account. U4 (WP5) is Phase 3 WP5's
+- **Q4**, **U4 (WP5)** (Phase 3): the row depends on an owner question or
+  a measurement in `docs/PHASE3_DESIGN.md`. Q4 is the owner question on the
+  App ID `no.brev.app.b` for Brev B (design §11), approved in D-0065; only
+  if registering it fails does the row run with the design's fallback, a
+  second macOS user account. U4 (WP5) is Phase 3 WP5's
   measurement of whether the Touch ID panel makes Brev resign active (the
   part of the GUI-spike item U4 that is still unmeasured; design §3.2), and
   the send-prompt rule WP5 applies from it. WP5 built the rule for both
