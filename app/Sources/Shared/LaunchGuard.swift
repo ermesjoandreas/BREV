@@ -1,14 +1,15 @@
 // LaunchGuard.swift — launch hygiene, the first thing main.swift runs.
 //
 // Upholds CLAUDE.md §1.1 and §1.10 and §2's MallocScribble residual risk
-// (docs/PHASE2_DESIGN.md §8.6). AppKit and Foundation have debugging
-// switches that log events or keep freed objects alive (NSTraceEvents,
-// NSZombieEnabled, ...), set by arguments, defaults or environment
-// variables. Brev refuses arguments (Release and Verify), empties the
-// argument domain, and treats a debugging variable or default, or a missing
-// MallocScribble=1, as an unsafe launch: it re-executes itself once with a
-// cleaned environment, and if the launch is still unsafe, nothing is ever
-// decrypted in the process (AppDelegate shows only launch.error.unsafe).
+// (docs/PHASE2_DESIGN.md §8.6). AppKit, Foundation and HIToolbox have
+// debugging switches that log events or keep freed objects alive
+// (NSTraceEvents, NSZombieEnabled, TSMEventTracing, ...), set by arguments,
+// defaults or environment variables. Brev refuses arguments (Release and
+// Verify), empties the argument domain, and treats a debugging variable or
+// default, or a missing MallocScribble=1, as an unsafe launch: it
+// re-executes itself once with a cleaned environment, and if the launch is
+// still unsafe, nothing is ever decrypted in the process (AppDelegate shows
+// only launch.error.unsafe).
 // No AppKit: compiled into the app and the CLI harness, which tests every
 // function here except `run`.
 
@@ -21,7 +22,16 @@ enum LaunchGuard {
                                  "NSObjCMessageLogging", "OBJC_", "MallocStackLogging", "CFLOG",
                                  "OS_ACTIVITY_DT_MODE"]
     /// Defaults that make a launch unsafe when true (global domain included).
-    static let unsafeDefaultKeys = ["NSTraceEvents", "NSZombieEnabled", "NSDebugEnabled", "NSDeallocateZombies"]
+    /// TSMEventTracing is HIToolbox's key-event trace: it traces every key
+    /// event on stderr without get-task-allow, so also in Release (launch
+    /// spike, docs/DECISIONS.md D-0064). The TSMTrace keys are its siblings
+    /// from the spike's scan of HIToolbox.
+    static let unsafeDefaultKeys = ["NSTraceEvents", "NSZombieEnabled", "NSDebugEnabled", "NSDeallocateZombies",
+                                    "TSMEventTracing", "TSMTraceAssistiveTouch", "TSMTraceCapsLockPressAndHold",
+                                    "TSMTraceCharacterPalette", "TSMTraceCursorUI", "TSMTraceDocumentProperties",
+                                    "TSMTraceEventInfo", "TSMTraceFloatingIndicator", "TSMTraceForAsyncClient",
+                                    "TSMTraceInputSourceNotifications", "TSMTraceInputSourceSelection",
+                                    "TSMTraceIronwood", "TSMTracePressAndHold", "TSMTraceTrackpadIM"]
     /// Set in the cleaned environment, so Brev re-executes itself only once.
     static let reexecMarker = "BREV_LAUNCH_CLEANED"
 

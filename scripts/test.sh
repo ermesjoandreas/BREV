@@ -4,11 +4,11 @@
 # every later step sees the current core. Then Rust formatting, clippy,
 # tests, the zeroize and allocator checks, the FFI surface and patch-marker
 # checks (macOS), the forbidden-API grep, the check that AVFoundation,
-# CoreMedia and CoreVideo stay in the protected layer, the dependency audit,
-# the Swift heap-scan harness (macOS), the lock probe (macOS), a compile
-# check of the view host (macOS), a type-check of the verification tools and
-# capture-probe's self-test (macOS) and an Xcode compile check (macOS with
-# xcodegen).
+# CoreMedia and CoreVideo stay in the protected layer, the check that the
+# Xcode minimum is stated alike, the dependency audit, the Swift heap-scan
+# harness (macOS), the lock probe (macOS), a compile check of the view host
+# (macOS), a type-check of the verification tools and capture-probe's
+# self-test (macOS) and an Xcode compile check (macOS with xcodegen).
 # Exits non-zero on the first failure.
 #
 # Usage: scripts/test.sh
@@ -124,7 +124,7 @@ if [[ "$DARWIN" == yes ]]; then
   # No String carries content across the FFI (docs/PHASE2_DESIGN.md §2.2).
   # The only public functions with a String are these three, and each must
   # be found, so the grep cannot pass by matching nothing.
-  echo "==> FFI surface: no content String, only the known Data"
+  echo "==> FFI surface: no content String"
   ALLOWED_FUNCS=('func ping\(\) -> String' 'func create\(dir: String, ' 'func `?open`?\(dir: String\)')
   FUNCS="$(grep -nE '^(public |open )(static )?func .*String' "$BINDINGS" || true)"
   for f in "${ALLOWED_FUNCS[@]}"; do
@@ -148,63 +148,23 @@ if [[ "$DARWIN" == yes ]]; then
     echo "error: the record-field pattern finds no field in $BINDINGS; fix the check" >&2
     exit 1
   fi
-  # The greps above see only declarations: a String constructor, an Option,
-  # Vec or map of String, an enum or error payload and a callback argument
-  # all get past them. Each of those goes through a FfiConverter…String…
-  # type, so every line that names one must be one of these, exactly as often
-  # as listed: the converter itself, a Rust panic's message (content-free,
-  # design §14.1), uniffi's two callback error helpers (always emitted; there
-  # is no callback), the `dir` of create and open, and ping's reply.
-  CONV_LIST=(
-    'fileprivate struct FfiConverterString: FfiConverter {'
-    'throw UniffiInternalError.rustPanic(try FfiConverterString.lift(callStatus.errorBuf))'
-    'callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))'
-    'callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))'
-    'FfiConverterString.lower(dir),'
-    'FfiConverterString.lower(dir),uniffiCallStatus'
-    'return try!  FfiConverterString.lift(try! rustCall() {'
-  )
-  CONV_EXPECTED="$(printf '%s\n' "${CONV_LIST[@]}" | LC_ALL=C sort)"
-  CONV_FOUND="$(grep -E 'FfiConverter[A-Za-z0-9_]*String' "$BINDINGS" \
-    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | LC_ALL=C sort || true)"
-  if [[ "$CONV_FOUND" != "$CONV_EXPECTED" ]]; then
-    echo "error: String converters in $BINDINGS differ from the known uses (< known, > found):" >&2
-    diff <(printf '%s\n' "$CONV_EXPECTED") <(printf '%s\n' "$CONV_FOUND") >&2 || true
-    exit 1
-  fi
-  # Bytes too: content leaves Rust only as OpenText.chunk's 960-byte
-  # results, and records carry ids and metadata (design §2.2), so a body or
-  # a name must not cross as Data either. Bytes cross in a RustBuffer only
-  # through a FfiConverter…Data type (an Option, a Vec or an enum payload of
-  # Data as well), so every line that names one must be one of these,
-  # exactly as often as listed: the converter itself; the ids passed to
-  # messages, openBody, sendNew and threads; two lifts, chunk's result and
-  # sendNew's thread id; and the reads and writes of ContactRow.id,
-  # MessageRow.id, ThreadRow.id and ThreadRow.contact. (`&[u8]` arguments,
-  # which carry bytes into Rust without a copy, use FfiConverterByRefBytes.)
-  DATA_LIST=(
-    'fileprivate struct FfiConverterData: FfiConverterRustBuffer {'
-    'FfiConverterData.lower(thread),uniffiCallStatus'
-    'FfiConverterData.lower(message),uniffiCallStatus'
-    'FfiConverterData.lower(contact),'
-    'FfiConverterData.lower(contact),uniffiCallStatus'
-    'return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {'
-    'return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {'
-    'id: FfiConverterData.read(from: &buf),'
-    'id: FfiConverterData.read(from: &buf),'
-    'id: FfiConverterData.read(from: &buf),'
-    'contact: FfiConverterData.read(from: &buf),'
-    'FfiConverterData.write(value.id, into: &buf)'
-    'FfiConverterData.write(value.id, into: &buf)'
-    'FfiConverterData.write(value.id, into: &buf)'
-    'FfiConverterData.write(value.contact, into: &buf)'
-  )
-  DATA_EXPECTED="$(printf '%s\n' "${DATA_LIST[@]}" | LC_ALL=C sort)"
-  DATA_FOUND="$(grep -E 'FfiConverter[A-Za-z0-9_]*Data' "$BINDINGS" \
-    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | LC_ALL=C sort || true)"
-  if [[ "$DATA_FOUND" != "$DATA_EXPECTED" ]]; then
-    echo "error: Data converters in $BINDINGS differ from the known uses (< known, > found):" >&2
-    diff <(printf '%s\n' "$DATA_EXPECTED") <(printf '%s\n' "$DATA_FOUND") >&2 || true
+  # The greps above see only declarations. Every value that crosses the FFI
+  # goes through a FfiConverter type, so pin the whole surface (design §2.2;
+  # docs/DECISIONS.md D-0064): every function Rust exports and every line
+  # that names a converter must be listed in scripts/ffi-surface.txt, as
+  # often as it occurs. A new export, argument, result, record field,
+  # enum payload or type (a Vec<u16> brings a new FfiConverterSequenceUInt16)
+  # changes a line and fails here until the list is reviewed and updated.
+  # Content leaves Rust only as OpenText.chunk's 960-byte results; records
+  # carry ids and metadata.
+  echo "==> FFI surface: every export and every converter use is listed"
+  SURFACE_EXPECTED="$(grep -vE '^[[:space:]]*(#|$)' "$REPO_ROOT/scripts/ffi-surface.txt" | LC_ALL=C sort)"
+  SURFACE_FOUND="$( { grep -oE 'uniffi_brev_core_fn_[a-z0-9_]+' "$BINDINGS" | LC_ALL=C sort -u
+    grep -E 'FfiConverter' "$BINDINGS" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | grep -v '^//'
+    } | LC_ALL=C sort || true)"
+  if [[ "$SURFACE_FOUND" != "$SURFACE_EXPECTED" ]]; then
+    echo "error: the FFI surface in $BINDINGS differs from scripts/ffi-surface.txt (< listed, > found):" >&2
+    diff <(printf '%s\n' "$SURFACE_EXPECTED") <(printf '%s\n' "$SURFACE_FOUND") >&2 || true
     exit 1
   fi
 
@@ -275,6 +235,18 @@ if (cd "$REPO_ROOT" && grep -rnE "$MEDIA" app/Sources | grep -v "^$LAYER:"); the
   exit 1
 fi
 
+# The oldest Xcode that builds Brev (the app uses macOS 15.2 SDK symbols) is
+# stated three times: app/project.yml's xcodeVersion, the README and
+# build.sh's install hint. They must agree.
+echo "==> the Xcode minimum is stated alike"
+XCODE_MIN="$(sed -nE 's/^[[:space:]]*xcodeVersion: "([0-9.]+)"$/\1/p' "$REPO_ROOT/app/project.yml")"
+for f in README.md scripts/build.sh; do
+  if [[ -z "$XCODE_MIN" ]] || ! grep -qF "Xcode $XCODE_MIN or newer" "$REPO_ROOT/$f"; then
+    echo "error: $f does not say \"Xcode ${XCODE_MIN:-?} or newer\", the xcodeVersion of app/project.yml" >&2
+    exit 1
+  fi
+done
+
 # cargo-audit is optional on a dev machine but required clean from Phase 1 on
 # (CLAUDE.md §5, Phase 1 definition of done; in CI from Phase 5), so skipping
 # it is loud, never silent.
@@ -344,13 +316,17 @@ else
   echo "==> Swift harness skipped: not macOS ($(uname -s))"
 fi
 
-# The lock probe (app/Tests/Lock): the app's own LockController, UnlockService
-# and content views, which the harness (Shared/ only) cannot reach. A CLI
-# process built from app/Sources/{Shared,App,UI,Keys}: no window on screen,
-# no prompt, no keychain (a software KEK; UnlockService gets a KeyStore
-# subclass). It checks that a discarded unlock and the lock sequence lock the
-# Rust session, that the lock sequence zeroes every content view's pixel
-# buffers, that draw(_:) of a content view draws nothing, and that
+# The lock probe (app/Tests/Lock): the app's own BrevApplication,
+# LockController, UnlockService and content views, which the harness
+# (Shared/ only) cannot reach. A CLI process built from
+# app/Sources/{Shared,App,UI,Keys}: no window on screen, no prompt, no
+# keychain (a software KEK; UnlockService gets a KeyStore subclass), and no
+# event posted but to itself. It checks that a synthetic key BrevApplication
+# drops does not move the idle clock (in sendEvent, and in nextEvent with a
+# key posted to itself; that part is skipped, and says so, if the process
+# may not post events), that a discarded unlock and the lock sequence lock
+# the Rust session, that the lock sequence zeroes every content view's
+# pixel buffers, that draw(_:) of a content view draws nothing, and that
 # UnlockService locks Rust when its closure fails after Brev.unlock.
 if [[ "$DARWIN" == yes ]]; then
   echo "==> lock probe (app/Tests/Lock)"
@@ -368,6 +344,7 @@ if [[ "$DARWIN" == yes ]]; then
     exit 1
   fi
   echo "    $(grep -c '^ok ' <<<"$out") checks passed"
+  grep '^skip ' <<<"$out" | sed 's/^/      /' || true
 else
   echo "==> lock probe skipped: not macOS ($(uname -s))"
 fi

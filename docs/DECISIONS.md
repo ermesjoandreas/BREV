@@ -1484,3 +1484,80 @@ take the numbers after them, so those numbers do not shift again.
   Debug build with the handler added no window and logged `open event
   ignored count=1`; the same event to the Release build of 1873eed added a
   layer-8 window with sharing state 1 (the alert).
+
+### D-0064 — Phase 2 review round 2: the whole FFI surface pinned, TSMEventTracing refused, the idle clock tested, the Xcode minimum
+
+- **Date:** 2026-09-28
+- **Decision:** The confirmed findings of review round 2 are fixed:
+  1. **The whole FFI surface.** D-0063 item 5 held only for `String` and
+     bytes. Any other element type crosses through a converter that neither
+     pin named: a `Vec<u16>` export or record field becomes a Swift
+     `[UInt16]` (`FfiConverterSequenceUInt16`) that nothing wipes, so a
+     whole letter could leave Rust in one call and test.sh stayed green.
+     test.sh now compares the bindings with `scripts/ffi-surface.txt`: every
+     function Rust exports (`uniffi_brev_core_fn_…`) and every line that
+     names a `FfiConverter` type, exactly as often as it occurs. Every value
+     that crosses the FFI goes through a converter, so a new export,
+     argument, result, record field, enum payload or type fails the check
+     until the list is reviewed and updated. The list replaces test.sh's
+     String and Data lists (their lines and reasons are in it); the
+     declaration checks for `String` stay. This narrows D-0063 item 5,
+     which said a body or a name cannot cross unnoticed.
+  2. **TSMEventTracing.** `LaunchGuard.unsafeDefaultKeys` adds HIToolbox's
+     key-event trace `TSMEventTracing` and its thirteen `TSMTrace…`
+     siblings from the launch spike's scan (`tools/verify/spikes/launch/
+     keys-batch.txt`), as the spike recommended; design §8.6 and §14.2 L
+     left the list to the spike. Harness case 2 asserts `TSMEventTracing`
+     by name. VERIFY V28 sets it with `defaults write -g`, as it does
+     `NSTraceEvents`.
+  3. **The idle clock.** The lock probe checks that a synthetic key that
+     `BrevApplication` drops does not stamp `lastHumanInput`: one made in
+     the process and sent through `sendEvent`, and a ↓ key posted to the
+     probe's own PID and pumped through `nextEvent`. The drop log
+     (`dropped synthetic 10/11 pid=…`, read with `OSLogStore`) is the
+     control that the events arrived. The posted part is skipped, and says
+     so, when `CGPreflightPostEventAccess()` is false; it never asks.
+  4. **The Xcode minimum.** `scripts/build.sh`'s install hint and
+     `app/project.yml`'s `xcodeVersion` say Xcode 16.2, as the README has
+     since round 1 (the app uses macOS 15.2 SDK symbols; XcodeGen writes
+     `xcodeVersion` only as `LastUpgradeCheck`). test.sh checks that the
+     three agree.
+- **Reasoning:** CLAUDE.md §1.10 and §3.1 (content crosses the FFI only in
+  960-byte chunks, and the Swift side leaves no buffer unwiped). §2's
+  keylogger threat: secure event input hides keystrokes from event taps,
+  and a trace on stderr would give their count and timing, and by the
+  checker's static analysis their key codes. Design §8.3: only accepted
+  input stamps the idle clock, so posted events cannot keep Brev from
+  idle-locking; before, only the view host's `--triggers idle --post` run
+  checked it, and no VERIFY row requires that run. §1 "ALWAYS": each fix
+  has a check that fails without it. No fix needs the owner or adds a
+  dependency. D-0063 stays as written (entries are append-only).
+- **Spike facts for WP12:** The launch spike (facts 6 and 7) and its
+  checker found: with 126 debug keys of AppKit, Foundation, CoreFoundation
+  and HIToolbox set at once, in a build without get-task-allow, the only
+  key-event output came from `TSMEventTracing` (TSM queue traces with
+  dead-key state, on stderr). By static analysis of HIToolbox, the same
+  flag gates `TSMProcessRawKeyEvent: Processing …, virtualKeyCode=%x,
+  modifiers=%x`, with no get-task-allow check. HIToolbox reads its keys
+  from the global domain (`kCFPreferencesAnyApplication`) before the app's
+  search list, so an argument-domain override cannot neutralise a
+  `defaults write -g`; the spike's option to set the keys false in the
+  argument domain was not taken for that reason. LaunchGuard reads through
+  `UserDefaults.standard`, whose search list holds the global domain; V28
+  checks that in the real app. WP12's entries on launch hygiene and on the
+  GUI-spike results (design D-0045 and D-0057; D-0048 and D-0060 after the
+  renumbering) take these facts over.
+- **Verified:** macOS 26.2, 2026-09-28, each check against its fix
+  reverted or against a mutant. The surface check fails on bindings
+  generated from three Rust mutants: `OpenText::units() -> Vec<u16>` and
+  `ContactRow.name_units: Vec<u16>` (the review's B-F04 and B-F05; round
+  1's checks pass the first) and `OpenText::byte_at(i) -> u32`, which needs
+  no new converter type. Harness case 2 fails with LaunchGuard's old key
+  list. The lock probe fails with the idle stamp moved above the synthetic
+  check in `nextEvent` (the review's B-U32) and in `sendEvent`. The Xcode
+  check fails with build.sh's old hint and with project.yml's old version.
+  The review measured the trace: the view host in compose mode, started
+  with `-TSMEventTracing YES` (no LaunchGuard), traced every key-down and
+  key-up of 3 posted keys to stderr (28 lines) with the body focused and
+  secure input on.
+  `scripts/test.sh` passes.

@@ -20,8 +20,10 @@ options:
   # macOS 14.0 (CLAUDE.md §3.2, D-0006). Quoted so YAML keeps it a string.
   deploymentTarget:
     macOS: "14.0"
-  # Minimum toolchain we target; Xcode 16 opens this project format unchanged.
-  xcodeVersion: "15.0"
+  # The oldest Xcode that builds Brev: the app uses symbols of the macOS 15.2
+  # SDK. XcodeGen only writes it as LastUpgradeCheck; nothing enforces it.
+  # README.md and scripts/build.sh name the same version (test.sh checks).
+  xcodeVersion: "16.2"
   # UI is Norwegian bokmål only (CLAUDE.md §3.2); nb.lproj is the sole localisation.
   developmentLanguage: nb
   createIntermediateGroups: true

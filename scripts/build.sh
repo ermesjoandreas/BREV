@@ -44,7 +44,7 @@ need xcodegen   "brew install xcodegen"
 # or a license not yet accepted, which also makes `-version` fail), which
 # the hint below can only guess at.
 if ! xcodebuild -version >/dev/null; then
-  echo "error: xcodebuild failed (see the message above). Install Xcode 15 or newer from the App Store, then:" >&2
+  echo "error: xcodebuild failed (see the message above). Install Xcode 16.2 or newer from the App Store, then:" >&2
   echo "       sudo xcode-select -s /Applications/Xcode.app" >&2
   echo "       If Xcode is installed and selected, accept its license with: sudo xcodebuild -license accept" >&2
   exit 1

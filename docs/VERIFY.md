@@ -11,8 +11,9 @@ Status: written in WP0, 2026-09-27, and revised after its review. WP4
 (2026-09-28) built the tools in `tools/verify/` and ran every row a machine
 can run without Touch ID; the results are in `docs/VERIFY-RESULTS.md`. Rows
 marked "per D-0060" become final after the human GUI-spike session. Review
-round 1 (2026-09-28) changed V39, V41, V43 and V51 and added V53 and V54
-(see "Changes from the design").
+round 1 (2026-09-28) changed V39, V41, V43 and V51 and added V53 and V54;
+review round 2 changed V28 and the lock probe (V45) (see "Changes from the
+design").
 
 ## Setup
 
@@ -115,7 +116,7 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 | V25 | Idle locks | 5 min without input, also with the Brev menu left open: locked | H | per D-0060 (U4.2) |
 | V26 | No prompt without a human | `open "$APP"`; `osascript -e 'activate application "Brev"'`: no Touch ID dialog | H | – |
 | V27 | Touch ID | exactly one prompt; no password button; *Avbryt* returns to the lock screen (check this on the regular lock screen: at onboarding's first unlock, *Avbryt* stays on that page, design §5.3 step 8) | H | per D-0060 (U4.1) |
-| V28 | Launch hygiene | Brev quit first. `open "$APP" --args -NSTraceEvents YES` exits; `defaults write -g NSTraceEvents -bool YES` then launch → only `launch.error.unsafe`, no unlock button; delete the default right after; `open --env NSZombieEnabled=YES "$APP"` → a re-executed process without the variable, or `launch.error.unsafe` if re-exec does not work in the sandbox | A + H looks | per D-0060 (L, M) |
+| V28 | Launch hygiene | Brev quit first. `open "$APP" --args -NSTraceEvents YES` exits; `defaults write -g NSTraceEvents -bool YES` then launch → only `launch.error.unsafe`, no unlock button; delete the default right after; the same with `TSMEventTracing` (HIToolbox's key-event trace, which works in Release, D-0064); `open --env NSZombieEnabled=YES "$APP"` → a re-executed process without the variable, or `launch.error.unsafe` if re-exec does not work in the sandbox | A + H looks | per D-0060 (L, M) |
 | V29 | Second instance | during onboarding, `open -n "$APP"`: the second instance exits (log `second instance`); files unchanged | A | – |
 | V30 | Secure input flag | `ioreg -l -w 0 \| grep kCGSSessionSecureInputPID` = Brev's PID only while a compose field has focus | A (H focuses) | per D-0060 (U2.4) |
 | V31 | Keyloggers see nothing | `$T/keylisten` (listen-only CGEventTap + IOHIDManager, Input Monitoring granted) while typing the marker in compose: no key values; control: it sees keys typed in TextEdit. If IOHIDManager sees key values: stop and ask the owner | H + A | per D-0060 (U2.4) |
@@ -235,6 +236,8 @@ nm -u "$APP/Contents/MacOS/Brev" | grep -Eci 'CSSearchable|NSUserActivity'   # 0
 open "$APP" --args -NSTraceEvents YES                      # Brev exits; log: launch refused: arguments
 defaults write -g NSTraceEvents -bool YES; open "$APP"     # only launch.error.unsafe; then quit Brev
 defaults delete -g NSTraceEvents                           # at once: the global default reaches every app launched meanwhile
+defaults write -g TSMEventTracing -bool YES; open "$APP"   # only launch.error.unsafe; then quit Brev
+defaults delete -g TSMEventTracing                         # at once, as above
 open --env NSZombieEnabled=YES "$APP"
 ps -wwE -p "$(pgrep -x Brev)" | tr ' ' '\n' | grep -E '^(NSZombieEnabled|MallocScribble)='   # re-exec: MallocScribble=1 only
 
@@ -316,7 +319,7 @@ open -W --stdout "$R/v51-scrub128.txt" "$PROBE128" --args --unlock  # only if v5
 | `TouchIDProbe.app` (`$T/touchid-probe/Build/Products/Release/`) | runs Brev's unlock closure (`UnlockService`) with a real Enclave KEK and scans for the DEK, ECIES and peer-DEK needles; `--dry` stops before the prompt. Also built against a copy of brev-core with the unlock's deep scrub disabled (`$T/touchid-probe-scrub0/…`, the negative control) and at 128 KiB (`$T/touchid-probe-scrub128/…`); each prints its `scrub=` depth | V51 |
 | `$T/InputLab.app`, `tools/verify/spikes/` | the GUI-spike lab and the spikes' sources (design §14.2); the rogue-Brev and anchor probes were dropped with D-0035 | – |
 | `tools/viewhost` (`tools/viewhost/build.sh` prints its path) | Brev's mail window, compose sheet, lock sequence and lock triggers with fake letters and a software KEK (no keychain, no Touch ID), and in-process checks of them; SelfScan compiled in, as in the Verify build | V53 |
-| `app/Tests/Lock` (the lock probe; scripts/test.sh builds and runs it) | a CLI without a window on screen: a discarded unlock and the lock sequence lock the Rust session, the lock sequence zeroes every content view's pixel buffers, `draw(_:)` of a content view draws nothing, `UnlockService` locks Rust when its closure fails after `Brev.unlock` | V45 |
+| `app/Tests/Lock` (the lock probe; scripts/test.sh builds and runs it) | a CLI without a window on screen: a synthetic key that `BrevApplication` drops, in `sendEvent` and posted to the probe itself through `nextEvent`, does not move the idle clock (the drop log is the control; the posted part is skipped if the process may not post events), a discarded unlock and the lock sequence lock the Rust session, the lock sequence zeroes every content view's pixel buffers, `draw(_:)` of a content view draws nothing, `UnlockService` locks Rust when its closure fails after `Brev.unlock` | V45 |
 
 ## Coverage
 
@@ -349,7 +352,7 @@ New mechanisms in the design:
 
 | Mechanism (design §) | Rows |
 |---|---|
-| UniFFI surface without content `String`s and with only the known `Data`; 960-byte `OpenText` chunks (§2.2) | V45 |
+| UniFFI surface without content `String`s, and pinned whole: every export and every converter use listed in `scripts/ffi-surface.txt`; 960-byte `OpenText` chunks (§2.2) | V45 |
 | `OpenText` registry; lock closes open texts (§2.4) | V45, V39 |
 | `unlock` drop guard, poison handling, 64 KiB scrub (§2.3, §2.5), which reaches the peer DEKs' copies (`unlock_all` not inlined) | V45, V51 |
 | Zeroing allocator (§2.6) | V45, V39 |
@@ -370,7 +373,7 @@ New mechanisms in the design:
 | `SecureInput` (§7.3) | V30, V31, V46, V53 |
 | `Hardening.apply` on every window; not minimisable, no tabbing, not restorable (§8.1); no AppKit alert from an open-documents event | V9, V43, V41, V53, V54 |
 | Capture exclusion and the second defence (§8.2) | V4–V8, V53 |
-| Lock triggers, own idle clock, common-mode timers (§8.3) | V22–V25, V53 |
+| Lock triggers, own idle clock, common-mode timers (§8.3); dropped input does not move the idle clock | V22–V25, V53, V45 (lock probe) |
 | Lock sequence (§8.4), including the Rust lock (step 5) and the pixel buffers | V46, V39, V19, V45 (lock probe), V53 |
 | Menus Brev and Arkiv (§8.5) | V15, V13 |
 | Plist and no scripting (§8.5) | V2, V3 |
@@ -508,3 +511,11 @@ or chooses a remedy, and D-0061 records which.
   probe in scripts/test.sh (V45) covers the Rust lock, the pixel buffers and
   `draw(_:)` without a window. V54 checks the open-documents event, which
   made AppKit show an unhardened alert in Brev.
+- Review round 2 (2026-09-28, D-0064): V28 also sets `TSMEventTracing`,
+  which LaunchGuard now refuses: the launch spike found it to be the one
+  key-event trace that works without get-task-allow, and the design's list
+  had only AppKit's and Foundation's keys. The lock probe (V45) checks that
+  dropped synthetic input does not move Brev's idle clock; before, only the
+  view host's `--triggers idle --post` run did, which no row requires. The
+  FFI surface check (V45) pins every export and every converter use, not
+  only the `String` and `Data` ones.
