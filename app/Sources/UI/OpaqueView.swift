@@ -27,13 +27,16 @@
 // so a shown letter leaves no live glyph ids, and V39's glyph control is
 // SelfScan's own line of the marker (docs/VERIFY.md, "Changes from the
 // design"). Only the visible part of a view is drawn: again on every scroll,
-// resize and content change, into the pool's next buffer. The buffers are
-// zeroed in place when the view's text is wiped or it leaves its window
-// (`blank()`), when it is freed, and for every view in the lock sequence
-// (`ContentView.blankAll()`), which also shows a blank frame (§2 accepts
-// pixels in these buffers until then). AVFoundation, CoreMedia and CoreVideo
-// are approved for this layer only (§4). No tooltips, popovers or other
-// AppKit-made windows over content (capture spike).
+// resize and content change, into the pool's next buffer. Only a view in
+// sight holds a pool. The buffers are zeroed in place when the view's text
+// is wiped (`blank()`), when it scrolls out of sight or leaves its window
+// (`release()`, which also gives the pool up), when it is freed, and for
+// every view in the lock sequence (`ContentView.blankAll()`), which also
+// shows a blank frame (§2 accepts pixels in these buffers until then).
+// AVFoundation, CoreMedia and CoreVideo are approved for this layer only
+// (§4); scripts/test.sh fails if another file in app/Sources names one of
+// their symbols. No tooltips, popovers or other AppKit-made windows over
+// content (capture spike).
 
 import AppKit
 import AVFoundation
@@ -90,7 +93,8 @@ class ContentView: OpaqueView {
 
     /// Shows this view's pixels, and keeps them out of screen captures.
     let protectedLayer = AVSampleBufferDisplayLayer()
-    /// The fixed pool, all buffers of one size; empty until the first frame.
+    /// The fixed pool, all buffers of one size; empty while the view is out
+    /// of sight.
     private(set) var pool: [CVPixelBuffer] = []
     private var nextIndex = 0
     /// Whether the layer may show a frame that `blank()` has not zeroed.
@@ -136,12 +140,12 @@ class ContentView: OpaqueView {
     }
 
     /// Scrolling or resizing the enclosing scroll view changes what is
-    /// visible, so it draws again. Leaving the window blanks the buffers.
+    /// visible, so it draws again. Leaving the window releases the pool.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers = []
-        guard window != nil else { return blank() }
+        guard window != nil else { return release() }
         if let clip = enclosingScrollView?.contentView {
             for name in [NSView.boundsDidChangeNotification, NSView.frameDidChangeNotification] {
                 observers.append(NotificationCenter.default.addObserver(forName: name, object: clip, queue: nil) {
@@ -175,19 +179,21 @@ class ContentView: OpaqueView {
     // MARK: The protected layer
 
     /// Draws the visible part of the view with `drawContent` into the
-    /// pool's next buffer, at the window's scale, and shows it.
+    /// pool's next buffer, at the window's scale, and shows it. A view out
+    /// of sight releases its pool.
     private func present() {
         // visibleRect is not clipped to the view's own bounds (views do not
         // clip to them since macOS 14): a letter below the pane's visible
         // part would get the whole pane.
         let visible = visibleRect.intersection(bounds)
-        guard let window, visible.width >= 1, visible.height >= 1 else {
-            if showing { blank() }
-            return
-        }
+        guard let window, visible.width >= 1, visible.height >= 1 else { return release() }
         let scale = window.backingScaleFactor
-        guard let buffer = nextBuffer(width: Int((visible.width * scale).rounded(.up)),
-                                      height: Int((visible.height * scale).rounded(.up))),
+        // The pool fits the most the view can show at once: its bounds, at
+        // most the enclosing clip view. So it keeps its size while the view
+        // scrolls, and only a resize makes a new one.
+        let most = enclosingScrollView?.contentView.bounds.size ?? bounds.size
+        guard let buffer = nextBuffer(width: Int((min(bounds.width, most.width) * scale).rounded(.up)),
+                                      height: Int((min(bounds.height, most.height) * scale).rounded(.up))),
               CVPixelBufferLockBaseAddress(buffer, []) == kCVReturnSuccess
         else { return }
         let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
@@ -219,12 +225,25 @@ class ContentView: OpaqueView {
     }
 
     /// Zeroes every buffer of the pool in place, removes the shown frame and
-    /// shows a blank one. For a wiped text, a view that left its window or
-    /// scrolled out of sight, and every view in the lock sequence.
+    /// shows a blank one. For a wiped text and every view in the lock
+    /// sequence.
     func blank() {
         pool.forEach(Self.zero)
         protectedLayer.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
         if let empty = pool.first { show(empty) }
+        showing = false
+    }
+
+    /// Zeroes every buffer of the pool in place, removes the shown frame and
+    /// gives the pool up, for a view that scrolled out of sight or left its
+    /// window. So only views in sight hold buffers, however many letters a
+    /// thread has; the next frame makes a new pool.
+    private func release() {
+        guard !pool.isEmpty || showing else { return }
+        pool.forEach(Self.zero)
+        protectedLayer.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
+        pool = []
+        nextIndex = 0
         showing = false
     }
 

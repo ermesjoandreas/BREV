@@ -8,9 +8,8 @@
 # String(cString String(validating String(utf8String
 # String(unsafeUninitializedCapacity NSMutableString
 # NSMutableAttributedString CFStringCreateWithCharacters( NSLog(
-# debugPrint( dump( os_log( "import AVFoundation" "import CoreMedia"
-# "import CoreVideo". A hit is allowed only if it is listed here, one per
-# line:
+# debugPrint( dump( os_log(. A hit is allowed only if it is listed here, one
+# per line:
 #
 #   path | reason | the source line, without leading and trailing spaces
 #
@@ -19,6 +18,3 @@
 
 app/Sources/UI/OpaqueView.swift | the signature of the Services override that returns nil, so content views offer nothing to Services (CLAUDE.md §1.4; design §7.1); no pasteboard is touched | override func validRequestor(forSendType sendType: NSPasteboard.PasteboardType?,
 app/Sources/UI/OpaqueView.swift | the second line of the same Services override (returns nil) | returnType: NSPasteboard.PasteboardType?) -> Any? { nil }
-app/Sources/UI/OpaqueView.swift | ContentView's protected content layer (AVSampleBufferDisplayLayer with preventsCapture), the only use CLAUDE.md §4 approves (D-0034) | import AVFoundation
-app/Sources/UI/OpaqueView.swift | the protected layer's sample buffers (CLAUDE.md §4, D-0034) | import CoreMedia
-app/Sources/UI/OpaqueView.swift | the protected layer's IOSurface-backed pixel buffers (CLAUDE.md §4, D-0034) | import CoreVideo

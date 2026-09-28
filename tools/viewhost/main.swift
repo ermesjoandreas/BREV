@@ -10,8 +10,9 @@
 // XORed bytes, so no String copy of it exists here.
 //
 // Timeline: ready → (hold) → checks, a wider window, a divider dragged right
-// and a narrow window, a posted ↓ key, the letter pane scrolled down, a new
-// letter → the sync timer shows its echo → the real lock sequence → exit.
+// and a narrow window, a posted ↓ key, the letter pane scrolled through and
+// then down, a new letter → the sync timer shows its echo → the real lock
+// sequence → exit.
 // Output is check names and counts only; "ready pid=<n> window=<n>
 // frame=<x,y,w,h>" tells a driver when to run an AX dump, AX presses or a
 // capture against the window during the hold, and the "rect <name>
@@ -413,18 +414,58 @@ DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
     split.setPosition(placed[0], ofDividerAt: 0)
     split.setPosition(placed[0] + split.dividerThickness + placed[1], ofDividerAt: 1)
     window.layoutIfNeeded()
-    guard posting else { return sendAndLock() }
+    guard posting else { return checkScrolledPools(then: sendAndLock) }
     window.makeFirstResponder(lists[1])
     guard CGPreflightPostEventAccess(), let down = CGEvent(keyboardEventSource: nil, virtualKey: 125, keyDown: true),
           let up = CGEvent(keyboardEventSource: nil, virtualKey: 125, keyDown: false) else {
         print("skip --post: this process may not post events")
-        return sendAndLock()
+        return checkScrolledPools(then: sendAndLock)
     }
     down.postToPid(getpid())
     up.postToPid(getpid())
     DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
         check("a posted ↓ key did not move the thread selection", lists[1].selected == 0)
-        sendAndLock()
+        checkScrolledPools(then: sendAndLock)
+    }
+}
+
+/// Only content views in sight hold pixel buffers (ContentView): the views
+/// shown at the top of the letter pane give their pools back, zeroed, once
+/// scrolled out of sight, and the last letter keeps one pool while it
+/// scrolls in from the pane's bottom edge, 10 pt per display pass.
+func checkScrolledPools(then next: @escaping () -> Void) {
+    let clip = letters.enclosingScrollView!.contentView
+    func inSight(_ v: ContentView) -> Bool { !v.visibleRect.intersection(v.bounds).isEmpty }
+    let last = all(SecureTextView.self, in: letters).last!
+    let start = last.frame.minY - clip.bounds.height + 10, steps = 30
+    let ys = [0, start] + (1...steps).map { start + CGFloat($0 * 10) }
+    var top: [ContentView] = [], pools: [[CVPixelBuffer]] = [], drawn = false, entering: CVPixelBuffer?
+    var kept = start > 0 && last.frame.maxY - clip.bounds.height >= ys.last!
+    var i = 0
+    // Each tick checks the frame the last scroll drew, then scrolls on.
+    _ = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { timer in
+        switch i {
+        case 0: break
+        case 1:
+            top = all(ContentView.self, in: letters).filter(inSight)
+            pools = top.map { $0.pool }
+            drawn = !pools.isEmpty && pools.allSatisfy { $0.contains(where: hasPixels) }
+        case 2: entering = last.pool.first
+        default: kept = kept && entering != nil && inSight(last) && last.pool.first === entering
+        }
+        guard i < ys.count else {
+            timer.invalidate()
+            let left = zip(top, pools).filter { !inSight($0.0) }
+            check("scrolled out of sight: a content view holds no pixel buffers, and its old ones are zero",
+                  drawn && !left.isEmpty && left.allSatisfy { $0.0.pool.isEmpty && !$0.1.contains(where: hasPixels) },
+                  "drawn=\(drawn), left \(left.count), holding \(left.filter { !$0.0.pool.isEmpty }.count), "
+                      + "with pixels \(left.filter { $0.1.contains(where: hasPixels) }.count)")
+            check("scrolling in: a letter keeps one pool", kept,
+                  "start \(start), letter \(last.frame), pane \(clip.bounds.size)")
+            return next()
+        }
+        clip.scroll(to: NSPoint(x: 0, y: ys[i]))
+        i += 1
     }
 }
 
@@ -447,13 +488,15 @@ func sendAndLock() {
               scrolled > 0 && letters.visibleRect.minY == scrolled, "\(scrolled) -> \(letters.visibleRect.minY)")
         snapshot(mail.view, "after-sync.png")
         // Every content view the lock reaches, including the letters that
-        // letters.clear() removes from the window.
+        // letters.clear() removes from the window. Their buffers are kept
+        // here: a view that leaves its window gives its pool back.
         let views = all(ContentView.self, in: mail.view)
-        check("before lock: content views hold pixels (control)", views.contains { $0.pool.contains(where: hasPixels) })
+        let buffers = views.flatMap { $0.pool }
+        check("before lock: content views hold pixels (control)", buffers.contains(where: hasPixels))
         lock.lock(.manual)
         check("lock: every pixel buffer of every content view is zero",
-              views.allSatisfy { !$0.pool.contains(where: hasPixels) },
-              "\(views.filter { $0.pool.contains(where: hasPixels) }.count) of \(views.count) views")
+              !buffers.contains(where: hasPixels) && views.allSatisfy { !$0.pool.contains(where: hasPixels) },
+              "\(buffers.filter(hasPixels).count) of \(buffers.count) buffers")
         check("lock: no content view's layer shows a pixel", !views.contains(where: showsPixels))
         check("lock: lists and letters wiped", lists.allSatisfy { $0.count == 0 } && letters.isEmpty)
         check("lock: the session is locked", session.brev.isLocked())

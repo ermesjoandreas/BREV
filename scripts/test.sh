@@ -3,9 +3,10 @@
 # patched bindings (gen-bindings.sh) and the Xcode project (xcodegen), so
 # every later step sees the current core. Then Rust formatting, clippy,
 # tests, the zeroize and allocator checks, the FFI surface and patch-marker
-# checks (macOS), the forbidden-API grep, the dependency audit, the Swift
-# heap-scan harness (macOS), a compile check of the view host (macOS) and an
-# Xcode compile check (macOS with xcodegen).
+# checks (macOS), the forbidden-API grep, the check that AVFoundation,
+# CoreMedia and CoreVideo stay in the protected layer, the dependency audit,
+# the Swift heap-scan harness (macOS), a compile check of the view host
+# (macOS) and an Xcode compile check (macOS with xcodegen).
 # Exits non-zero on the first failure.
 #
 # Usage: scripts/test.sh
@@ -188,16 +189,13 @@ fi
 # checkable cases of §6.3 rules 1 and 5 that §11's list misses: the other
 # ways to make a String from bytes or units, the mutable string classes, the
 # copying CFString constructor (the NoCopy one does not match) and the other
-# logging calls. The three imports keep AVFoundation, CoreMedia and
-# CoreVideo to the capture-protected content layer, the only use CLAUDE.md
-# §4 approves (docs/DECISIONS.md D-0034).
+# logging calls.
 echo "==> forbidden APIs in app/Sources"
 FORBIDDEN=(NSPasteboard NSTextView NSTextField NSTextInputClient .characters 'String(decoding' 'NSString('
            'NSAttributedString(' CTTypesetter CTFramesetter NSAlert 'print(' servicesMenu
            'String(utf16CodeUnits' 'String(data' 'String(bytes' 'String(cString' 'String(validating'
            'String(utf8String' 'String(unsafeUninitializedCapacity' NSMutableString NSMutableAttributedString
-           'CFStringCreateWithCharacters(' 'NSLog(' 'debugPrint(' 'dump(' 'os_log('
-           'import AVFoundation' 'import CoreMedia' 'import CoreVideo')
+           'CFStringCreateWithCharacters(' 'NSLog(' 'debugPrint(' 'dump(' 'os_log(')
 GREP_ARGS=()
 for p in "${FORBIDDEN[@]}"; do GREP_ARGS+=(-e "$p"); done
 # "path<TAB>trimmed line" for every hit and for every allow-list entry
@@ -217,6 +215,26 @@ fi
 if [[ -n "$STALE" ]]; then
   echo "error: scripts/allowed-apis.txt lists lines that no longer exist (or an entry is malformed):" >&2
   echo "$STALE" >&2
+  exit 1
+fi
+
+# AVFoundation, CoreMedia and CoreVideo are approved only for the
+# capture-protected content layer (CLAUDE.md §4; docs/DECISIONS.md D-0034),
+# which is OpaqueView.swift. Grepping their imports cannot hold them there:
+# `import AppKit` already brings in CoreVideo, and `import AVKit` or
+# `import class AVFoundation.…` are other spellings. So no other file in
+# app/Sources may name a symbol with their prefixes (AV, CM, CV, kCM, kCV),
+# in code, strings or comments. The control: the same pattern finds the
+# layer's own uses.
+echo "==> AVFoundation, CoreMedia and CoreVideo only in the protected layer"
+MEDIA='(^|[^A-Za-z0-9_])k?(AV|CM|CV)[A-Z][A-Za-z]'
+LAYER=app/Sources/UI/OpaqueView.swift
+if ! grep -Eq "$MEDIA" "$REPO_ROOT/$LAYER"; then
+  echo "error: the media-symbol pattern finds nothing in $LAYER; fix the check" >&2
+  exit 1
+fi
+if (cd "$REPO_ROOT" && grep -rnE "$MEDIA" app/Sources | grep -v "^$LAYER:"); then
+  echo "error: the lines above name AVFoundation, CoreMedia or CoreVideo outside $LAYER (CLAUDE.md §4)" >&2
   exit 1
 fi
 
