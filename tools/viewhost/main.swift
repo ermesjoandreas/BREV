@@ -23,6 +23,13 @@
 // posted to this process), and secure event input is checked → ready →
 // (hold) → ⌘↩ sends → its echo → Escape discards a second letter → the lock
 // sequence discards a third → exit.
+// With --triggers: the real lock triggers (LockController.start) and the
+// real unlock bookkeeping, with this app active; switch: an unlock in
+// flight, the Finder becomes active (no lock), this app is active again and
+// the unlock ends, the Finder becomes active (the lock sequence runs);
+// idle: no input, the Brev menu opened shortly before the limit, the lock
+// sequence runs after 300 s and closes it. The lock's log line is read back
+// from this process's log. Then exit.
 // Output is check names and counts only; "ready pid=<n> window=<n>
 // frame=<x,y,w,h>" tells a driver when to run an AX dump, AX presses or a
 // capture against the window during the hold, and the "rect <name>
@@ -36,6 +43,7 @@
 //
 // usage: ViewHost [--hold <s>] [--frame <x,y,w,h>] [--control] [--snapshot <dir>]
 //                 [--capturable] [--unprotected] [--scan] [--post] [--compose]
+//                 [--triggers switch|idle]
 //   --hold <s>      seconds to wait after ready before the checks (default 3)
 //   --frame <r>     the window's frame (global points, origin top left)
 //                   instead of centred
@@ -59,10 +67,17 @@
 //                   input filter must drop it; with --compose, a, ⌘↩ and
 //                   Escape while the body has focus
 //   --compose       the compose sheet's timeline instead (above)
+//   --triggers <t>  the lock triggers' timeline instead (above): switch
+//                   (about 5 s; the Finder comes to the front) or idle
+//                   (about 5.5 min; no input meanwhile). With --post, idle
+//                   also posts a ↓ key to this process every 20 s, which
+//                   must not count as input. At the end, the app that was
+//                   in front before is asked to be active again
 
 import AppKit
 import AVFoundation
 import Carbon.HIToolbox
+import OSLog
 import Security
 
 setvbuf(stdout, nil, _IOLBF, 0)
@@ -94,6 +109,13 @@ let frameArg = value("--frame").flatMap(screenRect)
 let scanning = args.contains("--scan")
 let posting = args.contains("--post")
 let composing = args.contains("--compose")
+let triggers = value("--triggers")
+if let triggers, !["switch", "idle"].contains(triggers) {
+    print("usage: --triggers switch|idle")
+    exit(2)
+}
+/// Brev's idle limit in seconds, and how often its timer looks.
+let idleLimit = Double(LockState.idleLimitNanos) / 1e9, idleTick = LockState.idleCheckInterval
 
 // MARK: - Fake letters
 
@@ -273,7 +295,7 @@ func finish() -> Never {
     exit(failures == 0 ? 0 : 1)
 }
 // A safety net: the host never outlives its run by much.
-DispatchQueue.main.asyncAfter(deadline: .now() + hold + 60) {
+DispatchQueue.main.asyncAfter(deadline: .now() + hold + 60 + (triggers == "idle" ? idleLimit + idleTick + 30 : 0)) {
     check("finished in time", false)
     finish()
 }
@@ -351,8 +373,11 @@ lock.session = session
 lock.showLockScreen = { window.root.show(NoticeViewController(L10n.unlockTitle)) }
 // Unlocked, as LockController.endUnlock records it, without asking whether
 // this (inactive) app is active; the idle timer and the triggers stay off.
-let generation = lock.state.beginUnlock()
-_ = lock.state.endUnlock(generation, succeeded: true, appActive: true)
+// --triggers goes through LockController itself.
+if triggers == nil {
+    let generation = lock.state.beginUnlock()
+    _ = lock.state.endUnlock(generation, succeeded: true, appActive: true)
+}
 
 let lists = all(SecureListView.self, in: mail.view)
 let letters = all(LetterStackView.self, in: mail.view).first!
@@ -707,7 +732,186 @@ func composeCancelAndLock() {
     }
 }
 
-if composing {
+// MARK: - The lock triggers (--triggers)
+
+/// The app in front before this one asked to be active.
+let frontBefore = NSWorkspace.shared.frontmostApplication
+
+/// `body` once, after `seconds`, from a timer in the common modes. Not a
+/// block on the main queue: that serial queue waits while a menu is tracked
+/// inside one of its blocks.
+func later(_ seconds: TimeInterval, _ body: @escaping () -> Void) {
+    RunLoop.main.add(Timer(timeInterval: seconds, repeats: false) { _ in body() }, forMode: .common)
+}
+
+/// `next(true)` as soon as `done()` holds (polled every 0.1 s in the common
+/// modes), or `next(false)` after `seconds`.
+func waitFor(_ seconds: TimeInterval, _ done: @escaping () -> Bool, then next: @escaping (Bool) -> Void) {
+    let end = Date(timeIntervalSinceNow: seconds)
+    RunLoop.main.add(Timer(timeInterval: 0.1, repeats: true) { t in
+        let ok = done()
+        guard ok || Date() >= end else { return }
+        t.invalidate()
+        next(ok)
+    }, forMode: .common)
+}
+
+/// Asks to be the active app, with its window key. The deprecated call:
+/// the macOS 14 one does not activate an app in the background (lock spike).
+func becomeActive(then next: @escaping (Bool) -> Void) {
+    NSApp.activate(ignoringOtherApps: true)
+    waitFor(5, { NSApp.isActive }) { ok in
+        if ok { window.makeKeyAndOrderFront(nil) }
+        next(ok)
+    }
+}
+
+/// The Finder becomes the active app, as when a human switches to it.
+func switchAway() {
+    guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first
+    else { return }
+    NSApp.yieldActivation(to: finder)
+    _ = finder.activate(from: .current, options: [])
+}
+
+/// What this process logged in `category` of Brev's subsystem since `since`.
+func logged(_ category: String, since: Date) -> [String] {
+    guard let store = try? OSLogStore(scope: .currentProcessIdentifier),
+          let entries = try? store.getEntries(at: store.position(date: since),
+                                              matching: NSPredicate(format: "subsystem == %@ AND category == %@",
+                                                                    "no.brev.app", category))
+    else { return ["(this process's log could not be read)"] }
+    return entries.compactMap { ($0 as? OSLogEntryLog)?.composedMessage }
+}
+
+/// The app that was in front is asked to be active again; then exit.
+func triggersEnd() {
+    if let front = frontBefore, front != .current, !front.isTerminated {
+        if NSApp.isActive {
+            NSApp.yieldActivation(to: front)
+            _ = front.activate(from: .current, options: [])
+        } else {
+            _ = front.activate(options: [])
+        }
+    }
+    later(0.3) { finish() }
+}
+
+/// --triggers switch: resigning active while an unlock is in flight does
+/// not lock (the Touch ID panel may take activation); once unlocked, it
+/// runs the lock sequence.
+func triggersSwitch() {
+    becomeActive { active in
+        check("switch: this app became active", active)
+        guard active else { return triggersEnd() }
+        let before = lock.state.generation
+        let started = lock.beginUnlock()
+        switchAway()
+        waitFor(3, { !NSApp.isActive }) { away in
+            later(0.3) {
+                check("switch: while an unlock is in flight, the Finder becoming active does not lock",
+                      away && lock.state.generation == before && !session.brev.isLocked() && shownLetters() > 0,
+                      "away=\(away), generation \(before) -> \(lock.state.generation)")
+                becomeActive { back in
+                    let unlocked = back && lock.endUnlock(started, succeeded: true)
+                    check("switch: the unlock ends with this app active, and Brev is unlocked", unlocked)
+                    guard unlocked else { return triggersEnd() }
+                    later(0.5, switchWhileUnlocked)
+                }
+            }
+        }
+    }
+}
+
+func switchWhileUnlocked() {
+    let views = all(ContentView.self, in: mail.view), buffers = views.flatMap { $0.pool }
+    check("before the switch: content views hold pixels (control)", buffers.contains(where: hasPixels))
+    let since = Date(), before = lock.state.generation
+    switchAway()
+    waitFor(3, { lock.state.generation != before }) { locked in
+        check("switch: the Finder became active, and Brev locked", locked && !NSApp.isActive)
+        checkLocked("switch", views, buffers)
+        later(1) {
+            let lines = logged("lock", since: since)
+            check("switch: the log says lock reason=resignActive, once", lines == ["lock reason=resignActive"],
+                  "\(lines)")
+            triggersEnd()
+        }
+    }
+}
+
+/// --triggers idle: no input on Brev's own clock for 300 s runs the lock
+/// sequence, also while the Brev menu is open, which the lock closes. With
+/// --post, keys posted to this process are dropped and do not count.
+func triggersIdle() {
+    becomeActive { active in
+        check("idle: this app became active", active)
+        guard active else { return triggersEnd() }
+        let lastInput = BrevApplication.lastHumanInput
+        let started = lock.beginUnlock()
+        let unlocked = lock.endUnlock(started, succeeded: true)
+        check("idle: the unlock ends with this app active, and Brev is unlocked", unlocked)
+        guard unlocked else { return triggersEnd() }
+        let since = Date(), before = lock.state.generation
+        print("idle: no input from now; the lock is due in \(Int(idleLimit)) to \(Int(idleLimit + idleTick)) s")
+        var views: [ContentView] = [], buffers: [CVPixelBuffer] = []
+        later(1) {
+            views = all(ContentView.self, in: mail.view)
+            buffers = views.flatMap { $0.pool }
+            check("idle: content views hold pixels (control)", buffers.contains(where: hasPixels))
+        }
+        // Posts stop before the menu opens: its tracking loop takes events
+        // without BrevApplication, so a dropped key would not be logged.
+        var posts = 0, poster: Timer?
+        if posting && !CGPreflightPostEventAccess() { print("skip --post: this process may not post events") }
+        if posting && CGPreflightPostEventAccess() {
+            poster = commonModeTimer(every: 20) {
+                guard Date().timeIntervalSince(since) < idleLimit - 20 else { return }
+                for down in [true, false] {
+                    CGEvent(keyboardEventSource: nil, virtualKey: 125, keyDown: down)?.postToPid(getpid())
+                }
+                posts += 1
+            }
+        }
+        // The Brev menu left open for the last seconds, as V25 asks.
+        var menuOpen = false, menuClosedByLock = false
+        later(idleLimit - 10) {
+            guard lock.state.generation == before, let menu = NSApp.mainMenu?.items.first?.submenu else { return }
+            menuOpen = true
+            menu.popUp(positioning: nil, at: NSPoint(x: 20, y: 20), in: window.contentView)
+            menuClosedByLock = lock.state.generation != before
+            menuOpen = false
+        }
+        waitFor(idleLimit + idleTick + 20, { lock.state.generation != before }) { locked in
+            poster?.invalidate()
+            let idle = Double(clock_gettime_nsec_np(CLOCK_MONOTONIC) - lastInput) / 1e9
+            // The checks wait for the menu's tracking loop to end.
+            waitFor(5, { !menuOpen }) { closed in
+                check("idle: Brev locked \(Int(idle)) s after the last input",
+                      locked && idle >= idleLimit && idle <= idleLimit + idleTick + 1)
+                check("idle: no input counted meanwhile\(posts > 0 ? " (\(posts) posted keys)" : "")",
+                      BrevApplication.lastHumanInput == lastInput)
+                check("idle: the Brev menu was open, and the lock closed it", closed && menuClosedByLock)
+                checkLocked("idle", views, buffers)
+                later(1) {
+                    let lines = logged("lock", since: since)
+                    check("idle: the log says lock reason=idle, once", lines == ["lock reason=idle"], "\(lines)")
+                    if posts > 0 {
+                        let dropped = logged("input", since: since).filter { $0.hasPrefix("dropped synthetic 10 ") }.count
+                        check("idle: every posted key-down arrived and was dropped", dropped == posts,
+                              "\(dropped) of \(posts)")
+                    }
+                    triggersEnd()
+                }
+            }
+        }
+    }
+}
+
+if let triggers {
+    lock.start()
+    if triggers == "switch" { triggersSwitch() } else { triggersIdle() }
+} else if composing {
     composeStart()
 } else {
     announceReady(then: mailChecks)
@@ -857,13 +1061,7 @@ func sendAndLock() {
         let buffers = views.flatMap { $0.pool }
         check("before lock: content views hold pixels (control)", buffers.contains(where: hasPixels))
         lock.lock(.manual)
-        check("lock: every pixel buffer of every content view is zero",
-              !buffers.contains(where: hasPixels) && views.allSatisfy { !$0.pool.contains(where: hasPixels) },
-              "\(buffers.filter(hasPixels).count) of \(buffers.count) buffers")
-        check("lock: no content view's layer shows a pixel", !views.contains(where: showsPixels))
-        check("lock: lists and letters wiped", lists.allSatisfy { $0.count == 0 } && letters.isEmpty)
-        check("lock: the session is locked", session.brev.isLocked())
-        check("lock: the lock screen replaced the mail screen", window.root.child is NoticeViewController)
+        checkLocked("lock", views, buffers)
         // Brev releases the mail screen at the end of this run-loop turn;
         // this host keeps its views alive, which makes the scan stricter.
         // The lock sequence ran SelfScan's needle control at its start.
@@ -875,6 +1073,19 @@ func sendAndLock() {
         checkHardenedChildren()
         finish()
     }
+}
+
+/// What the lock sequence leaves, whatever ran it: `views` and `buffers`
+/// were taken while the letters were shown (a view that leaves its window
+/// gives its pool back, so they are kept here).
+func checkLocked(_ label: String, _ views: [ContentView], _ buffers: [CVPixelBuffer]) {
+    check("\(label): every pixel buffer of every content view is zero",
+          !buffers.contains(where: hasPixels) && views.allSatisfy { !$0.pool.contains(where: hasPixels) },
+          "\(buffers.filter(hasPixels).count) of \(buffers.count) buffers")
+    check("\(label): no content view's layer shows a pixel", !views.contains(where: showsPixels))
+    check("\(label): lists and letters wiped", lists.allSatisfy { $0.count == 0 } && letters.isEmpty)
+    check("\(label): the session is locked", session.brev.isLocked())
+    check("\(label): the lock screen replaced the mail screen", window.root.child is NoticeViewController)
 }
 
 /// A sheet and a child window made with the default sharing type get

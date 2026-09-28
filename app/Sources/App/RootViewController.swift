@@ -4,9 +4,9 @@
 // §4.1, §8.1, §8.4). The window's content view controller is set once;
 // onboarding, the lock screen and the mail window are children shown one at
 // a time inside it, so the window keeps its size across lock and unlock.
-// In the lock sequence the root has the current screen wipe what it holds,
-// then every sheet still attached wipes what it holds (the compose sheet)
-// and ends, and LockController shows the lock screen.
+// In the lock sequence every sheet still attached wipes what it holds (the
+// compose sheet) and ends, then the current screen wipes what it holds, and
+// LockController shows the lock screen.
 
 import AppKit
 
@@ -36,16 +36,17 @@ final class RootViewController: NSViewController {
         child = next
     }
 
-    /// Lock sequence steps 2 and 3 (§8.4): the current screen wipes its
-    /// content, then every sheet on the window wipes its own and ends.
+    /// Lock sequence steps 2 and 3 (§8.4), in that order: every sheet on the
+    /// window wipes its own content and ends, then the current screen wipes
+    /// its content.
     func wipeContent() {
-        (child as? ContentHolder)?.wipeAll()
         if let window = view.window {
             window.sheets.forEach {
                 ($0 as? ContentHolder)?.wipeAll()
                 window.endSheet($0)
             }
         }
+        (child as? ContentHolder)?.wipeAll()
     }
 }
 
