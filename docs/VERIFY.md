@@ -1,8 +1,8 @@
 # Brev — Phase 2 verification
 
 The manual checklist that CLAUDE.md §5 (Phase 2) asks for, built from
-`docs/PHASE2_DESIGN.md` §10. WP12 runs it and records the results in D-0061
-(the design's D-0058; its §13 numbers shift by three, D-0035).
+`docs/PHASE2_DESIGN.md` §10. Its results are recorded in D-0053 (the design's
+D-0058; `docs/DECISIONS.md` maps the design's decision numbers).
 Rows V1–V45 follow the design's table, except where "Changes from the design"
 at the end says otherwise. V46–V54 cover mechanisms that the table had no row
 for (see "Coverage" below).
@@ -10,10 +10,11 @@ for (see "Coverage" below).
 Status: written in WP0, 2026-09-27, and revised after its review. WP4
 (2026-09-28) built the tools in `tools/verify/` and ran every row a machine
 can run without Touch ID; the results are in `docs/VERIFY-RESULTS.md`. Rows
-marked "per D-0060" become final after the human GUI-spike session. Review
+marked "per D-0052" become final after the human GUI-spike session. Review
 round 1 (2026-09-28) changed V39, V41, V43 and V51 and added V53 and V54;
 review round 2 changed V28 and the lock probe (V45) (see "Changes from the
-design").
+design"). WP12 ran the machine rows again at `fb6f140` (D-0053); the human
+run is still to come (`docs/USER_SESSION.md`).
 
 ## Setup
 
@@ -23,7 +24,7 @@ design").
   so V39 measures a process that is signed and configured like Release.
 - Tools live in `tools/verify/` and are built by `tools/verify/build.sh`
   (WP4) into `core/target/verify` (`$T`). They are never linked into
-  Brev.app (design D-0054, D-0057 after the renumbering).
+  Brev.app (D-0051).
 - Brev locks as soon as another app is active, Terminal included. For an A
   part that needs Brev unlocked with a letter or the compose sheet open,
   start the command with a delay (`sleep 30; …`), switch to Brev, unlock,
@@ -74,9 +75,9 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 - **Positive control**: every A row that reads through a permission has one
   in the same run. Without it, "nothing found" can also mean "nothing could
   be read".
-- **per D-0060**: the procedure or the expected result depends on a GUI-spike
-  fact (the §14.2 item is in brackets; D-0060 is the design's D-0057 after the
-  renumbering). Update the row from D-0060 before the run. Where the spike
+- **per D-0052**: the procedure or the expected result depends on a GUI-spike
+  fact (the §14.2 item is in brackets; D-0052 holds the design's D-0057).
+  Update the row from D-0052 before the run. Where the spike
   says "stop and ask the owner", the row waits for the answer. The design's
   open questions 1 (file substitution) and 3 (backup exclusion) are answered
   in D-0033 items 2 and 4: onboarding shows the `onboarding.rules.gone`
@@ -92,16 +93,16 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 | V1 | Sandboxed + hardened | on `$APP` and `$VAPP`: `codesign -dv`: `runtime`, `TeamIdentifier=AV26DNQ5SC`; entitlements only `app-sandbox`, `keychain-access-groups` = `AV26DNQ5SC.no.brev.app`, and the `application-identifier` and `team-identifier` the profile adds; no `get-task-allow` | A | – |
 | V2 | Plist and bundle | on `$APP` and `$VAPP`: `plutil -p`: none of D-0009's keys; `NSPrincipalClass = BrevApplication`; `LSEnvironment.MallocScribble = 1`. No extension, App Intents metadata, XPC service, sdef, Quick Look or Spotlight plug-in, bundle, framework or nested app anywhere in the bundle, and `Contents` holds only `Info.plist`, `MacOS`, `PkgInfo`, `Resources`, `_CodeSignature` and `embedded.provisionprofile` (team signing, D-0035) | A | – |
 | V3 | No AppleScript | `sdef` fails; with Brev running, `osascript -e 'tell application "Brev" to get name of every window'` must fail with an error from Brev itself (expected -1708, errAEEventNotHandled; record the code). -1743 (not permitted) or -600 (not running) means the event never reached Brev and fails the row (grant Automation first) | A | – |
-| V4 | ⇧⌘4 (window and area), ⇧⌘5 recording | a marker letter open: content absent or black | H | per D-0060 (U1) |
-| V5 | `screencapture` | `-x` and `-V 3` show no letter; `-l <id>` (id from `$T/windows`) fails; control: another app's window is visible. `$T/capture-probe --screencapture` runs all four with its own control window and judges each | A | per D-0060 (U1) |
-| V6 | ScreenCaptureKit | `$T/capture-probe`: display filter, window filter (`includeChildWindows`), `captureImage(in:)`, `captureScreenshot(…)` (26), one `SCStream` frame each with a display and a window filter; no letter in any (the window excluded, or its panes empty); control: its control window and text are visible | H grants, A runs | per D-0060 (U1) |
-| V7 | Legacy CG capture, and the paths `.none` does not stop | a marker letter open: `$T/capture-probe --legacy` (built for 14.0): `CGWindowListCreateImage`, `CGDisplayCreateImage`, `CGDisplayStream` and `AVCaptureScreenInput`; and one `CGDisplayStream` frame through `dlsym` from a binary built for 26.0 (`$T/capture-probe-26`, which `--legacy` runs). No letter in any: the last three show the window with empty panes (the protected layer, D-0034); control as V6 | A | per D-0060 (U1) |
-| V8 | Screen Sharing / ARD / AirPlay | a second Mac views, observes, mirrors: no letter visible | H | per D-0060 (U1) |
+| V4 | ⇧⌘4 (window and area), ⇧⌘5 recording | a marker letter open: content absent or black | H | per D-0052 (U1) |
+| V5 | `screencapture` | `-x` and `-V 3` show no letter; `-l <id>` (id from `$T/windows`) fails; control: another app's window is visible. `$T/capture-probe --screencapture` runs all four with its own control window and judges each | A | per D-0052 (U1) |
+| V6 | ScreenCaptureKit | `$T/capture-probe`: display filter, window filter (`includeChildWindows`), `captureImage(in:)`, `captureScreenshot(…)` (26), one `SCStream` frame each with a display and a window filter; no letter in any (the window excluded, or its panes empty); control: its control window and text are visible | H grants, A runs | per D-0052 (U1) |
+| V7 | Legacy CG capture, and the paths `.none` does not stop | a marker letter open: `$T/capture-probe --legacy` (built for 14.0): `CGWindowListCreateImage`, `CGDisplayCreateImage`, `CGDisplayStream` and `AVCaptureScreenInput`; and one `CGDisplayStream` frame through `dlsym` from a binary built for 26.0 (`$T/capture-probe-26`, which `--legacy` runs). No letter in any: the last three show the window with empty panes (the protected layer, D-0034); control as V6 | A | per D-0052 (U1) |
+| V8 | Screen Sharing / ARD / AirPlay | a second Mac views, observes, mirrors: no letter visible | H | per D-0052 (U1) |
 | V9 | Every window excluded | `$T/windows`: `kCGWindowSharingState == 0` for all Brev windows, once with the compose sheet open and once with `ConfirmSheet` open (it only exists in an error state, so do it during V38); control: the sheet is listed as its own window. On macOS 26.2 every regular app owns four off-screen menu-bar-sized windows with sharing state 1; the tool marks them and still counts them (see `docs/VERIFY-RESULTS.md`) | A (H opens) | – |
-| V10 | Accessibility Inspector | the contacts list, the thread list, the letter, the compose fields and the recipient show no text | H | per D-0060 (U3) |
-| V11 | AX dump | `$T/axdump Brev`: all attributes and parameterized attributes of every element; marker absent; control: title "Brev" present | A (H grants AX) | per D-0060 (U3) |
-| V12 | GUI scripting | System Events `entire contents of window 1`: marker absent; control: the button titles are listed | A | per D-0060 (U3) |
-| V13 | AX press refused | `$T/axdump Brev --press` on *Send* (compose sheet open, marker typed) and *Lås opp med Touch ID*, and during V38 on *Slett alt og start på nytt* and `ConfirmSheet`'s *Slett alt*: the files in `$D` are unchanged (a send rewrites `brev.db`, an unlock rewrites `biometry.state`, a reset deletes files), no Touch ID prompt appears, and the `AXError` axdump prints is recorded. Menu items: only harmless actions; control: pressing *Lås Brev* through AX locks | A + H looks | per D-0060 (U3) |
+| V10 | Accessibility Inspector | the contacts list, the thread list, the letter, the compose fields and the recipient show no text | H | per D-0052 (U3) |
+| V11 | AX dump | `$T/axdump Brev`: all attributes and parameterized attributes of every element; marker absent; control: title "Brev" present | A (H grants AX) | per D-0052 (U3) |
+| V12 | GUI scripting | System Events `entire contents of window 1`: marker absent; control: the button titles are listed | A | per D-0052 (U3) |
+| V13 | AX press refused | `$T/axdump Brev --press` on *Send* (compose sheet open, marker typed) and *Lås opp med Touch ID*, and during V38 on *Slett alt og start på nytt* and `ConfirmSheet`'s *Slett alt*: the files in `$D` are unchanged (a send rewrites `brev.db`, an unlock rewrites `biometry.state`, a reset deletes files), no Touch ID prompt appears, and the `AXError` axdump prints is recorded. Menu items: only harmless actions; control: pressing *Lås Brev* through AX locks | A + H looks | per D-0052 (U3) |
 | V14 | ⌘C, ⌘X, ⌘A, ⌘V | `printf PB-CONTROL \| pbcopy` first; in the letter and compose views nothing happens and ⌘V inserts nothing; `pbpaste` still prints `PB-CONTROL` | H + A | – |
 | V15 | Menus | only Brev and Arkiv next to the Apple menu, so no Edit menu with Copy or Paste; right-click in content shows no menu | H | – |
 | V16 | Drag | dragging in a letter, onto TextEdit and the Finder, moves nothing out | H | – |
@@ -110,24 +111,24 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 | V19 | No plaintext in logs | `/usr/bin/log stream --level debug` for the whole run, and `/usr/bin/log show --info --debug` from the run's start afterwards (predicate `process == "Brev"`): marker absent (UTF-8 and UTF-16LE) in both; control: `lock reason=` lines present | A | – |
 | V20 | Crash report | `kill -SEGV` an unlocked Brev with a marker letter open (start with a delay: Terminal in front locks Brev); wait for the report of that kill (it is written a few seconds later, so the newest `Brev*.ips` right after the kill is an older one) and scan it: marker absent; control: the report names `SIGSEGV` and the killed PID, and the V19 stream's last lock or unlock line before the kill is `unlocked` | A | – |
 | V21 | Spotlight | `mdfind BREV-SECRET-BODY`: no path outside this checkout (the repo's docs hold the marker; Brev's container is not indexed, and V17 covers it); control: indexing is enabled and `mdfind` finds `docs/VERIFY.md`. The binary links no CoreSpotlight and references no `CSSearchable…` or `NSUserActivity` class (donation through the API) | A | – |
-| V22 | Switching app locks | ⌘-Tab away: the lock screen; log `lock reason=resignActive` | H + A | per D-0060 (U4) |
-| V23 | Screen lock locks | ⌃⌘Q: `lock reason=screenLocked` | H + A | per D-0060 (U4) |
-| V24 | Sleep locks | sleep and wake: locked | H | per D-0060 (U4) |
-| V25 | Idle locks | 5 min without input, also with the Brev menu left open: locked | H | per D-0060 (U4.2) |
+| V22 | Switching app locks | ⌘-Tab away: the lock screen; log `lock reason=resignActive` | H + A | per D-0052 (U4) |
+| V23 | Screen lock locks | ⌃⌘Q: `lock reason=screenLocked` | H + A | per D-0052 (U4) |
+| V24 | Sleep locks | sleep and wake: locked | H | per D-0052 (U4) |
+| V25 | Idle locks | 5 min without input, also with the Brev menu left open: locked | H | per D-0052 (U4.2) |
 | V26 | No prompt without a human | `open "$APP"`; `osascript -e 'activate application "Brev"'`: no Touch ID dialog | H | – |
-| V27 | Touch ID | exactly one prompt; no password button; *Avbryt* returns to the lock screen (check this on the regular lock screen: at onboarding's first unlock, *Avbryt* stays on that page, design §5.3 step 8) | H | per D-0060 (U4.1) |
-| V28 | Launch hygiene | Brev quit first. `open "$APP" --args -NSTraceEvents YES` exits; `defaults write -g NSTraceEvents -bool YES` then launch → only `launch.error.unsafe`, no unlock button; delete the default right after; the same with `TSMEventTracing` (HIToolbox's key-event trace, which works in Release, D-0064); `open --env NSZombieEnabled=YES "$APP"` → a re-executed process without the variable, or `launch.error.unsafe` if re-exec does not work in the sandbox | A + H looks | per D-0060 (L, M) |
+| V27 | Touch ID | exactly one prompt; no password button; *Avbryt* returns to the lock screen (check this on the regular lock screen: at onboarding's first unlock, *Avbryt* stays on that page, design §5.3 step 8) | H | per D-0052 (U4.1) |
+| V28 | Launch hygiene | Brev quit first. `open "$APP" --args -NSTraceEvents YES` exits; `defaults write -g NSTraceEvents -bool YES` then launch → only `launch.error.unsafe`, no unlock button; delete the default right after; the same with `TSMEventTracing` (HIToolbox's key-event trace, which works in Release, D-0064); `open --env NSZombieEnabled=YES "$APP"` → a re-executed process without the variable, or `launch.error.unsafe` if re-exec does not work in the sandbox | A + H looks | per D-0052 (L, M) |
 | V29 | Second instance | during onboarding, `open -n "$APP"`: the second instance exits (log `second instance`); files unchanged | A | – |
-| V30 | Secure input flag | `ioreg -l -w 0 \| grep kCGSSessionSecureInputPID` = Brev's PID only while a compose field has focus | A (H focuses) | per D-0060 (U2.4) |
-| V31 | Keyloggers see nothing | `$T/keylisten` (listen-only CGEventTap + IOHIDManager, Input Monitoring granted) while typing the marker in compose: no key values; control: it sees keys typed in TextEdit. If IOHIDManager sees key values: stop and ask the owner | H + A | per D-0060 (U2.4) |
-| V32 | Synthetic keys | `$T/poster key <pid> --via all --global` (CGEventPost at HID and session taps, `CGEventPostToPid`, each with field 41 untouched, set to 0, and set to Brev's PID; `AXUIElementPostKeyboardEvent`; `IOHIDPostEvent`; the taps and `IOHIDPostEvent` post only while Brev is in front, so start it with a delay); System Events `keystroke`: nothing typed; log `dropped synthetic`; control: the same posts type into TextEdit | A | per D-0060 (U2.2) |
-| V33 | Synthetic clicks | `$T/poster click <pid> <x> <y> --via all --global` on *Send* / *Lås opp med Touch ID* (their `AXPosition` and `AXSize` from `$T/axdump`) with the same variants: no effect; control as V32 | A | per D-0060 (U2.2) |
-| V34 | Text services | dictation, emoji picker, Character Viewer, press-and-hold, Writing Tools, Look Up (⌃⌘D, force click), text replacement, Services shortcuts, Touch Bar suggestions: none reach compose. No autocorrect, spell-check or predictions: `teh ` stays `teh `, no spelling underline, no inline-prediction text | H | per D-0060 (U2.3) |
-| V35 | Norwegian input | æ ø å Æ Ø Å; ´+e → é; ¨+u → ü; ⇧´+e → è; ⌥¨ then n → ñ; @ (the key left of Return); ⇧4 $; ⌥7 \|; ⇧⌥7 \\; ⌥8/⌥9 [ ]; ⇧⌥8/⇧⌥9 { }; Caps Lock; key repeat | H | per D-0060 (U2.1) |
+| V30 | Secure input flag | `ioreg -l -w 0 \| grep kCGSSessionSecureInputPID` = Brev's PID only while a compose field has focus | A (H focuses) | per D-0052 (U2.4) |
+| V31 | Keyloggers see nothing | `$T/keylisten` (listen-only CGEventTap + IOHIDManager, Input Monitoring granted) while typing the marker in compose: no key values; control: it sees keys typed in TextEdit. If IOHIDManager sees key values: stop and ask the owner | H + A | per D-0052 (U2.4) |
+| V32 | Synthetic keys | `$T/poster key <pid> --via all --global` (CGEventPost at HID and session taps, `CGEventPostToPid`, each with field 41 untouched, set to 0, and set to Brev's PID; `AXUIElementPostKeyboardEvent`; `IOHIDPostEvent`; the taps and `IOHIDPostEvent` post only while Brev is in front, so start it with a delay); System Events `keystroke`: nothing typed; log `dropped synthetic`; control: the same posts type into TextEdit | A | per D-0052 (U2.2) |
+| V33 | Synthetic clicks | `$T/poster click <pid> <x> <y> --via all --global` on *Send* / *Lås opp med Touch ID* (their `AXPosition` and `AXSize` from `$T/axdump`) with the same variants: no effect; control as V32 | A | per D-0052 (U2.2) |
+| V34 | Text services | dictation, emoji picker, Character Viewer, press-and-hold, Writing Tools, Look Up (⌃⌘D, force click), text replacement, Services shortcuts, Touch Bar suggestions: none reach compose. No autocorrect, spell-check or predictions: `teh ` stays `teh `, no spelling underline, no inline-prediction text | H | per D-0052 (U2.3) |
+| V35 | Norwegian input | æ ø å Æ Ø Å; ´+e → é; ¨+u → ü; ⇧´+e → è; ⌥¨ then n → ñ; @ (the key left of Return); ⇧4 $; ⌥7 \|; ⇧⌥7 \\; ⌥8/⌥9 [ ]; ⇧⌥8/⇧⌥9 { }; Caps Lock; key repeat | H | per D-0052 (U2.1) |
 | V36 | Onboarding | the five rules texts (`touchid`, `nobackup`, `fingers`, `prompt`, and `gone`, the warning D-0033 item 2 chose) appear in bokmål; *Opprett nøkler* stays disabled until *Jeg forstår …* is ticked | H | – |
 | V37 | Crash during onboarding | `kill -9` after *Opprett nøkler*, before the first unlock: relaunch shows onboarding; only fresh files exist after the next attempt | A + H | – |
 | V38 | Damaged and reset | Brev quit, move `brev.db` out of `$D`, launch: `unlock.error.damaged` with only *Slett alt og start på nytt*; files unchanged after *Avbryt* in `ConfirmSheet`; after *Slett alt* onboarding starts and `$D` holds only `.lock`; quit and launch again: onboarding (the wrapped-DEK item is gone too) | H + A | – |
-| V39 | Heap residue in the real app | Verify build: send and read a marker letter to Ekko, lock; log `selfscan u8=0 u16=0 glyph=0 scribble=0 probe=<n>` with n > 0. `scribble` is the scribble probe (`app/Tests/scan.c`): a 32 KiB block filled with a pattern and freed keeps no copy of it, so `MallocScribble` takes effect in this process (V49 only reads the variable); `probe` counts the same block while it is allocated (its positive control). `glyph` counts the marker's glyph ids in `GlyphFlush.attrs`'s font (stored XORed, as in harness case 4): after the lock it shows that `GlyphFlush` cleared the control's line of the marker. A typed marker letter leaves no glyph ids even without scribbling (its lines are short, and libmalloc zeroes small freed blocks itself), so `glyph` says nothing about scribbling. Control: the `selfscan control` line (at the start of the lock, the letter still open) shows u16 > 0 and needle > 0; its glyph is 0 (see "Changes from the design"). Harness case 7 (V45) runs the same probe without scribbling and must find the freed block kept, so the probe can fail | H + A | per D-0060 (M) |
+| V39 | Heap residue in the real app | Verify build: send and read a marker letter to Ekko, lock; log `selfscan u8=0 u16=0 glyph=0 scribble=0 probe=<n>` with n > 0. `scribble` is the scribble probe (`app/Tests/scan.c`): a 32 KiB block filled with a pattern and freed keeps no copy of it, so `MallocScribble` takes effect in this process (V49 only reads the variable); `probe` counts the same block while it is allocated (its positive control). `glyph` counts the marker's glyph ids in `GlyphFlush.attrs`'s font (stored XORed, as in harness case 4): after the lock it shows that `GlyphFlush` cleared the control's line of the marker. A typed marker letter leaves no glyph ids even without scribbling (its lines are short, and libmalloc zeroes small freed blocks itself), so `glyph` says nothing about scribbling. Control: the `selfscan control` line (at the start of the lock, the letter still open) shows u16 > 0 and needle > 0; its glyph is 0 (see "Changes from the design"). Harness case 7 (V45) runs the same probe without scribbling and must find the freed block kept, so the probe can fail | H + A | per D-0052 (M) |
 | V40 | Key storage | no key file: `$D` holds only `.lock` (0 B), `biometry.state` (32 B, if written) and the three stores; all files 0600, the directory 0700; `security find-generic-password -s no.brev.app` finds nothing (the keys and the wrapped DEK are in the data protection keychain, which `security` cannot list; a copy in a file keychain would be a bug); `xattr`/`tmutil isexcluded` shows the folder excluded | A | – |
 | V41 | Nothing else written | no `Saved Application State`; in Application Support only `.lock`, `biometry.state`, `brev.db`, `peer-1.db` and `peer-2.db` (design §5.1's table still lists the key files D-0035 removed; any of them fails the row). Run after onboarding, again after V44's quit, and again after V20's crash | A | – |
 | V42 | Echo | the three panes show Ekko and Speil, the threads and the letters; a letter to Ekko and one to Speil show as sent; each echo arrives within 3 s in the same thread | H | – |
@@ -135,11 +136,11 @@ hits() {  # hits NEEDLE PATH...: every file under PATH that holds NEEDLE as UTF-
 | V44 | Quit while unlocked | relaunch starts on the lock screen | H | – |
 | V45 | Automated suite | `scripts/test.sh` exits 0 on this Mac (including the Swift harness, the lock probe and the forbidden-API grep) | A | – |
 | V46 | Manual lock, blank-on-lock | with a marker letter open: ⌘L, the *Lås* button and the menu item *Lås Brev*; with the compose sheet open and the marker typed: ⌘L and *Lås Brev* (the sheet blocks clicks on the *Lås* button behind it). Each shows only the lock screen at once; the sheet is gone and secure input is off; after the next unlock the draft is gone; log `lock reason=manual` | H + A | – |
-| V47 | Unlock that ends while Brev is inactive | click *Lås opp med Touch ID*, switch to another app while the Touch ID panel is up, then authenticate: Brev stays on the lock screen | H | per D-0060 (U4.1) |
-| V48 | Unlock errors | wrong fingers until Touch ID locks out: `unlock.error.lockout`, never a password button. Then, as the last row of the run: add a fingerprint in System Settings: `unlock.error.fingers` with the reset button. This makes the test install unreadable, as designed, and also invalidates other apps' `.biometryCurrentSet` keys | H | per D-0060 (U4.3) |
-| V49 | Malloc scribbling in the real process | `ps -wwE` shows `MallocScribble=1` for Brev started with `open "$APP"`, from the Finder and from the Dock; `open --env MallocScribble=0 "$APP"` → a re-executed process with `MallocScribble=1`, or `launch.error.unsafe` | A + H launches | per D-0060 (M) |
+| V47 | Unlock that ends while Brev is inactive | click *Lås opp med Touch ID*, switch to another app while the Touch ID panel is up, then authenticate: Brev stays on the lock screen | H | per D-0052 (U4.1) |
+| V48 | Unlock errors | wrong fingers until Touch ID locks out: `unlock.error.lockout`, never a password button. Then, as the last row of the run: add a fingerprint in System Settings: `unlock.error.fingers` with the reset button. This makes the test install unreadable, as designed, and also invalidates other apps' `.biometryCurrentSet` keys | H | per D-0052 (U4.3) |
+| V49 | Malloc scribbling in the real process | `ps -wwE` shows `MallocScribble=1` for Brev started with `open "$APP"`, from the Finder and from the Dock; `open --env MallocScribble=0 "$APP"` → a re-executed process with `MallocScribble=1`, or `launch.error.unsafe` | A + H launches | per D-0052 (M) |
 | V50 | Release has no Verify code | `nm` on the Release binary finds no `SelfScan` or `brev_scan` symbol; control: the same grep finds them in the Verify build | A | – |
-| V51 | Unlock stack residue | `TouchIDProbe.app --unlock` (built by `tools/verify/build.sh`, team-signed with Brev's bundle id and keychain group) with the final `brev-core`: the exact §5.4 closure (`UnlockService.unlock`, unchanged: KEK lookup, `SecKeyCreateDecryptedData` with ECIES, `brev.unlock`, in-place wipe), needles for the DEK, the ECDH output, the AES key, the IV and the two echo peers' DEKs (which `Brev.unlock` derives from the DEK): it prints PASS, i.e. 0 hits for the ECDH output, AES key and IV after the closure, 0 for everything after lock, at the scrub depth recorded for the unlock drop guard (design D-0035, D-0038 after the renumbering); control: while unlocked, the DEK and peer-DEK needles find Rust's copies (one each), and each needle is found once when made on purpose. Negative control (design §14.2 K): the same run with the build whose unlock scrub is disabled (`touchid-probe-scrub0`) prints `NEGATIVE CONTROL: residue …` and PASS for its own controls, so the scrub is what removes the residue; if it prints `NEGATIVE CONTROL EMPTY` instead, record that the PASS above does not show that the scrub works. If the shipped build fails, run the 128 KiB build (`touchid-probe-scrub128`); a change of depth goes to the owner (design §2.5). It uses Brev's own keychain names, so it runs only with Brev quit and not installed (run order step 2), and deletes what it made | H + A | per D-0060 (K) |
+| V51 | Unlock stack residue | `TouchIDProbe.app --unlock` (built by `tools/verify/build.sh`, team-signed with Brev's bundle id and keychain group) with the final `brev-core`: the exact §5.4 closure (`UnlockService.unlock`, unchanged: KEK lookup, `SecKeyCreateDecryptedData` with ECIES, `brev.unlock`, in-place wipe), needles for the DEK, the ECDH output, the AES key, the IV and the two echo peers' DEKs (which `Brev.unlock` derives from the DEK): it prints PASS, i.e. 0 hits for the ECDH output, AES key and IV after the closure, 0 for everything after lock, at the scrub depth recorded for the unlock drop guard (D-0039); control: while unlocked, the DEK and peer-DEK needles find Rust's copies (one each), and each needle is found once when made on purpose. Negative control (design §14.2 K): the same run with the build whose unlock scrub is disabled (`touchid-probe-scrub0`) prints `NEGATIVE CONTROL: residue …` and PASS for its own controls, so the scrub is what removes the residue; if it prints `NEGATIVE CONTROL EMPTY` instead, record that the PASS above does not show that the scrub works. If the shipped build fails, run the 128 KiB build (`touchid-probe-scrub128`); a change of depth goes to the owner (design §2.5). It uses Brev's own keychain names, so it runs only with Brev quit and not installed (run order step 2), and deletes what it made | H + A | per D-0052 (K) |
 | V52 | File substitution | copy the three stores in `$D` aside before V38; after the new onboarding, Brev quit, put the old stores back: the unlock fails with `unlock.error.damaged` (the new DEK does not open them), and nothing unlocks | H + A | – |
 | V53 | The view host's checks | no Brev needed; on the Release commit, nobody using the Mac: the view host (`tools/viewhost`: Brev's mail window, compose sheet, lock sequence and triggers with fake letters and a software KEK) prints PASS in mail mode (`--hold 1 --scan --post`: the protected layer, `draw(_:)` empty, pixel buffers zeroed on scroll-out and on lock, the Rust session locked, hardened sheets and child windows, a posted key dropped, the scribble probe), compose mode (`--compose --hold 1 --scan --post`: key-only typing, the ways in that must fail, secure input, the sheet wiped and freed after a send, Escape and a lock) and `--triggers switch` (switching app locks, not while an unlock is in flight). The compose and switch runs make the view host active, and the switch run brings the Finder to the front | A | – |
 | V54 | Open-documents event | Brev running (onboarding or the lock screen), and again unlocked with the compose sheet open and a field focused (start with a delay): `open -a "$APP" <any file>` adds no window to `$T/windows Brev` (AppKit's "cannot open" alert would be an unhardened window with sharing state 1 that takes key from the sheet and turns secure input off); with the sheet open, `kCGSSessionSecureInputPID` is still Brev's PID; log `open event ignored count=1` | A (H opens) | – |
@@ -419,15 +420,16 @@ without the owner (design §14.2). Where a row or its spike item says "stop and
 ask the owner" (V31; V32 and V33 if a posted event gets through; V4–V8 on a
 capture leak), that area stops until the owner answers.
 
-Results go to D-0061: the macOS build, the commit, and for each row pass,
+Results go to D-0053: the macOS build, the commit, and for each row pass,
 fail, or the D-entry that accepts it. `docs/VERIFY-RESULTS.md` holds the
 machine-run part (WP4).
 
-One open item is not a row: on a Mac that holds Brev's team signing key,
+One open item was not a row: on a Mac that holds Brev's team signing key,
 any same-user process can sign itself into Brev's App ID and keychain group
-(CLAUDE.md §2; D-0062). This Mac holds that key. The owner has not decided
-on it, so Phase 2 is not done until the owner accepts it as residual risk
-or chooses a remedy, and D-0061 records which.
+(CLAUDE.md §2; D-0062). This Mac holds that key. The owner accepted it on
+2026-09-28 while Brev holds only test letters (CLAUDE.md §2, commit
+`1aeccc5`); real letters go only on a Mac without that key. D-0053 records
+it.
 
 ## Changes from the design
 
@@ -455,8 +457,8 @@ or chooses a remedy, and D-0061 records which.
   count while it holds a CTLine of the marker in the same font, which proves
   that the needle is set and seen in the process; the lock sequence clears
   that line like any other. `tools/viewhost --scan` runs the same control and
-  the real lock sequence. WP12 records this with design D-0044 and D-0057
-  (D-0047 and D-0060 after the renumbering).
+  the real lock sequence. D-0045 and D-0052 record this (the design's D-0044
+  and D-0057).
 - V21: the design's `mdfind BREV-SECRET-BODY` finds this repo's own docs, so
   the row could never pass. It now ignores the checkout, has a control, and
   checks the binary for the Spotlight donation APIs.

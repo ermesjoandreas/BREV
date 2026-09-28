@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the verification tools of docs/VERIFY.md ("Tools") and the Verify
-# build of Brev. Tools only, never linked into Brev.app (design D-0054,
-# D-0057 in the shifted numbering): they are separate executables in the
+# build of Brev. Tools only, never linked into Brev.app
+# (docs/DECISIONS.md D-0051): they are separate executables in the
 # output folder, and Brev's Xcode project does not name this folder.
 #
 #   capture-probe, capture-probe-26   V5 to V7 (screen capture paths)

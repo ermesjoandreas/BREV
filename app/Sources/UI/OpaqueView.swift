@@ -5,7 +5,7 @@
 // attribute with nothing, so the AX tree never reaches a name, a subject or
 // a body. It has no context menu, offers nothing to Services, and ignores
 // Look Up (quickLook). It is no drag source and registers no drag type. The
-// input spike (U3, macOS 26.2; D-0060 in the shifted numbering) found that
+// input spike (U3, macOS 26.2; docs/DECISIONS.md D-0052) found that
 // a plain NSView already exposes nothing and an NSScrollView around one
 // shows only an empty AXScrollArea; the full set is kept as defence in
 // depth, and the design's fallback of one opaque container is not needed.
@@ -22,9 +22,9 @@
 // `sharingType = .none` keeps a window out of ScreenCaptureKit and
 // screencapture, but not out of CGDisplayStream or AVCaptureScreenInput; the
 // protected layer is missing from all four (capture spike, re-run at Brev's
-// window level 0 in WP11; D-0060 in the shifted numbering). Drawing into a
+// window level 0 in WP11; D-0052). Drawing into a
 // bitmap also keeps glyph ids out of AppKit's display list, which kept them
-// until after a lock (WP7, tools/viewhost; D-0047 in the shifted numbering),
+// until after a lock (WP7, tools/viewhost; D-0045),
 // so a shown letter leaves no live glyph ids, and V39's glyph control is
 // SelfScan's own line of the marker (docs/VERIFY.md, "Changes from the
 // design"). Only the visible part of a view is drawn: again on every scroll,

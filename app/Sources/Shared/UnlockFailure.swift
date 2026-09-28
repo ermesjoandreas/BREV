@@ -10,8 +10,8 @@
 // has not been measured (design §14.2 U4.3), so "fingers" is shown for any
 // failure of the keychain or Enclave step that is not a cancel, lockout or
 // missing Touch ID, when the enrolled-fingers hash also differs from the
-// one saved at the last successful unlock (`biometry.state`, a hint; D-0041
-// in the shifted numbering). A hash change alone is never enough, and
+// one saved at the last successful unlock (`biometry.state`, a hint;
+// docs/DECISIONS.md D-0037). A hash change alone is never enough, and
 // nothing is deleted without the reset confirmation. Plain logic: compiled
 // into the app and the CLI harness.
 

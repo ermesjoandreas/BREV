@@ -15,11 +15,11 @@
 //   that forbids interaction, so it fails instead of showing UI. Only
 //   UnlockService's unwrap prompts.
 // - Install marker: Brev is installed when the wrapped-DEK item exists. It
-//   is written last, after the first Touch ID unlock (design §2.10; D-0039
-//   in the shifted numbering), so a crash before that leaves Brev
-//   uninstalled, and the next attempt starts with the known-name cleanup.
+//   is written last, after the first Touch ID unlock (design §2.10;
+//   D-0036), so a crash before that leaves Brev uninstalled, and the next
+//   attempt starts with the known-name cleanup.
 // - Folder: ~/Library/Containers/no.brev.app/Data/Library/Application
-//   Support/Brev, mode 0700, excluded from backups (D-0040). It holds the
+//   Support/Brev, mode 0700, excluded from backups (D-0036). It holds the
 //   three stores, `biometry.state` (the enrolled-fingers hash, a hint) and
 //   `.lock`, held with O_EXLOCK for the process lifetime so a second Brev
 //   cannot run onboarding or open the stores at the same time.

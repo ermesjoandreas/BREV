@@ -1,7 +1,7 @@
 // HumanButton.swift — a button whose action runs only for a human.
 //
 // Upholds CLAUDE.md §2 (synthetic input and agents "clicking" are rejected)
-// (docs/PHASE2_DESIGN.md §7.1; D-0050 in the shifted numbering). Three
+// (docs/PHASE2_DESIGN.md §7.1; docs/DECISIONS.md D-0048). Three
 // layers, because the AX element of a single-cell control may be the cell:
 // 1. `sendAction` runs the action only while BrevApplication dispatches an
 //    accepted input event, and only if the current event is a mouse-up or a

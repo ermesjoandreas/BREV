@@ -4,7 +4,7 @@ Brev (Norwegian for "letter") is a native macOS app for private correspondence b
 
 **No backup, by design.** The Touch ID-gated keys that protect everything else live only in this Mac's Secure Enclave, all other keys are stored encrypted under them on this Mac only, and nothing is ever synced to iCloud. Losing the Mac means losing the message history. This is intentional and is explained during setup.
 
-**Status:** Phase 2 (the locked UI) is code-complete; its manual verification ([docs/VERIFY.md](docs/VERIFY.md), with Touch ID) is still to be run. The app has onboarding, a Touch ID unlock with the keys in the Secure Enclave and the keychain, the three-pane mail window and the compose sheet, drawn through a capture-protected layer, with auto-lock and blank-on-lock. Letters go to two built-in echo contacts in the same process; real transport is Phase 3. The phase plan is in CLAUDE.md §5.
+**Status:** Phase 2 (the locked UI) is code-complete; human verification is pending ([docs/VERIFY.md](docs/VERIFY.md), with Touch ID; the owner's steps are in [docs/USER_SESSION.md](docs/USER_SESSION.md), and the phase summary is at the end of [docs/DECISIONS.md](docs/DECISIONS.md)). The app has onboarding, a Touch ID unlock with the keys in the Secure Enclave and the keychain, the three-pane mail window and the compose sheet, drawn through a capture-protected layer, with auto-lock and blank-on-lock. Letters go to two built-in echo contacts in the same process; real transport is Phase 3. The phase plan is in CLAUDE.md §5.
 
 ## Prerequisites
 

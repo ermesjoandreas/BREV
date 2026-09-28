@@ -12,7 +12,7 @@
 // next key; `reset` drops it when the view loses focus, and a layout switch
 // before the next key drops it too. A held key repeats as UCKeyTranslate's
 // auto-key action, so a held dead key stays one waiting accent. The input
-// spike (macOS 26.2; D-0060 in the shifted numbering) found that the state
+// spike (macOS 26.2; docs/DECISIONS.md D-0052) found that the state
 // keeps upper bits after a finished composition (0x10000 after ´ e), so
 // "waiting" is no units with a state that is not 0, not the state alone. No
 // AppKit: compiled into the app and the CLI harness, which injects a named

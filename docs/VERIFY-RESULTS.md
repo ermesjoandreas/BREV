@@ -1,8 +1,10 @@
 # Brev — Phase 2 verification: machine-run results (WP4)
 
 These are the rows of `docs/VERIFY.md` that a machine could run on
-2026-09-28, with nobody at the Mac. WP12 runs the whole checklist with a
-human and records it in D-0061. This file does not replace that run.
+2026-09-28, with nobody at the Mac. D-0053 records them, with WP12's re-run
+of V1, V2, V3 (`sdef`), V21, V45, V50 and V53 at `fb6f140`. The run of the
+whole checklist with a human is still to come; this file does not replace
+it.
 
 ## The run
 
@@ -144,7 +146,7 @@ Touch ID.
   `dropped synthetic` lines. 12 carry the poster's PID. The other 4 are the
   keys sent with `AXUIElementPostKeyboardEvent`: they arrived with the view
   host's own PID and were dropped, because the rule has no exception for the
-  app's own PID (design D-0047, D-0050 after the renumbering). At Brev on
+  app's own PID (D-0048). At Brev on
   onboarding (above) the same 4 keys did not arrive at all.
 - `InputLab.app` started (sandboxed, hardened, ad hoc) and quit.
 - `poster --via session` refuses without `--global`. The session, HID and

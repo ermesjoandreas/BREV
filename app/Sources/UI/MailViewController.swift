@@ -6,7 +6,7 @@
 // first (SecureListView), and the selected thread's letters, oldest first
 // (LetterStackView). `start()` reads the contacts and selects the first,
 // then its newest thread, then that thread's letters. A 3-second timer in
-// the common run-loop modes (D-0052 in the shifted numbering) calls `sync()`
+// the common run-loop modes (docs/DECISIONS.md D-0050) calls `sync()`
 // while unlocked, which moves the echo peers' letters; when letters
 // arrive, the thread and letter panes are read again (their old texts
 // wiped) and keep the selected thread by id. Every text read here is a

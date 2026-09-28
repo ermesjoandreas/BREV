@@ -6,7 +6,7 @@
 // the main window, the compose sheet and ConfirmSheet, and on their child
 // windows and sheets. Sheets and child windows need it explicitly: the
 // capture spike captured a default sheet and a default child window of a
-// `.none` window through every path (D-0060 in the shifted numbering). So a
+// `.none` window through every path (docs/DECISIONS.md D-0052). So a
 // HardenedWindow applies it to every sheet it begins and every child window
 // it adds (CLAUDE.md §3.2: they get the same settings as their parent).
 // `sharingType = .none` is the first capture defence; the protected content
