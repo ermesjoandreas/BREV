@@ -197,6 +197,7 @@ name = "brev-proto"
 version = "0.0.1"
 dependencies = [
  "brev-vault",
+ "hkdf",
  "p256",
  "sha2",
 ]

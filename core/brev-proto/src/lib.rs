@@ -1,8 +1,9 @@
 //! Brev wire format, protocol version 1 (docs/PHASE3_DESIGN.md §2): the
 //! [`Envelope`] with its signed bytes and wire bytes, the length-hiding
 //! padding ([`pad_into`], [`unpad`]), identity ids and codes, the other relay
-//! bodies ([`body`]) and the P-256 signature checks ([`sig`]). brev-core and
-//! brev-relay both use this crate, so each rule has one implementation.
+//! bodies ([`body`]), invite codes ([`invite`], Phase 4) and the P-256
+//! signature checks ([`sig`]). brev-core and brev-relay both use this crate,
+//! so each rule has one implementation.
 //!
 //! Nothing in this crate may ever hold plaintext message content: an envelope
 //! carries sender id, recipient id, nonce, ciphertext and a signature, and
@@ -21,6 +22,7 @@ use sha2::{Digest, Sha256};
 pub use brev_vault::padding::{is_padded_len, pad_into, padded_len, unpad, PadError, MAX_PADDED};
 
 pub mod body;
+pub mod invite;
 pub mod sig;
 #[cfg(test)]
 mod test_keys;
