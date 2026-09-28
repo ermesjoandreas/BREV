@@ -222,6 +222,144 @@ fn record_request() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    /// A stand-in relay on `127.0.0.1:0`. For each connection it counts
+    /// it, reads the request, writes `answer` as raw bytes, and holds the
+    /// connection until the client closes it. Returns its URL and the
+    /// connection count.
+    fn stub(answer: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                count.fetch_add(1, SeqCst);
+                read_request(&mut stream);
+                let _ = stream.write_all(&answer);
+                let _ = std::io::copy(&mut stream, &mut std::io::sink());
+            }
+        });
+        (url, hits)
+    }
+
+    /// Reads one request: the head, then as many body bytes as its
+    /// Content-Length says.
+    fn read_request(stream: &mut TcpStream) {
+        let mut data = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&data[..end]).to_ascii_lowercase();
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .map_or(0, |v| v.trim().parse().unwrap());
+                if data.len() >= end + 4 + len {
+                    return;
+                }
+            }
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => data.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
+    /// A 307 or 308, which would re-send the body (id ‖ token) to
+    /// `Location`, is `Network`, and the place it points to sees no
+    /// connection.
+    #[test]
+    fn redirects_are_not_followed() {
+        for status in ["307 Temporary Redirect", "308 Permanent Redirect"] {
+            let (target, target_hits) = stub(b"HTTP/1.1 204 No Content\r\n\r\n".to_vec());
+            let (url, hits) = stub(
+                format!(
+                    "HTTP/1.1 {status}\r\nLocation: {target}/v1/inbox/ack\r\nContent-Length: 0\r\n\r\n"
+                )
+                .into_bytes(),
+            );
+            let relay = RelayTransport::new(&url).unwrap();
+            assert_eq!(
+                relay.ack(&[1; 32], &[2; 32], &[[3; 32]]),
+                Err(NetError::Network),
+                "{status}"
+            );
+            assert_eq!(hits.load(SeqCst), 1, "{status}");
+            assert_eq!(target_hits.load(SeqCst), 0, "{status}");
+        }
+    }
+
+    /// One byte over an endpoint's cap is `Network`: register's cap is 0.
+    #[test]
+    fn an_answer_over_its_cap_is_network() {
+        let (url, hits) = stub(b"HTTP/1.1 201 Created\r\nContent-Length: 1\r\n\r\nx".to_vec());
+        let relay = RelayTransport::new(&url).unwrap();
+        assert_eq!(relay.register(&[1, 2, 3]), Err(NetError::Network));
+        assert_eq!(hits.load(SeqCst), 1);
+    }
+
+    /// An inbox answer that announces more than `INBOX_CAP`, sends one byte
+    /// over it and then stalls: the client stops reading at the cap and
+    /// answers `Network` at once, instead of buffering on until the relay
+    /// ends the body or the timeout fires.
+    #[test]
+    fn inbox_reads_no_further_than_its_cap() {
+        let mut answer = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            2 * INBOX_CAP
+        )
+        .into_bytes();
+        answer.resize(answer.len() + INBOX_CAP + 1, 0);
+        let (url, hits) = stub(answer);
+        let relay = RelayTransport::new(&url).unwrap();
+        let start = Instant::now();
+        assert_eq!(
+            relay.inbox(&[1; 32], &[2; 32]).map(drop),
+            Err(NetError::Network)
+        );
+        assert!(start.elapsed() < TIMEOUT / 2, "{:?}", start.elapsed());
+        assert_eq!(hits.load(SeqCst), 1);
+    }
+
+    /// The proxy variables are ignored: with `HTTP_PROXY` and `ALL_PROXY`
+    /// (both spellings) pointing at another listener, the request still
+    /// goes straight to the relay and the proxy sees nothing. The request
+    /// runs in a child process of this test binary, because setting
+    /// variables here would race the other test threads' reads.
+    #[test]
+    fn proxy_variables_are_ignored() {
+        const CHILD: &str = "BREV_TEST_RELAY_URL";
+        if let Ok(url) = std::env::var(CHILD) {
+            let relay = RelayTransport::new(&url).unwrap();
+            assert_eq!(relay.register(&[1, 2, 3]), Ok(()));
+            return;
+        }
+        let created = b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n";
+        let (url, hits) = stub(created.to_vec());
+        let (proxy, proxy_hits) = stub(created.to_vec());
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["relay::tests::proxy_variables_are_ignored", "--exact"])
+            .env(CHILD, &url)
+            .envs(["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"].map(|k| (k, &proxy)))
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .env_remove("REQUEST_METHOD")
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+        assert_eq!(hits.load(SeqCst), 1);
+        assert_eq!(proxy_hits.load(SeqCst), 0);
+    }
 
     /// Only `http://127.0.0.1:<port>`, exactly.
     #[test]
