@@ -1,6 +1,7 @@
 //! Helpers shared by the integration tests: temp dirs, P-256 test signers,
-//! the relay in-process on 127.0.0.1:0, and sessions driven through the FFI
-//! API as the Swift app drives it.
+//! the Phase 4 relay in-process on 127.0.0.1:0 (docs/PHASE4_DESIGN.md §4),
+//! and sessions driven through the FFI API as the Swift app drives it:
+//! registration with an invite code, contacts by invite or by request.
 
 // Each test file uses its own part of this module.
 #![allow(dead_code)]
@@ -12,12 +13,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use brev_core::{Brev, EnvironmentReport, KeyOrigin, OpenText, CHUNK};
-use brev_relay::{parse_listen, Open, Policy, Relay, Server};
+use brev_relay::{parse_listen, Config, Gates, Open, Policy, Relay, Server};
 use p256::ecdsa::signature::hazmat::PrehashSigner;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{DerSignature, Signature, SigningKey};
 use rand::rngs::SysRng;
 use rand::TryRng;
+use rusqlite::{Connection, OpenFlags};
 
 pub fn random<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
@@ -139,8 +141,9 @@ impl TestKey {
     }
 }
 
-/// The relay in-process on 127.0.0.1:0, its file in a temp dir. It can be
-/// stopped and started again on the same port.
+/// The Phase 4 relay in-process on 127.0.0.1:0, its file in a temp dir,
+/// with the system clock. It can be stopped and started again on the same
+/// port.
 pub struct Relayed {
     server: Option<Server>,
     pub relay: Arc<Relay>,
@@ -150,13 +153,20 @@ pub struct Relayed {
 }
 
 impl Relayed {
+    /// The owner's limits (design §4.4).
     pub fn new() -> Relayed {
         Relayed::with(Box::new(Open))
     }
 
     pub fn with(policy: Box<dyn Policy>) -> Relayed {
+        Relayed::configured(policy, Config::default())
+    }
+
+    /// `config`'s limits, and `policy`.
+    pub fn configured(policy: Box<dyn Policy>, config: Config) -> Relayed {
         let dir = TempDir::new();
-        let relay = Arc::new(Relay::open(&dir.0.join("relay").join("relay.db"), policy).unwrap());
+        let path = dir.0.join("relay").join("relay.db");
+        let relay = Arc::new(Relay::open_with(&path, policy, config, Gates::default()).unwrap());
         let listen = parse_listen("127.0.0.1:0").unwrap();
         let server = Server::start(Arc::clone(&relay), listen, false).unwrap();
         let addr = server.addr();
@@ -200,6 +210,53 @@ impl Relayed {
             .filter_map(|e| fs::read(e.unwrap().path()).ok())
             .any(|bytes| contains(&bytes, needle))
     }
+
+    /// A root invite code from the operator (`brev-relay invite`).
+    pub fn root_code(&self) -> Vec<u8> {
+        self.relay.root_invite().unwrap()
+    }
+
+    /// Registers `u` at `address` with a fresh root invite.
+    pub fn join(&self, u: &User, address: &str) {
+        u.register_with(&self.root_code(), address);
+    }
+
+    /// A second connection to the relay's file, as a relay that lies (or a
+    /// same-user program, CLAUDE.md §2) would edit it.
+    pub fn sql(&self) -> Connection {
+        Connection::open_with_flags(self.db(), OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap()
+    }
+
+    /// The identity id the relay holds for `address`.
+    pub fn id_of(&self, address: &str) -> [u8; 32] {
+        self.sql()
+            .query_row(
+                "SELECT id FROM identities WHERE address = ?1",
+                [address],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Sets `links(owner, peer)` to approved in the relay's file: the
+    /// owner takes the peer's letters, whatever the owner's app knows.
+    pub fn force_link(&self, owner: &str, peer: &str) {
+        let (owner, peer) = (self.id_of(owner), self.id_of(peer));
+        self.sql()
+            .execute(
+                "INSERT INTO links (owner, peer, state) VALUES (?1, ?2, 1)
+                 ON CONFLICT(owner, peer) DO UPDATE SET state = 1",
+                rusqlite::params![owner, peer],
+            )
+            .unwrap();
+    }
+
+    /// Rows in the relay's `table`.
+    pub fn rows(&self, table: &str) -> i64 {
+        self.sql()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
 }
 
 impl Drop for Relayed {
@@ -235,20 +292,51 @@ impl User {
         u
     }
 
-    /// Registers `address`: request, Touch ID (the test key), register.
-    pub fn register(&self, address: &str) {
+    /// Registers `address` with the invite `code`, as the address page
+    /// does: open the code, request, Touch ID (the test key), register
+    /// (no attestation: the app's `NoAttestor`).
+    pub fn register_with(&self, code: &[u8], address: &str) {
+        self.b.open_invite(code, len32(code.len())).unwrap();
         let digest = self
             .b
             .register_request(address.as_bytes(), len32(address.len()))
             .unwrap();
-        self.b.register(self.key.sign_digest(&digest)).unwrap();
+        self.b
+            .register(self.key.sign_digest(&digest), Vec::new())
+            .unwrap();
     }
 
-    /// Adds the contact with `address`; its local id.
+    /// A new invite code of this user.
+    pub fn invite(&self) -> Vec<u8> {
+        self.b.create_invite().unwrap()
+    }
+
+    /// Adds the contact with `address` (a contact request); its local id.
     pub fn add(&self, address: &str) -> Vec<u8> {
         self.b
             .add_contact(address.as_bytes(), len32(address.len()))
             .unwrap()
+    }
+
+    /// The local id of the contact with `address`.
+    pub fn contact(&self, address: &str) -> Vec<u8> {
+        self.b
+            .contacts()
+            .unwrap()
+            .into_iter()
+            .find(|c| read(&c.name) == address.as_bytes())
+            .map(|c| c.id)
+            .unwrap_or_else(|| panic!("no contact {address}"))
+    }
+
+    /// The addresses of the waiting contact requests.
+    pub fn asking(&self) -> Vec<Vec<u8>> {
+        self.b
+            .requests()
+            .unwrap()
+            .iter()
+            .map(|r| read(&r.address))
+            .collect()
     }
 
     /// The letter flow of the compose sheet: prepare, sign request, Touch
@@ -300,13 +388,20 @@ pub fn read(t: &OpenText) -> Vec<u8> {
     out
 }
 
-/// A ("anna") and B ("bert") at `relay`, registered and each other's
-/// contact: (a, b, b at a, a at b).
+/// A ("anna") and B ("bert") at `relay`, each other's contact the Phase 4
+/// way: A registers with a root invite, B with A's invite code, and A's
+/// sync pins B from the relay's invited event. (a, b, b at a, a at b).
 pub fn pair(relay: &Relayed) -> (User, User, Vec<u8>, Vec<u8>) {
+    pair_as(relay, "anna", "bert")
+}
+
+/// [`pair`] with other addresses.
+pub fn pair_as(relay: &Relayed, first: &str, second: &str) -> (User, User, Vec<u8>, Vec<u8>) {
     let (a, b) = (User::new(&relay.url), User::new(&relay.url));
-    a.register("anna");
-    b.register("bert");
-    let b_at_a = a.add("bert");
-    let a_at_b = b.add("anna");
+    relay.join(&a, first);
+    b.register_with(&a.invite(), second);
+    let synced = a.b.sync().unwrap();
+    assert!(synced.contacts_changed && synced.letters == 0);
+    let (b_at_a, a_at_b) = (a.contact(second), b.contact(first));
     (a, b, b_at_a, a_at_b)
 }

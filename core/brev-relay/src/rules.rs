@@ -449,8 +449,10 @@ impl Relay {
 
     /// *Blokker* (design §13, owner answer 6): `caller` declines `peer`, so
     /// the relay stores no more letters or requests from it, and drops what
-    /// waits at `caller` about it. Own id → 400; unknown → 404; 204, also
-    /// again.
+    /// waits at `caller` about it. It also drops `caller`'s own request
+    /// waiting at `peer`: answering it would put an approved event in
+    /// `caller`'s queue, so the blocked peer could still reach it. Own id →
+    /// 400; unknown → 404; 204, also again.
     pub(crate) fn block(&self, caller: &[u8; 32], peer: &[u8; 32]) -> Result<StatusCode, Fail> {
         if caller == peer {
             return refuse(StatusCode::BAD_REQUEST);
@@ -467,6 +469,9 @@ impl Relay {
         }
         set_link(&tx, caller, peer, DECLINED)?;
         delete_event(&tx, caller, peer)?;
+        if event(&tx, peer, caller)? == Some(i64::from(EventKind::Request.byte())) {
+            delete_event(&tx, peer, caller)?;
+        }
         tx.commit()?;
         Ok(StatusCode::NO_CONTENT)
     }

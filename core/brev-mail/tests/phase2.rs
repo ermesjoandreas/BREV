@@ -1,4 +1,4 @@
-//! Phase 2 through the public API, moved to Phase 3's surface: the `Brev`
+//! Phase 2 through the public API, moved to Phase 4's surface: the `Brev`
 //! session the app holds, its `OpenText` chunks, the one store file and its
 //! padded columns. Letters go through the relay (in-process on
 //! 127.0.0.1:0). (`lock_closes_every_open_text` and the drop-guard and
@@ -12,7 +12,8 @@ use std::os::unix::fs::PermissionsExt;
 
 use brev_core::{limits, Brev, BrevError, Core, Error, MessageId, CHUNK, MAX_BODY, MAX_SUBJECT};
 use common::{
-    contains, len32, pair, random, unlock_active, Relayed, TempDir, TestKey, User, TEST_IDLE,
+    contains, len32, pair, pair_as, random, unlock_active, Relayed, TempDir, TestKey, User,
+    TEST_IDLE,
 };
 
 const FILES: [&str; 1] = ["brev.db"];
@@ -92,7 +93,7 @@ fn send_uses_only_the_length_prefix() {
             .unwrap();
     a.b.attach_signature(a.key.sign_digest(&digest)).unwrap();
     a.b.submit().unwrap();
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
     assert_eq!(a.letters(&b_at_a), [(b"Emne".to_vec(), b"Hei".to_vec())]);
     assert_eq!(b.letters(&a_at_b), [(b"Emne".to_vec(), b"Hei".to_vec())]);
 
@@ -134,7 +135,7 @@ fn send_uses_only_the_length_prefix() {
 
     // The bytes after the length reached no file, here or at the relay.
     assert!(!relay.files_contain(MARKER));
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
     let t = a.b.threads(a.b.contacts().unwrap()[0].id.clone()).unwrap()[0]
         .id
         .clone();
@@ -218,7 +219,7 @@ fn store_files_are_0600() {
     };
     check(&a, "created");
     a.send(&b_at_a, b"s", b"x");
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
     for u in [&a, &b] {
         check(u, "after writes");
     }
@@ -229,16 +230,12 @@ fn no_plaintext_in_any_file() {
     const SUBJECT: &[u8] = b"BREV-P2-SUBJECT-MARKER-0f3a9c";
     const BODY: &[u8] = b"BREV-P2-BODY-MARKER-b71e04";
     let relay = Relayed::new();
-    let (a, b) = (User::new(&relay.url), User::new(&relay.url));
-    a.register("anna-marker-51c0");
-    b.register("bert-marker-a93e");
-    let b_at_a = a.add("bert-marker-a93e");
-    let a_at_b = b.add("anna-marker-51c0");
+    let (a, b, b_at_a, a_at_b) = pair_as(&relay, "anna-marker-51c0", "bert-marker-a93e");
     let markers: [&[u8]; 4] = [SUBJECT, BODY, b"anna-marker-51c0", b"bert-marker-a93e"];
     let ta = a.send(&b_at_a, SUBJECT, BODY);
     let tb = b.send(&a_at_b, SUBJECT, BODY);
-    assert_eq!(a.b.sync().unwrap(), 1);
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(a.b.sync().unwrap().letters, 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
 
     // Not vacuous: the content went in and comes back out, both ways.
     for (u, c) in [(&a, &b_at_a), (&b, &a_at_b)] {
@@ -278,13 +275,16 @@ fn no_plaintext_in_any_file() {
     assert_eq!(b.dir.files(), FILES, "no journal left behind");
 }
 
-/// The sealed content columns of a Phase 3 store.
-const SEALED: [(&str, &str); 7] = [
+/// The sealed content columns of a Phase 4 store (`invites` is empty here:
+/// A's invite was used when B registered).
+const SEALED: [(&str, &str); 9] = [
     ("identity", "keys"),
     ("identity", "address"),
     ("contacts", "bundle"),
     ("contacts", "address"),
     ("contacts", "pending"),
+    ("contacts", "flags"),
+    ("invites", "body"),
     ("threads", "subject"),
     ("messages", "body"),
 ];
@@ -298,7 +298,7 @@ fn column_lengths_are_bucketed() {
     for len in [0, 300, 1500, 5000, MAX_BODY] {
         a.send(&b_at_a, &subject, &body[..len]);
     }
-    assert_eq!(b.b.sync().unwrap(), 5);
+    assert_eq!(b.b.sync().unwrap().letters, 5);
 
     let is_bucket = |n: usize| matches!(n, 256 | 1024 | 4096) || (n.is_multiple_of(16384) && n > 0);
     for u in [&a, &b] {
@@ -320,7 +320,8 @@ fn column_lengths_are_bucketed() {
             }
         }
         // Every row was checked, and the buckets differ as the sizes do:
-        // 256 for keys, addresses, bundles and an empty `pending`, 1 KiB
+        // 256 for keys, addresses, bundles, an empty `pending` and the
+        // one-byte flags, 1 KiB
         // for the 256-byte subjects, and 256 B, 1 KiB, 4 KiB, 16 KiB,
         // 80 KiB for the bodies.
         lengths.sort_unstable();
@@ -336,14 +337,14 @@ fn older_store_is_refused() {
     let dek: [u8; 32] = random();
     drop(Brev::create(dir.arg(), "http://127.0.0.1:9".into(), &dek, &key).unwrap());
     let raw = rusqlite::Connection::open(dir.0.join("brev.db")).unwrap();
-    for old in [1, 2] {
+    for old in [1, 2, 3, 4] {
         raw.pragma_update(None, "user_version", old).unwrap();
         assert!(matches!(
             Brev::open(dir.arg(), "http://127.0.0.1:9".into()).map(drop),
             Err(BrevError::Corrupt)
         ));
     }
-    raw.pragma_update(None, "user_version", 4).unwrap();
+    raw.pragma_update(None, "user_version", 5).unwrap();
     Brev::open(dir.arg(), "http://127.0.0.1:9".into())
         .unwrap()
         .unlock(&dek, TEST_IDLE)

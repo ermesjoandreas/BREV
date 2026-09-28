@@ -1,8 +1,11 @@
-//! Phase 3 end to end (docs/PHASE3_DESIGN.md §8): two `Brev` sessions in
-//! temp dirs, the relay in-process on 127.0.0.1:0, P-256 test keys standing
-//! in for the Secure Enclave, and the FFI API exactly as the Swift app uses
-//! it. Includes both definition-of-done tests of CLAUDE.md §5 Phase 3:
-//! `relay_file_holds_no_plaintext` and `changed_key_warns_and_blocks_sending`.
+//! Phase 3 end to end (docs/PHASE3_DESIGN.md §8), on Phase 4's relay and
+//! surface (docs/PHASE4_DESIGN.md §5): two `Brev` sessions in temp dirs, the
+//! relay in-process on 127.0.0.1:0, P-256 test keys standing in for the
+//! Secure Enclave, and the FFI API exactly as the Swift app uses it.
+//! Identities register with invite codes and become contacts by invite or
+//! by request. Includes both definition-of-done tests of CLAUDE.md §5
+//! Phase 3: `relay_file_holds_no_plaintext` and
+//! `changed_key_warns_and_blocks_sending`.
 
 mod common;
 
@@ -54,7 +57,7 @@ impl Policy for HookPolicy {
                     Decision::Allow
                 }
             }
-            Endpoint::Lookup => Decision::Allow,
+            _ => Decision::Allow,
         }
     }
 }
@@ -88,11 +91,11 @@ fn two_sessions_exchange_letters_through_the_relay() {
         "Første brev. Blåbær.".as_bytes(),
     );
     assert_eq!(relay.waiting(), 1);
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
     assert_eq!(relay.waiting(), 0, "deleted after delivery");
-    assert_eq!(b.b.sync().unwrap(), 0, "each letter arrives once");
+    assert_eq!(b.b.sync().unwrap().letters, 0, "each letter arrives once");
     b.send(&a_at_b, b"Svar", b"Takk for brevet!");
-    assert_eq!(a.b.sync().unwrap(), 1);
+    assert_eq!(a.b.sync().unwrap().letters, 1);
 
     let first = (
         "Hei Bert".as_bytes().to_vec(),
@@ -155,11 +158,11 @@ fn relay_file_holds_no_plaintext() {
     let slice = &wire[94..94 + 32];
     assert!(relay.files_contain(slice), "control: ciphertext is found");
     scan("waiting");
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
     assert!(!relay.files_contain(slice), "gone after the ack");
     b.send(&a_at_b, SUBJECT.as_bytes(), BODY.as_bytes());
     scan("second waiting");
-    assert_eq!(a.b.sync().unwrap(), 1);
+    assert_eq!(a.b.sync().unwrap().letters, 1);
     scan("delivered");
     assert_eq!(relay.waiting(), 0);
     // Not vacuous: both letters arrived with the markers.
@@ -179,10 +182,10 @@ fn changed_key_warns_and_blocks_sending() {
     let old_code = b.b.me().unwrap().code;
 
     // B loses its keys; the operator releases the address and a fresh B'
-    // registers it.
+    // registers it with a root invite.
     assert!(relay.relay.release("bert").unwrap());
     let b2 = User::new(&relay.url);
-    b2.register("bert");
+    relay.join(&b2, "bert");
     let new_code = b2.b.me().unwrap().code;
     assert_ne!(new_code, old_code);
 
@@ -226,10 +229,11 @@ fn changed_key_warns_and_blocks_sending() {
     // The old thread stays with the contact.
     assert_eq!(a.b.threads(b_at_a.clone()).unwrap().len(), 1);
 
-    // After B' adds A, a letter reaches B'.
+    // After B' adds A (a request, so B' takes A's letters), a letter
+    // reaches B'.
     let a_at_b2 = b2.add("anna");
     a.send(&b_at_a, b"s", b"to the new bert");
-    assert_eq!(b2.b.sync().unwrap(), 1);
+    assert_eq!(b2.b.sync().unwrap().letters, 1);
     assert_eq!(
         b2.letters(&a_at_b2),
         [(b"s".to_vec(), b"to the new bert".to_vec())]
@@ -257,7 +261,7 @@ fn ack_after_store() {
         b.b.threads(a_at_b.clone()).unwrap().is_empty(),
         "nothing stored"
     );
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
     assert_eq!(relay.waiting(), 0);
 
     // The ack is refused: the letter is stored and counted, comes again,
@@ -265,10 +269,10 @@ fn ack_after_store() {
     a.send(&b_at_a, b"s", b"two");
     hooks.deny_next_ack.store(true, Ordering::SeqCst);
     let acks = hooks.acks.load(Ordering::SeqCst);
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
     assert_eq!(hooks.acks.load(Ordering::SeqCst), acks + 1);
     assert_eq!(relay.waiting(), 1, "still at the relay");
-    assert_eq!(b.b.sync().unwrap(), 0, "a duplicate");
+    assert_eq!(b.b.sync().unwrap().letters, 0, "a duplicate");
     assert_eq!(relay.waiting(), 0);
 
     // A damaged contact row in B's file: not acknowledged, the letter stays.
@@ -293,12 +297,12 @@ fn ack_after_store() {
     set(&damaged);
     let acks = hooks.acks.load(Ordering::SeqCst);
     for _ in 0..2 {
-        assert_eq!(b.b.sync().unwrap(), 0);
+        assert_eq!(b.b.sync().unwrap().letters, 0);
         assert_eq!(relay.waiting(), 1, "kept at the relay");
     }
     assert_eq!(hooks.acks.load(Ordering::SeqCst), acks, "no ack");
     set(&bundle);
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
     assert_eq!(relay.waiting(), 0);
 
     // Exactly one stored copy of each letter.
@@ -337,7 +341,7 @@ fn submit_retry_is_idempotent() {
     );
 
     relay.restart();
-    assert_eq!(a.b.sync().unwrap(), 0);
+    assert_eq!(a.b.sync().unwrap().letters, 0);
     assert_eq!(relay.waiting(), 0, "sync does not send the letter");
     let thread = a.b.submit().unwrap();
     assert_eq!(relay.waiting(), 1);
@@ -347,21 +351,23 @@ fn submit_retry_is_idempotent() {
     );
     assert_eq!(a.b.threads(b_at_a.clone()).unwrap()[0].id, thread);
     assert_eq!(a.letters(&b_at_a), [(b"s".to_vec(), b"retry".to_vec())]);
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
     assert_eq!(b.letters(&a_at_b), [(b"s".to_vec(), b"retry".to_vec())]);
 
     // Registration keeps its body over `Network` the same way.
     let c = User::new(&relay.url);
+    let code = relay.root_code();
+    c.b.open_invite(&code, len32(code.len())).unwrap();
     let digest = c.b.register_request(b"carl", 4).unwrap();
     let signature = c.key.sign_digest(&digest);
     relay.stop();
     assert!(matches!(
-        c.b.register(signature.clone()),
+        c.b.register(signature.clone(), Vec::new()),
         Err(BrevError::Network)
     ));
     assert!(!c.b.me().unwrap().registered);
     relay.restart();
-    c.b.register(signature).unwrap();
+    c.b.register(signature, Vec::new()).unwrap();
     assert!(c.b.me().unwrap().registered);
 }
 
@@ -376,6 +382,7 @@ fn locked_session_makes_no_request() {
     let digest = a.b.sign_request(b_at_a.clone(), b"s", 1, b"x", 1).unwrap();
     let signature = a.key.sign_digest(&digest);
 
+    let code = relay.root_code();
     a.b.lock();
     let requests = relay.requests();
     let locked = |r: Result<(), BrevError>| assert!(matches!(r, Err(BrevError::Locked)));
@@ -383,9 +390,15 @@ fn locked_session_makes_no_request() {
     locked(a.b.prepare_send(b_at_a.clone()));
     locked(a.b.add_contact(b"carl", 4).map(drop));
     locked(a.b.register_request(b"carl", 4).map(drop));
-    locked(a.b.register(signature.clone()));
+    locked(a.b.register(signature.clone(), Vec::new()));
     locked(a.b.attach_signature(signature));
     locked(a.b.submit().map(drop));
+    locked(a.b.create_invite().map(drop));
+    locked(a.b.open_invite(&code, len32(code.len())).map(drop));
+    locked(a.b.redeem_invite().map(drop));
+    locked(a.b.requests().map(drop));
+    locked(a.b.answer_request(vec![0; 32], true).map(drop));
+    locked(a.b.block_contact(b_at_a.clone()));
     assert_eq!(relay.requests(), requests, "no request while locked");
 
     // A lock while `sync` polls: no ack follows, the letter waits.
@@ -395,40 +408,44 @@ fn locked_session_makes_no_request() {
     assert!(matches!(a.b.sync(), Err(BrevError::Locked)));
     assert_eq!(
         relay.requests(),
-        requests + 1,
-        "the poll, and nothing after"
+        requests + 2,
+        "the events and the poll, and nothing after"
     );
     assert_eq!(hooks.acks.load(Ordering::SeqCst), 0);
     assert_eq!(relay.waiting(), 1);
     unlock_active(&a.b, &a.dek);
-    assert_eq!(a.b.sync().unwrap(), 1);
+    assert_eq!(a.b.sync().unwrap().letters, 1);
     assert_eq!(hooks.acks.load(Ordering::SeqCst), 1);
 }
 
 /// Letters from someone the recipient has not added are dropped and
 /// acknowledged (owner question Q2), and so are letters from a contact's
-/// new key before it is accepted.
+/// new key before it is accepted. In Phase 4 the relay stores such a letter
+/// only if it lies (or a same-user program edits its file, CLAUDE.md §2):
+/// here `links` is set by hand, and the client rule still holds.
 #[test]
 fn strangers_are_dropped_and_acked() {
     let relay = Relayed::new();
     let (_a, b, _, a_at_b) = pair(&relay);
     let c = User::new(&relay.url);
-    c.register("carl");
+    relay.join(&c, "carl");
+    relay.force_link("bert", "carl");
     let b_at_c = c.add("bert");
     c.send(&b_at_c, b"s", b"from a stranger");
     assert_eq!(relay.waiting(), 1);
-    assert_eq!(b.b.sync().unwrap(), 0);
+    assert_eq!(b.b.sync().unwrap().letters, 0);
     assert_eq!(relay.waiting(), 0, "acknowledged");
     assert_eq!(b.b.contacts().unwrap().len(), 1);
     assert!(b.b.threads(a_at_b.clone()).unwrap().is_empty());
 
-    // A's key changes; B' (the new "anna") writes to B before B accepts.
+    // A's key changes; A' (the new "anna") writes to B before B accepts.
     assert!(relay.relay.release("anna").unwrap());
     let a2 = User::new(&relay.url);
-    a2.register("anna");
+    relay.join(&a2, "anna");
+    relay.force_link("bert", "anna");
     let b_at_a2 = a2.add("bert");
     a2.send(&b_at_a2, b"s", b"from the new key");
-    assert_eq!(b.b.sync().unwrap(), 0);
+    assert_eq!(b.b.sync().unwrap().letters, 0);
     assert_eq!(relay.waiting(), 0, "acknowledged");
     assert!(b.b.threads(a_at_b.clone()).unwrap().is_empty());
     // Control: once B accepts the new key, its letters arrive.
@@ -439,22 +456,29 @@ fn strangers_are_dropped_and_acked() {
     let new_code = b.b.contact_info(a_at_b.clone()).unwrap().new_code;
     b.b.accept_new_key(a_at_b.clone(), new_code).unwrap();
     a2.send(&b_at_a2, b"s", b"accepted");
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
     assert_eq!(b.letters(&a_at_b), [(b"s".to_vec(), b"accepted".to_vec())]);
 }
 
-/// Addresses (owner question Q3, brev-proto's rules): typed upper case is
-/// folded; the rules, taken addresses, one address per identity; contacts
-/// by address; nothing is asked of the relay before registration.
+/// Addresses (owner question Q3, brev-proto's rules) with Phase 4's invite
+/// (docs/PHASE4_DESIGN.md §5.3): typed upper case is folded; the rules,
+/// taken addresses (the invite is kept for another try), one address per
+/// identity; contacts by address; nothing is asked of the relay before an
+/// invite is opened.
 #[test]
 fn registration_and_contacts_by_address() {
     let relay = Relayed::new();
     let a = User::new(&relay.url);
-    // Before registration: no sync and no lookup, and no request.
+    // Before registration: no sync, no lookup, no invite, and no request.
     assert!(matches!(a.b.sync(), Err(BrevError::NotFound)));
     assert!(matches!(
         a.b.add_contact(b"bert", 4),
         Err(BrevError::NotFound)
+    ));
+    assert!(matches!(a.b.create_invite(), Err(BrevError::NotFound)));
+    assert!(matches!(
+        a.b.register_request(b"anna", 4),
+        Err(BrevError::InviteInvalid)
     ));
     assert_eq!(relay.requests(), 0);
 
@@ -480,31 +504,57 @@ fn registration_and_contacts_by_address() {
         a.b.register_request(b"anna", 5),
         Err(BrevError::Malformed)
     ));
+    let code = relay.root_code();
+    a.b.open_invite(&code, len32(code.len())).unwrap();
+    assert_eq!(relay.requests(), 1, "the invite open");
     // No request, then a signature by another key.
-    assert!(matches!(a.b.register(vec![0x30]), Err(BrevError::NotFound)));
+    assert!(matches!(
+        a.b.register(vec![0x30], Vec::new()),
+        Err(BrevError::NotFound)
+    ));
     let digest = a.b.register_request(b"ANNA", 4).unwrap();
     assert!(matches!(
-        a.b.register(TestKey::new().sign_digest(&digest)),
+        a.b.register(TestKey::new().sign_digest(&digest), Vec::new()),
         Err(BrevError::Signing)
     ));
-    assert!(matches!(a.b.register(vec![0x30]), Err(BrevError::NotFound)));
-    assert_eq!(relay.requests(), 0);
-    a.register("ANNA");
+    assert!(matches!(
+        a.b.register(vec![0x30], Vec::new()),
+        Err(BrevError::NotFound)
+    ));
+    // An attestation over 8 192 bytes.
+    let digest = a.b.register_request(b"ANNA", 4).unwrap();
+    assert!(matches!(
+        a.b.register(a.key.sign_digest(&digest), vec![0; 8193]),
+        Err(BrevError::Malformed)
+    ));
+    assert_eq!(relay.requests(), 1);
+    a.b.register(a.key.sign_digest(&digest), Vec::new())
+        .unwrap();
     assert_eq!(read(&a.b.me().unwrap().address), b"anna");
     assert!(matches!(
         a.b.register_request(b"anna2", 5),
         Err(BrevError::Duplicate)
     ));
 
-    // Taken.
+    // Taken: the invite is not used, and another address goes through.
     let b = User::new(&relay.url);
+    let code = relay.root_code();
+    b.b.open_invite(&code, len32(code.len())).unwrap();
     let digest = b.b.register_request(b"anna", 4).unwrap();
     assert!(matches!(
-        b.b.register(b.key.sign_digest(&digest)),
+        b.b.register(b.key.sign_digest(&digest), Vec::new()),
         Err(BrevError::AddressTaken)
     ));
     assert!(!b.b.me().unwrap().registered);
-    b.register("bert");
+    let digest = b.b.register_request(b"bert", 4).unwrap();
+    b.b.register(b.key.sign_digest(&digest), Vec::new())
+        .unwrap();
+    // The invite is used up: a third identity cannot register with it.
+    let c = User::new(&relay.url);
+    assert!(matches!(
+        c.b.open_invite(&code, len32(code.len())),
+        Err(BrevError::InviteInvalid)
+    ));
 
     // Contacts by address.
     assert!(matches!(
@@ -525,18 +575,21 @@ fn registration_and_contacts_by_address() {
         a.b.add_contact(b"bert", 4),
         Err(BrevError::Duplicate)
     ));
-    assert_eq!(read(&a.b.contacts().unwrap()[0].name), b"bert");
+    let rows = a.b.contacts().unwrap();
+    assert_eq!(read(&rows[0].name), b"bert");
+    assert!(rows[0].waiting && !rows[0].verified && !rows[0].blocked);
+    drop(rows);
     // A contact id that is not 16 bytes.
     assert!(matches!(
         a.b.prepare_send(vec![0; 32]),
         Err(BrevError::Malformed)
     ));
-    // A letter to someone who has not added the sender is sent (and
-    // dropped at the recipient); nothing tells the sender.
-    a.send(&b_at_a, b"s", b"x");
-    assert_eq!(b.b.sync().unwrap(), 0);
-    let msg =
-        a.b.messages(a.b.threads(b_at_a).unwrap()[0].id.clone())
-            .unwrap();
-    assert_eq!(msg.len(), 1);
+    // Until B approves, a letter to B is not made at all (Phase 3 sent it
+    // and B dropped it).
+    assert!(matches!(
+        a.b.prepare_send(b_at_a.clone()),
+        Err(BrevError::NotApproved)
+    ));
+    assert!(a.b.threads(b_at_a).unwrap().is_empty());
+    assert_eq!(relay.waiting(), 0);
 }

@@ -154,7 +154,8 @@ pub enum Decision {
     Deny,
 }
 
-/// The token-authenticated endpoints, for [`Policy::request`].
+/// The token-authenticated endpoints but submit (which has
+/// [`Policy::submit`]), for [`Policy::request`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Endpoint {
     /// `POST /v1/lookup`.
@@ -163,6 +164,18 @@ pub enum Endpoint {
     Inbox,
     /// `POST /v1/inbox/ack`.
     Ack,
+    /// `POST /v1/requests` (Phase 4).
+    Request,
+    /// `POST /v1/events` (Phase 4).
+    Events,
+    /// `POST /v1/events/answer` (Phase 4).
+    Answer,
+    /// `POST /v1/block` (Phase 4).
+    Block,
+    /// `POST /v1/invites` (Phase 4).
+    InviteCreate,
+    /// `POST /v1/invites/redeem` (Phase 4).
+    InviteRedeem,
 }
 
 /// Test hooks (Phase 3's; kept as a deny hook in Phase 4, whose own rules
@@ -177,7 +190,9 @@ pub trait Policy: Send + Sync {
     /// `sender`, to the registered `recipient`. In Phase 4 asked after the
     /// approval and letter-limit checks.
     fn submit(&self, sender: &[u8; 32], recipient: &[u8; 32], len: usize) -> Decision;
-    /// A lookup, inbox or ack request by `caller` with its valid token.
+    /// A token-authenticated request by `caller` with its valid token and a
+    /// well-formed body ([`Endpoint`]), before the endpoint reads or writes
+    /// anything for it.
     fn request(&self, caller: &[u8; 32], endpoint: Endpoint) -> Decision;
 }
 

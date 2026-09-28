@@ -11,6 +11,10 @@
 //! Contacts (schema v3, docs/PHASE3_DESIGN.md §6.1) have a random local id
 //! that never changes; a sender is found by the keyed tag of its identity id,
 //! so the file holds neither a contact's identity id nor its address.
+//!
+//! Schema v5 (docs/PHASE4_DESIGN.md §5.1) adds each contact's sealed flags
+//! (they take my letters, key verified by an invite, blocked) and the user's
+//! open invites, each a sealed secret and the day it was made.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -19,7 +23,7 @@ use std::sync::Weak;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use brev_proto::body::{self, is_valid_address};
-use brev_proto::{identity_code, sig, IDENTITY_CODE_LEN, SIG_LEN};
+use brev_proto::{identity_code, invite, sig, IDENTITY_CODE_LEN, SIG_LEN};
 use brev_vault::{check_path, Clock, DekSlot, EnvironmentClass, Text, Vault, VaultConfig};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use zeroize::Zeroizing;
@@ -29,12 +33,13 @@ use crate::{Envelope, Error};
 
 /// "BREV" in the SQLite header's application_id field.
 const APPLICATION_ID: i32 = 0x4252_4556;
-/// 4: version 3 (local contact ids, the keyed contact tag, sealed
+/// 5: version 3 (local contact ids, the keyed contact tag, sealed
 /// addresses and `pending`, the relay token in `identity.keys`;
-/// docs/PHASE3_DESIGN.md §6.1) plus `messages.env_class`
-/// (docs/VAULT_SPLIT_PLAN.md §6). A version 2 or 3 store opens as
+/// docs/PHASE3_DESIGN.md §6.1), `messages.env_class` (version 4,
+/// docs/VAULT_SPLIT_PLAN.md §6), and `contacts.flags` and `invites`
+/// (docs/PHASE4_DESIGN.md §5.1). A version 2, 3 or 4 store opens as
 /// `Corrupt`; there is no migration.
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 const SCHEMA: &str = "
 CREATE TABLE identity (
@@ -47,7 +52,12 @@ CREATE TABLE contacts (
     tag        BLOB NOT NULL UNIQUE,       -- pt: keyed tag of the pinned identity id (finds the sender)
     bundle     BLOB NOT NULL,              -- ct: pinned bundle
     address    BLOB NOT NULL,              -- ct: the address, also shown as the name
-    pending    BLOB NOT NULL               -- ct: empty, or the other bundle the relay returned
+    pending    BLOB NOT NULL,              -- ct: empty, or the other bundle the relay returned
+    flags      BLOB NOT NULL               -- ct: one byte: 1 takes my letters, 2 key verified by an invite, 4 blocked
+) STRICT;
+CREATE TABLE invites (
+    id         BLOB PRIMARY KEY,           -- pt: 16 random bytes, local
+    body       BLOB NOT NULL               -- ct: the invite's secret (16) || UTC day it was made (u64 BE)
 ) STRICT;
 CREATE TABLE threads (
     id         BLOB PRIMARY KEY,           -- pt: 16 random bytes, shared with peer
@@ -82,6 +92,26 @@ const KEY_SECRET: std::ops::Range<usize> = 0..32;
 const KEY_X25519: std::ops::Range<usize> = 32..64;
 const KEY_SIGNING: std::ops::Range<usize> = 64..64 + sig::KEY_LEN;
 const KEY_TOKEN: std::ops::Range<usize> = 64 + sig::KEY_LEN..96 + sig::KEY_LEN;
+
+/// `contacts.flags`: the contact takes the user's letters (it approved the
+/// user, asked the user, or came in through an invite).
+pub(crate) const APPROVED_ME: u8 = 1;
+/// `contacts.flags`: the contact's key was checked through an invite code,
+/// against its fingerprint or its tag (docs/PHASE4_DESIGN.md §3.4).
+pub(crate) const VERIFIED: u8 = 2;
+/// `contacts.flags`: the user blocked the contact (*Blokker*): nothing is
+/// sent to it and its letters are dropped.
+pub(crate) const BLOCKED: u8 = 4;
+
+/// Days a local invite is kept after the day it was made: the relay's
+/// default life (docs/PHASE4_DESIGN.md §4.4).
+const INVITE_DAYS: u64 = 7;
+
+/// A decrypted `invites.body`: the secret and the day (u64 BE).
+const INVITE_BODY: usize = invite::SECRET_LEN + 8;
+
+/// Seconds in a UTC day.
+const DAY: u64 = 86_400;
 
 /// An identity id: SHA-256 over a [`PublicBundle`]. Used as the envelope
 /// sender and recipient; the store keeps only the own one in plaintext.
@@ -158,6 +188,21 @@ pub struct Contact {
     /// The relay returned another key than the pinned one, and it has not
     /// been accepted: nothing can be sent to this contact.
     pub key_changed: bool,
+    /// The contact takes the user's letters, as far as the user knows.
+    pub approved_me: bool,
+    /// The contact's key was checked through an invite code.
+    pub verified: bool,
+    /// The user blocked the contact.
+    pub blocked: bool,
+}
+
+/// One of the user's open invites (`invites`, docs/PHASE4_DESIGN.md §5.1):
+/// its local id, its secret in a buffer that wipes itself, and the UTC day
+/// it was made. No `Debug`: the secret is a bearer secret.
+pub(crate) struct LocalInvite {
+    pub id: [u8; 16],
+    pub secret: Zeroizing<[u8; invite::SECRET_LEN]>,
+    pub day: u64,
 }
 
 /// A thread with one contact. No `Debug`: the subject is content.
@@ -228,6 +273,11 @@ impl Letter {
     /// The thread this letter starts.
     pub fn thread(&self) -> ThreadId {
         ThreadId(self.thread)
+    }
+
+    /// The contact this letter goes to.
+    pub fn contact(&self) -> ContactId {
+        ContactId(self.contact)
     }
 }
 
@@ -367,10 +417,17 @@ impl Core {
         Ok(())
     }
 
-    /// The registration body without its signature (docs/PHASE3_DESIGN.md
-    /// §2.4): `address`, both public keys and SHA-256 of the relay token.
-    /// The identity key signs `body::register_preimage` of it.
-    pub fn registration(&self, address: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+    /// The registration v2 body without its signature
+    /// (docs/PHASE4_DESIGN.md §3.2): `address`, both public keys, SHA-256 of
+    /// the relay token, the invite's relay key `invite` and the invitee's
+    /// `tag` (zeros for a root invite). The identity key signs
+    /// `body::register_preimage_v2` of it.
+    pub fn registration(
+        &self,
+        address: &[u8],
+        invite: &[u8; 32],
+        tag: &[u8; 32],
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
         let (_, keys) = self.identity_keys()?;
         let x25519: &[u8; 32] = keys
             .get(KEY_X25519)
@@ -382,7 +439,7 @@ impl Core {
             .ok_or(Error::Crypto)?;
         let signing_key = keys.get(KEY_SIGNING).ok_or(Error::Crypto)?;
         let hash = body::token_hash(token);
-        body::registration_body(address, signing_key, x25519, &hash)
+        body::registration_body_v2(address, signing_key, x25519, &hash, invite, tag)
             .map(Zeroizing::new)
             .map_err(|_| Error::Malformed)
     }
@@ -411,10 +468,18 @@ impl Core {
     /// and the address of a contact already there (`Duplicate`: a changed
     /// key goes through [`Core::check_key`], never around it).
     pub fn check_new_address(&self, address: &[u8]) -> Result<(), Error> {
-        let dek = self.dek()?;
         if &self.address()?[..] == address {
             return Err(Error::Malformed);
         }
+        match self.contact_at(address)? {
+            Some(_) => Err(Error::Duplicate),
+            None => Ok(()),
+        }
+    }
+
+    /// The contact with `address`, if any.
+    pub fn contact_at(&self, address: &[u8]) -> Result<Option<ContactId>, Error> {
+        let dek = self.dek()?;
         let mut stmt = self.db().prepare("SELECT id, address FROM contacts")?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, [u8; 16]>(0)?, r.get::<_, Vec<u8>>(1)?))
@@ -423,20 +488,44 @@ impl Core {
             let (id, sealed) = row?;
             let known = crypto::open_column(dek, &column_ad("contacts.address", &[&id]), &sealed)?;
             if &known[..] == address {
-                return Err(Error::Duplicate);
+                return Ok(Some(ContactId(id)));
             }
         }
-        Ok(())
+        Ok(None)
+    }
+
+    /// The contact whose pinned key is the identity `id` (found by its
+    /// keyed tag), if any.
+    pub fn contact_of(&self, id: &IdentityId) -> Result<Option<ContactId>, Error> {
+        let dek = self.dek()?;
+        let tag = crypto::contact_tag(dek, &id.0);
+        Ok(self
+            .db()
+            .query_row("SELECT id FROM contacts WHERE tag = ?1", [&tag[..]], |r| {
+                r.get(0).map(ContactId)
+            })
+            .optional()?)
     }
 
     /// Adds a contact with the bundle the relay returned for `address`, and
-    /// pins it (trust on first use). Refuses an address that breaks the
-    /// rules or is the own one and the own identity (`Malformed`), and an
-    /// address or identity that is already a contact (`Duplicate`).
+    /// pins it (trust on first use), with no flags. Refuses an address that
+    /// breaks the rules or is the own one and the own identity
+    /// (`Malformed`), and an address or identity that is already a contact
+    /// (`Duplicate`).
     pub fn add_contact(
         &mut self,
         bundle: &PublicBundle,
         address: &[u8],
+    ) -> Result<ContactId, Error> {
+        self.insert_contact(bundle, address, 0)
+    }
+
+    /// [`Core::add_contact`] with `flags` sealed into the new row.
+    pub(crate) fn insert_contact(
+        &mut self,
+        bundle: &PublicBundle,
+        address: &[u8],
+        flags: u8,
     ) -> Result<ContactId, Error> {
         let dek = self.dek()?;
         if !is_valid_address(address) {
@@ -457,11 +546,20 @@ impl Core {
         let sealed_address =
             crypto::seal_column(dek, &column_ad("contacts.address", &[&id]), address)?;
         let pending = crypto::seal_column(dek, &column_ad("contacts.pending", &[&id]), &[])?;
+        let sealed_flags =
+            crypto::seal_column(dek, &column_ad("contacts.flags", &[&id]), &[flags])?;
         // Any uniqueness conflict: the same identity (tag) is already there.
         let n = self.db().execute(
-            "INSERT INTO contacts (id, tag, bundle, address, pending) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT DO NOTHING",
-            params![&id[..], &tag[..], sealed_bundle, sealed_address, pending],
+            "INSERT INTO contacts (id, tag, bundle, address, pending, flags)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
+            params![
+                &id[..],
+                &tag[..],
+                sealed_bundle,
+                sealed_address,
+                pending,
+                sealed_flags
+            ],
         )?;
         if n == 0 {
             return Err(Error::Duplicate);
@@ -484,13 +582,85 @@ impl Core {
             let address =
                 crypto::open_column(dek, &column_ad("contacts.address", &[&id]), &address)?;
             let key_changed = self.pending_bundle(ContactId(id))?.is_some();
+            let flags = self.contact_flags(ContactId(id))?;
             out.push(Contact {
                 id: ContactId(id),
                 address,
                 key_changed,
+                approved_me: flags & APPROVED_ME != 0,
+                verified: flags & VERIFIED != 0,
+                blocked: flags & BLOCKED != 0,
             });
         }
         Ok(out)
+    }
+
+    /// The flags of `contact` (one byte, `Corrupt` if the value is not one
+    /// byte; `Crypto` if it does not open under this row's AD).
+    pub(crate) fn contact_flags(&self, contact: ContactId) -> Result<u8, Error> {
+        let dek = self.dek()?;
+        let sealed: Vec<u8> = self.db().query_row(
+            "SELECT flags FROM contacts WHERE id = ?1",
+            [&contact.0[..]],
+            |r| r.get(0),
+        )?;
+        let flags = crypto::open_column(dek, &column_ad("contacts.flags", &[&contact.0]), &sealed)?;
+        match flags[..] {
+            [byte] => Ok(byte),
+            _ => Err(Error::Corrupt),
+        }
+    }
+
+    /// Sets `set` and clears `clear` in the flags of `contact`. Writes only
+    /// if they change; true if they did.
+    pub(crate) fn change_flags(
+        &mut self,
+        contact: ContactId,
+        set: u8,
+        clear: u8,
+    ) -> Result<bool, Error> {
+        let dek = self.dek()?;
+        let before = self.contact_flags(contact)?;
+        let after = (before | set) & !clear;
+        if after == before {
+            return Ok(false);
+        }
+        let sealed =
+            crypto::seal_column(dek, &column_ad("contacts.flags", &[&contact.0]), &[after])?;
+        self.db().execute(
+            "UPDATE contacts SET flags = ?1 WHERE id = ?2",
+            params![sealed, &contact.0[..]],
+        )?;
+        Ok(true)
+    }
+
+    /// Pins `bundle` as the contact at `address` with `flags` added, for a
+    /// peer the user approved or verified through an invite
+    /// (docs/PHASE4_DESIGN.md §5.3). A contact already at `address` keeps
+    /// its row: the pinned key gains the flags (and a pending change is
+    /// cleared); another key is sealed into `pending` (Phase 3's warning)
+    /// and gives `None`, with nothing else changed. A new address gets a
+    /// new row (`Duplicate` if that identity is pinned at another address).
+    /// The own identity is `Malformed`. Returns the contact and whether the
+    /// file changed.
+    pub(crate) fn pin(
+        &mut self,
+        bundle: &PublicBundle,
+        address: &[u8],
+        flags: u8,
+    ) -> Result<(Option<ContactId>, bool), Error> {
+        if bundle.id().0 == self.my_id()? {
+            return Err(Error::Malformed);
+        }
+        let Some(contact) = self.contact_at(address)? else {
+            return Ok((Some(self.insert_contact(bundle, address, flags)?), true));
+        };
+        let (same, wrote) = self.compare_key(contact, bundle)?;
+        if !same {
+            return Ok((None, wrote));
+        }
+        let changed = self.change_flags(contact, flags, 0)?;
+        Ok((Some(contact), wrote || changed))
     }
 
     /// One contact's address.
@@ -551,6 +721,19 @@ impl Core {
     /// which blocks sending until [`Core::accept_new_key`]. The own
     /// identity is `Malformed`.
     pub fn check_key(&mut self, contact: ContactId, found: &PublicBundle) -> Result<(), Error> {
+        match self.compare_key(contact, found)? {
+            (true, _) => Ok(()),
+            (false, _) => Err(Error::KeyChanged),
+        }
+    }
+
+    /// [`Core::check_key`]'s work: whether `found` is the pinned key, and
+    /// whether `pending` was written.
+    pub(crate) fn compare_key(
+        &mut self,
+        contact: ContactId,
+        found: &PublicBundle,
+    ) -> Result<(bool, bool), Error> {
         if found.id().0 == self.my_id()? {
             return Err(Error::Malformed);
         }
@@ -559,26 +742,31 @@ impl Core {
         if pinned == *found {
             if pending.is_some() {
                 self.set_pending(contact, &[])?;
+                return Ok((true, true));
             }
-            return Ok(());
+            return Ok((true, false));
         }
         if pending.as_ref() != Some(found) {
             self.set_pending(contact, &found.to_bytes())?;
+            return Ok((false, true));
         }
-        Err(Error::KeyChanged)
+        Ok((false, false))
     }
 
     /// Pins the pending bundle of `contact`, if `code` is its identity code:
     /// the code the app is showing (`KeyChanged` otherwise, also when no key
-    /// change is pending). One statement sets the tag and the bundle and
-    /// empties `pending`; a key that belongs to another contact gives
-    /// `Duplicate`. The contact keeps its local id and its threads.
+    /// change is pending). One statement sets the tag and the bundle,
+    /// empties `pending`, and clears the flags that were about the old key
+    /// (it took the user's letters, it was verified by an invite; a block
+    /// stays); a key that belongs to another contact gives `Duplicate`. The
+    /// contact keeps its local id and its threads.
     pub fn accept_new_key(&mut self, contact: ContactId, code: &[u8]) -> Result<(), Error> {
         let dek = self.dek()?;
         let pending = self.pending_bundle(contact)?.ok_or(Error::KeyChanged)?;
         if pending.code()[..] != *code {
             return Err(Error::KeyChanged);
         }
+        let flags = self.contact_flags(contact)? & BLOCKED;
         let tag = crypto::contact_tag(dek, &pending.id().0);
         let taken: Option<i64> = self
             .db()
@@ -597,9 +785,11 @@ impl Core {
             &pending.to_bytes(),
         )?;
         let empty = crypto::seal_column(dek, &column_ad("contacts.pending", &[&contact.0]), &[])?;
+        let sealed_flags =
+            crypto::seal_column(dek, &column_ad("contacts.flags", &[&contact.0]), &[flags])?;
         self.db().execute(
-            "UPDATE contacts SET tag = ?1, bundle = ?2, pending = ?3 WHERE id = ?4",
-            params![&tag[..], sealed_bundle, empty, &contact.0[..]],
+            "UPDATE contacts SET tag = ?1, bundle = ?2, pending = ?3, flags = ?4 WHERE id = ?5",
+            params![&tag[..], sealed_bundle, empty, sealed_flags, &contact.0[..]],
         )?;
         Ok(())
     }
@@ -608,8 +798,9 @@ impl Core {
     /// (padded) in an envelope without signature, and the subject and body
     /// under the DEK for the own copy. Every decrypted value and the X25519
     /// secret are dropped before this returns. `KeyChanged` while the
-    /// contact's key change is pending, before anything is sealed. Subjects
-    /// are limited to 65535 bytes. Stores nothing.
+    /// contact's key change is pending, `NotApproved` for a blocked
+    /// contact, both before anything is sealed. Subjects are limited to
+    /// 65535 bytes. Stores nothing.
     pub fn seal_letter(
         &self,
         contact: ContactId,
@@ -619,6 +810,9 @@ impl Core {
         let dek = self.dek()?;
         if self.pending_bundle(contact)?.is_some() {
             return Err(Error::KeyChanged);
+        }
+        if self.contact_flags(contact)? & BLOCKED != 0 {
+            return Err(Error::NotApproved);
         }
         u16::try_from(subject.len()).map_err(|_| Error::Malformed)?;
         let bundle = self.contact_bundle(contact)?;
@@ -783,6 +977,74 @@ impl Core {
         Ok(())
     }
 
+    /// Keeps an invite the user made: its secret and the UTC day, sealed
+    /// under the DEK with the row's random local id in the AD
+    /// (docs/PHASE4_DESIGN.md §5.1). The file shows only how many there are.
+    pub(crate) fn store_invite(
+        &mut self,
+        secret: &[u8; invite::SECRET_LEN],
+        day: u64,
+    ) -> Result<(), Error> {
+        let dek = self.dek()?;
+        let id: [u8; 16] = crypto::random()?;
+        let mut body = Zeroizing::new([0u8; INVITE_BODY]);
+        body[..invite::SECRET_LEN].copy_from_slice(secret);
+        body[invite::SECRET_LEN..].copy_from_slice(&day.to_be_bytes());
+        let sealed = crypto::seal_column(dek, &column_ad("invites.body", &[&id]), &body[..])?;
+        self.db().execute(
+            "INSERT INTO invites (id, body) VALUES (?1, ?2)",
+            params![&id[..], sealed],
+        )?;
+        Ok(())
+    }
+
+    /// The user's open invites, opened (`Crypto` for a row that does not
+    /// open under its AD, `Corrupt` for one of the wrong length).
+    pub(crate) fn local_invites(&self) -> Result<Vec<LocalInvite>, Error> {
+        let dek = self.dek()?;
+        let mut stmt = self.db().prepare("SELECT id, body FROM invites")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, [u8; 16]>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, sealed) = row?;
+            let body = crypto::open_column(dek, &column_ad("invites.body", &[&id]), &sealed)?;
+            if body.len() != INVITE_BODY {
+                return Err(Error::Corrupt);
+            }
+            let (secret, day) = body.split_at(invite::SECRET_LEN);
+            let mut local = LocalInvite {
+                id,
+                secret: Zeroizing::new([0u8; invite::SECRET_LEN]),
+                day: u64::from_be_bytes(day.try_into().map_err(|_| Error::Corrupt)?),
+            };
+            local.secret.copy_from_slice(secret);
+            out.push(local);
+        }
+        Ok(out)
+    }
+
+    /// Deletes the local invite `id` (redeemed, or past its life).
+    pub(crate) fn delete_invite(&mut self, id: &[u8; 16]) -> Result<(), Error> {
+        self.dek()?;
+        self.db()
+            .execute("DELETE FROM invites WHERE id = ?1", [&id[..]])?;
+        Ok(())
+    }
+
+    /// Deletes the local invites past their life on day `today`: made
+    /// before day `today - 7`, as the relay counts (docs/PHASE4_DESIGN.md
+    /// §5.1).
+    pub(crate) fn sweep_invites(&mut self, today: u64) -> Result<(), Error> {
+        for old in self.local_invites()? {
+            if old.day.saturating_add(INVITE_DAYS) < today {
+                self.delete_invite(&old.id)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Checks an envelope in the order of docs/PHASE3_DESIGN.md §3.3 and
     /// stores its letter. [`is_permanent`] sorts the errors: a permanent
     /// one is the letter's fault and it is acknowledged and dropped; any
@@ -792,7 +1054,9 @@ impl Core {
     /// 1. addressed to me (`Malformed`);
     /// 2. the keyed tag of the sender finds a contact (`NotFound`: a
     ///    stranger, or a contact's new key before it is accepted);
-    /// 3. that contact's bundle opens and hashes to the sender (`Corrupt`);
+    /// 3. that contact's bundle opens and hashes to the sender (`Corrupt`),
+    ///    and its flags open (`Corrupt`) and do not say blocked (`NotFound`,
+    ///    like a stranger; docs/PHASE4_DESIGN.md owner answer 6);
     /// 4. the signature over the signed bytes, with the pinned signing key
     ///    (`Crypto`), before anything is decrypted;
     /// 5. the AEAD (`Crypto`), then padding and payload shape (`Malformed`);
@@ -817,6 +1081,9 @@ impl Core {
             let bundle = self.contact_bundle(ContactId(contact)).map_err(local)?;
             if bundle.id().0 != env.sender {
                 return Err(Error::Corrupt);
+            }
+            if self.contact_flags(ContactId(contact)).map_err(local)? & BLOCKED != 0 {
+                return Err(Error::NotFound);
             }
             let signature: &[u8; SIG_LEN] = env
                 .signature
@@ -1119,6 +1386,12 @@ fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// Today's UTC day number (unix seconds / 86 400), as the relay counts
+/// days.
+pub(crate) fn today() -> u64 {
+    now().unsigned_abs() / DAY
 }
 
 #[cfg(test)]

@@ -1001,6 +1001,41 @@ fn blokker_stops_letters_and_requests() {
     assert_eq!(r.submit_as(&a, &to_b(2)), StatusCode::ACCEPTED);
 }
 
+/// *Blokker* also drops the blocker's own request waiting at the blocked
+/// peer, whose answer would otherwise put an approved event in the
+/// blocker's queue. After the block nothing the peer does reaches that
+/// queue: no answer, no request, no letter.
+#[test]
+fn a_blocked_peer_cannot_reach_the_blockers_queue() {
+    let r = Relayed::new();
+    let [a, b, c] = [1, 2, 3].map(Identity::new);
+    r.join(&a, "anna");
+    r.join(&b, "bob");
+    r.join(&c, "carl");
+    // A asks B, then blocks B before B answers.
+    assert_eq!(r.ask(&a, "bob"), StatusCode::ACCEPTED);
+    assert_eq!(r.events(&b), [request_from(&a, "anna")]);
+    assert_eq!(r.block(&a, &b), StatusCode::NO_CONTENT);
+    assert!(r.events(&b).is_empty(), "A's own request is gone");
+    assert_eq!(r.answer(&b, &a, true), StatusCode::NOT_FOUND);
+    assert_eq!(r.ask(&b, "anna"), StatusCode::ACCEPTED);
+    let from_b = wire(&envelope(&b, &a.id, 256, 1));
+    assert_eq!(r.submit_as(&b, &from_b), StatusCode::CONFLICT);
+    assert!(r.events(&a).is_empty(), "nothing from B waits at A");
+    assert_eq!(r.waiting(), 0);
+
+    // Control: an answer to a request that was not blocked puts an
+    // approved event in the asker's queue.
+    assert_eq!(r.ask(&a, "carl"), StatusCode::ACCEPTED);
+    assert_eq!(r.answer(&c, &a, true), StatusCode::NO_CONTENT);
+    let seen = r.events(&a);
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        (seen[0].kind, seen[0].address.as_str()),
+        (EventKind::Approved, "carl")
+    );
+}
+
 /// The owner's limits are the defaults, and the clock keeps UTC days.
 #[test]
 fn config_defaults_are_the_owners_values() {

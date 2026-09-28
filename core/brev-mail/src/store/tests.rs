@@ -136,7 +136,7 @@ fn lock_zeroes_the_dek_buffer() {
     assert_eq!(core.dek_addr_for_test(), addr);
     core.bundle().unwrap();
     core.relay_token().unwrap();
-    core.registration(b"anna").unwrap();
+    core.registration(b"anna", &[1; 32], &[2; 32]).unwrap();
     assert_eq!(
         crypto::secrets_built(),
         built,
@@ -180,8 +180,10 @@ fn unlock_refuses_all_zero_dek() {
     drop(Cleanup(path));
 }
 
+/// Design §8 brev-mail 7: schema v5, its pragmas and its tables, column by
+/// column.
 #[test]
-fn schema_v3_pragmas() {
+fn schema_v5() {
     let p = party();
     drop(p.core);
     let core = Core::open(&p.path).unwrap();
@@ -199,12 +201,13 @@ fn schema_v3_pragmas() {
     assert_eq!(q("fullfsync"), "Integer(1)");
     assert_eq!(q("trusted_schema"), "Integer(0)");
     assert_eq!(q("application_id"), format!("Integer({APPLICATION_ID})"));
-    assert_eq!(q("user_version"), "Integer(4)");
+    assert_eq!(q("user_version"), "Integer(5)");
     assert!(core
         .db()
         .db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
         .unwrap());
-    // The tables of design §6.1, column by column.
+    // The tables of docs/PHASE3_DESIGN.md §6.1 and docs/PHASE4_DESIGN.md
+    // §5.1, column by column.
     let columns = |table: &str| -> Vec<String> {
         let mut stmt = core
             .db()
@@ -216,8 +219,9 @@ fn schema_v3_pragmas() {
     assert_eq!(columns("identity"), ["id", "keys", "address"]);
     assert_eq!(
         columns("contacts"),
-        ["id", "tag", "bundle", "address", "pending"]
+        ["id", "tag", "bundle", "address", "pending", "flags"]
     );
+    assert_eq!(columns("invites"), ["id", "body"]);
     assert_eq!(
         columns("threads"),
         ["id", "contact_id", "created_at", "subject"]
@@ -278,18 +282,18 @@ CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
     assert_eq!(fs::read(&path).unwrap(), before);
     drop(Cleanup(path));
 
-    // A v4 store relabelled as version 2.
+    // A v5 store relabelled as version 2.
     let p = party();
     drop(p.core);
     let raw = Connection::open(&p.path).unwrap();
     raw.pragma_update(None, "user_version", 2).unwrap();
     assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
-    raw.pragma_update(None, "user_version", 4).unwrap();
+    raw.pragma_update(None, "user_version", 5).unwrap();
     drop(Core::open(&p.path).unwrap());
 }
 
 /// A real Phase 3 store before the environment class (schema v3: no
-/// `messages.env_class`) and a v4 store relabelled as version 3 are both
+/// `messages.env_class`) and a v5 store relabelled as version 3 are both
 /// refused, unchanged: there is no migration (docs/VAULT_SPLIT_PLAN.md Q4).
 #[test]
 fn v3_store_is_refused() {
@@ -334,13 +338,77 @@ CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
     assert_eq!(fs::read(&path).unwrap(), before);
     drop(Cleanup(path));
 
-    // A v4 store relabelled as version 3.
+    // A v5 store relabelled as version 3.
     let p = party();
     drop(p.core);
     let raw = Connection::open(&p.path).unwrap();
     raw.pragma_update(None, "user_version", 3).unwrap();
     assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
+    raw.pragma_update(None, "user_version", 5).unwrap();
+    drop(Core::open(&p.path).unwrap());
+}
+
+/// Design §8 brev-mail 7: a real Phase 3 store (schema v4: no
+/// `contacts.flags`, no `invites`) and a v5 store relabelled as version 4
+/// are both refused, unchanged: there is no migration
+/// (docs/PHASE4_DESIGN.md §5.1).
+#[test]
+fn v4_store_is_refused() {
+    const V4_SCHEMA: &str = "
+CREATE TABLE identity (
+    id         BLOB PRIMARY KEY,           -- pt: own identity id
+    keys       BLOB NOT NULL,              -- ct: X25519 secret || X25519 public || signing key (65) || relay token (32)
+    address    BLOB NOT NULL               -- ct: own address; empty until registered
+) STRICT;
+CREATE TABLE contacts (
+    id         BLOB PRIMARY KEY,           -- pt: 16 random bytes, local; kept when the key changes
+    tag        BLOB NOT NULL UNIQUE,       -- pt: keyed tag of the pinned identity id (finds the sender)
+    bundle     BLOB NOT NULL,              -- ct: pinned bundle
+    address    BLOB NOT NULL,              -- ct: the address, also shown as the name
+    pending    BLOB NOT NULL               -- ct: empty, or the other bundle the relay returned
+) STRICT;
+CREATE TABLE threads (
+    id         BLOB PRIMARY KEY,           -- pt: 16 random bytes, shared with peer
+    contact_id BLOB NOT NULL REFERENCES contacts(id),
+    created_at INTEGER NOT NULL,           -- pt: unix seconds
+    subject    BLOB NOT NULL               -- ct
+) STRICT;
+CREATE TABLE messages (
+    id         BLOB PRIMARY KEY,           -- pt: 16 random bytes, chosen by sender
+    thread_id  BLOB NOT NULL REFERENCES threads(id),
+    created_at INTEGER NOT NULL,           -- pt
+    outgoing   INTEGER NOT NULL,           -- pt: 1 = sent by me
+    read       INTEGER NOT NULL,           -- pt
+    body       BLOB NOT NULL,              -- ct
+    env_class  INTEGER                     -- pt: environment class a sent letter went out in (1 = A); NULL otherwise
+) STRICT;
+CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
+";
+    let path = temp_path();
+    let raw = Connection::open(&path).unwrap();
+    raw.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    raw.execute_batch(V4_SCHEMA).unwrap();
     raw.pragma_update(None, "user_version", 4).unwrap();
+    drop(raw);
+    let before = fs::read(&path).unwrap();
+    assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
+    assert_eq!(fs::read(&path).unwrap(), before);
+    // Control: the same file labelled version 5 is still refused (its
+    // schema is not v5's), so the check is the schema, not only the label.
+    let raw = Connection::open(&path).unwrap();
+    raw.pragma_update(None, "user_version", 5).unwrap();
+    drop(raw);
+    assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
+    drop(Cleanup(path));
+
+    // A v5 store relabelled as version 4.
+    let p = party();
+    drop(p.core);
+    let raw = Connection::open(&p.path).unwrap();
+    raw.pragma_update(None, "user_version", 4).unwrap();
+    assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
+    raw.pragma_update(None, "user_version", 5).unwrap();
     drop(Core::open(&p.path).unwrap());
 }
 
@@ -910,7 +978,7 @@ fn column_ad_uses_local_contact_id() {
         &[&t.0, &b_id.0, &created_at.to_be_bytes()],
     );
     assert!(crypto::open_column(&dek, &by_identity, &subject).is_err());
-    for column in ["bundle", "address", "pending"] {
+    for column in ["bundle", "address", "pending", "flags"] {
         let sealed: Vec<u8> = a
             .core
             .db()

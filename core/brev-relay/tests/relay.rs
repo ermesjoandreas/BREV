@@ -700,6 +700,8 @@ fn policy_hook_denies_before_writing() {
             Call::Register("anna".into()), // denied
             Call::Request(b.id, lookup),
             Call::Register("anna".into()),
+            Call::Request(a.id, Endpoint::Request), // the approval
+            Call::Request(b.id, Endpoint::Answer),
             Call::Submit(a.id, b.id, w.len()), // denied
             Call::Request(b.id, lookup),       // denied
             Call::Request(b.id, inbox),        // denied

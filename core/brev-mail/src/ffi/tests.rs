@@ -1,7 +1,8 @@
 //! Unit tests of the session: the ones that need the test-build counters,
-//! the test panic hook or the session's private state. The relay runs
-//! in-process on 127.0.0.1:0 with a policy that counts its calls and checks
-//! at each one that the session mutex is free.
+//! the test panic hook or the session's private state. The Phase 4 relay
+//! runs in-process on 127.0.0.1:0 with a policy that counts its calls and
+//! checks at each one that the session mutex is free (every endpoint but
+//! the unauthenticated invite open).
 
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -10,7 +11,7 @@ use std::sync::Weak;
 use std::thread;
 use std::time::Instant;
 
-use brev_relay::{parse_listen, Decision, Endpoint, Policy, Relay, Server};
+use brev_relay::{parse_listen, Config, Decision, Endpoint, Gates, Policy, Relay, Server};
 
 use super::*;
 use crate::test_keys::TestKey;
@@ -115,7 +116,9 @@ fn net() -> Net {
     let tmp = tmp();
     let probe = Arc::new(Probe::default());
     let policy = Box::new(ProbePolicy(Arc::clone(&probe)));
-    let relay = Arc::new(Relay::open(&tmp.0.join("relay.db"), policy).unwrap());
+    let path = tmp.0.join("relay.db");
+    let relay =
+        Arc::new(Relay::open_with(&path, policy, Config::default(), Gates::default()).unwrap());
     let server = Server::start(
         Arc::clone(&relay),
         parse_listen("127.0.0.1:0").unwrap(),
@@ -170,11 +173,43 @@ fn user(net: &Net) -> User {
     u
 }
 
-fn register(u: &User, address: &str) {
+/// Registers `u` at `address` with the invite `code`: open, request,
+/// Touch ID (the test key), register.
+fn register_with(u: &User, code: &[u8], address: &str) {
+    u.b.open_invite(code, len32(code.len())).unwrap();
     let digest =
         u.b.register_request(address.as_bytes(), len32(address.len()))
             .unwrap();
-    u.b.register(u.key.sign_digest(&digest)).unwrap();
+    u.b.register(u.key.sign_digest(&digest), Vec::new())
+        .unwrap();
+}
+
+/// Registers `u` at `address` with a fresh root invite.
+fn join(net: &Net, u: &User, address: &str) {
+    register_with(u, &net.relay.root_invite().unwrap(), address);
+}
+
+/// The local id of `u`'s contact at `address`.
+fn contact(u: &User, address: &str) -> Vec<u8> {
+    let rows = u.b.contacts().unwrap();
+    rows.iter()
+        .find(|c| {
+            let n = c.name.byte_len() as usize;
+            c.name.chunk(0).is_ok_and(|b| &b[..n] == address.as_bytes())
+        })
+        .map(|c| c.id.clone())
+        .unwrap()
+}
+
+/// A new user registered at `address` with `inviter`'s invite, and the
+/// inviter's sync that pins it: (the user, its id at the inviter, the
+/// inviter's id at it).
+fn invitee(net: &Net, inviter: &User, at: &str, address: &str) -> (User, Vec<u8>, Vec<u8>) {
+    let u = user(net);
+    register_with(&u, &inviter.b.create_invite().unwrap(), address);
+    inviter.b.sync().unwrap();
+    let (theirs, mine) = (contact(inviter, address), contact(&u, at));
+    (u, theirs, mine)
 }
 
 fn add(u: &User, address: &str) -> Vec<u8> {
@@ -198,14 +233,12 @@ fn send(u: &User, contact: &[u8], subject: &[u8], body: &[u8]) -> Vec<u8> {
     u.b.submit().unwrap()
 }
 
-/// A ("anna") and B ("bert"), registered and each other's contact:
-/// (a, b, b at a, a at b).
+/// A ("anna", by a root invite) and B ("bert", by A's invite), each
+/// other's contact: (a, b, b at a, a at b).
 fn pair(net: &Net) -> (User, User, Vec<u8>, Vec<u8>) {
-    let (a, b) = (user(net), user(net));
-    register(&a, "anna");
-    register(&b, "bert");
-    let b_at_a = add(&a, "bert");
-    let a_at_b = add(&b, "anna");
+    let a = user(net);
+    join(net, &a, "anna");
+    let (b, b_at_a, a_at_b) = invitee(net, &a, "anna", "bert");
     (a, b, b_at_a, a_at_b)
 }
 
@@ -220,6 +253,7 @@ fn locked_session_refuses_every_export() {
     let thread = send(&a, &b_at_a, b"s", b"b");
     let msg = a.b.messages(thread.clone()).unwrap()[0].id.clone();
     a.b.prepare_send(b_at_a.clone()).unwrap();
+    let code = net.relay.root_invite().unwrap();
     let requests = net.server.requests();
     a.b.lock();
     assert!(a.b.is_locked());
@@ -232,13 +266,19 @@ fn locked_session_refuses_every_export() {
     locked(a.b.contact_info(b_at_a.clone()).map(drop));
     locked(a.b.accept_new_key(b_at_a.clone(), vec![b'A'; 35]));
     locked(a.b.register_request(b"carl", 4).map(drop));
-    locked(a.b.register(vec![0x30]));
+    locked(a.b.register(vec![0x30], Vec::new()));
     locked(a.b.add_contact(b"carl", 4).map(drop));
     locked(a.b.prepare_send(b_at_a.clone()));
     locked(sign_request(&a, &b_at_a).map(drop));
     locked(a.b.attach_signature(vec![0x30]));
     locked(a.b.submit().map(drop));
     locked(a.b.sync().map(drop));
+    locked(a.b.create_invite().map(drop));
+    locked(a.b.open_invite(&code, len32(code.len())).map(drop));
+    locked(a.b.redeem_invite().map(drop));
+    locked(a.b.requests().map(drop));
+    locked(a.b.answer_request(vec![0; 32], true).map(drop));
+    locked(a.b.block_contact(b_at_a.clone()));
     a.b.cancel_send();
     assert!(a.b.is_locked());
     assert_eq!(net.server.requests(), requests, "no request while locked");
@@ -326,7 +366,7 @@ fn poison_while_unlocked_locks_all_on_next_call() {
 fn drop_closes_every_open_text() {
     let net = net();
     let u = user(&net);
-    register(&u, "anna");
+    join(&net, &u, "anna");
     let address = u.b.me().unwrap().address;
     assert!(address.byte_len() > 0, "positive control");
     drop(u);
@@ -432,9 +472,7 @@ fn lock_closes_every_open_text() {
 fn sign_request_needs_a_fresh_prepare() {
     let net = net();
     let (a, _b, b_at_a, _) = pair(&net);
-    let c = user(&net);
-    register(&c, "carl");
-    let c_at_a = add(&a, "carl");
+    let (_c, c_at_a, _) = invitee(&net, &a, "anna", "carl");
     let malformed = |r: Result<Vec<u8>, BrevError>| assert!(matches!(r, Err(BrevError::Malformed)));
 
     // None yet.
@@ -481,6 +519,8 @@ fn sign_request_and_register_request_make_no_request() {
     let net = net();
     let (a, _b, b_at_a, _) = pair(&net);
     let fresh = user(&net);
+    let code = net.relay.root_invite().unwrap();
+    fresh.b.open_invite(&code, len32(code.len())).unwrap();
     a.b.prepare_send(b_at_a.clone()).unwrap();
     let before = net.server.requests();
     let digest = sign_request(&a, &b_at_a).unwrap();
@@ -493,11 +533,15 @@ fn sign_request_and_register_request_make_no_request() {
         a.b.contacts().unwrap(),
         a.b.contact_info(b_at_a.clone()).unwrap(),
         a.b.threads(b_at_a.clone()).unwrap(),
+        a.b.requests().unwrap(),
     ));
     assert!(a.b.accept_new_key(b_at_a, vec![b'A'; 35]).is_err());
     assert_eq!(net.server.requests(), before);
     // Control: the relay counts a request.
-    fresh.b.register(fresh.key.sign_digest(&digest)).unwrap();
+    fresh
+        .b
+        .register(fresh.key.sign_digest(&digest), Vec::new())
+        .unwrap();
     assert_eq!(net.server.requests(), before + 1);
     // The typed address was folded to lower case.
     let me = fresh.b.me().unwrap();
@@ -571,8 +615,8 @@ fn nothing_decrypted_is_alive_on_the_network() {
     crate::relay::live_at_requests();
     let (a, b, b_at_a, _) = pair(&net);
     send(&a, &b_at_a, b"subject", b"body");
-    assert_eq!(b.b.sync().unwrap(), 1);
-    assert_eq!(b.b.sync().unwrap(), 0);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
+    assert_eq!(b.b.sync().unwrap().letters, 0);
     // A registration that is refused, a lookup of nobody.
     let digest = b.b.register_request(b"anna", 4);
     assert!(matches!(digest, Err(BrevError::Duplicate)));
@@ -581,29 +625,79 @@ fn nothing_decrypted_is_alive_on_the_network() {
         Err(BrevError::NotFound)
     ));
     let at = crate::relay::live_at_requests();
-    // register ×2, add ×2 (lookups), prepare, submit, poll, ack, poll, and
-    // the failed lookup: 10.
-    assert_eq!(at.len(), 10);
-    assert_eq!(net.server.requests() - before, 10);
+    // The pair: open and register ×2, the invite, A's events, its answer
+    // and poll (5 + 3); the letter: lookup and submit (2); B's two syncs:
+    // events, poll, ack, then events and poll (5); the failed lookup (1).
+    assert_eq!(at.len(), 16);
+    assert_eq!(net.server.requests() - before, 16);
     assert!(at.iter().all(|&live| live == (0, 0)), "{at:?}");
     // Control: the counter sees a text the app holds open.
     let kept = a.b.contacts().unwrap();
-    assert!(matches!(a.b.sync(), Ok(0)));
-    assert_eq!(crate::relay::live_at_requests(), [(1, 0)]);
+    assert!(matches!(a.b.sync(), Ok(r) if r.letters == 0));
+    assert_eq!(crate::relay::live_at_requests(), [(1, 0), (1, 0)]);
     drop(kept);
 }
 
+/// Design §8 brev-mail 7: the Phase 4 calls, none of which carries
+/// content, make their requests with nothing decrypted alive: an invite
+/// made, opened and redeemed, a contact request and its answer, the events
+/// and their answers, and *Blokker*.
+#[test]
+fn invite_calls_carry_no_content() {
+    let net = net();
+    let (a, _b, _, _) = pair(&net);
+    let c = user(&net);
+    join(&net, &c, "carl");
+    crate::relay::live_at_requests();
+    let before = net.server.requests();
+    // A request, the events that carry it, and its approval.
+    add(&c, "anna");
+    a.b.sync().unwrap();
+    let peer = a.b.requests().unwrap()[0].peer.clone();
+    a.b.answer_request(peer, true).unwrap();
+    // C's invite, opened and redeemed by A (already C's contact).
+    let code = c.b.create_invite().unwrap();
+    a.b.open_invite(&code, len32(code.len())).unwrap();
+    a.b.redeem_invite().unwrap();
+    // C's sync: the approved and invited events, seen.
+    c.b.sync().unwrap();
+    a.b.block_contact(contact(&a, "carl")).unwrap();
+    let at = crate::relay::live_at_requests();
+    // add: lookup, request (2); A's sync: events, poll (2); the answer (1);
+    // the invite: create, open, redeem (3); C's sync: events, one answer
+    // (the invited event supersedes the approval), poll (3); block (1).
+    assert_eq!(at.len(), 12);
+    assert_eq!(net.server.requests() - before, 12);
+    assert!(at.iter().all(|&live| live == (0, 0)), "{at:?}");
+}
+
 /// Every request is made with the session mutex released (design §5.2):
-/// the relay's policy tries each session's mutex during each request.
+/// the relay's policy tries each session's mutex during each request that
+/// it is asked about (all but the unauthenticated invite open).
 #[test]
 fn no_network_under_the_session_mutex() {
     let net = net();
     let (a, b, b_at_a, _) = pair(&net);
     send(&a, &b_at_a, b"s", b"x");
     b.b.sync().unwrap();
+    // The Phase 4 calls: a request and its answer, an invite redeemed, a
+    // block.
+    let c = user(&net);
+    join(&net, &c, "carl");
+    add(&c, "anna");
+    a.b.sync().unwrap();
+    let peer = a.b.requests().unwrap()[0].peer.clone();
+    a.b.answer_request(peer, true).unwrap();
+    let code = c.b.create_invite().unwrap();
+    a.b.open_invite(&code, len32(code.len())).unwrap();
+    a.b.redeem_invite().unwrap();
+    a.b.block_contact(contact(&a, "carl")).unwrap();
     let calls = net.probe.calls.load(Ordering::SeqCst);
-    // register ×2, lookup ×3, submit, inbox, ack.
-    assert_eq!(calls, 8);
+    // The pair: register ×2, invite create, A's events, answer, inbox (6);
+    // the letter: lookup, submit (2); B's sync: events, inbox, ack (3);
+    // C: register, lookup, request (3); A's sync: events, inbox (2); the
+    // answer (1); C's invite create, A's redeem (2); the block (1).
+    assert_eq!(calls, 20);
     assert_eq!(net.probe.held.load(Ordering::SeqCst), 0);
     // Control: a request made while the mutex is held is seen.
     let (caller, token) = guard(&a.b.s).credentials().unwrap();
@@ -906,7 +1000,7 @@ fn the_sent_row_keeps_its_environment_class() {
     let net = net();
     let (a, b, b_at_a, _) = pair(&net);
     send(&a, &b_at_a, b"s", b"x");
-    assert_eq!(b.b.sync().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 1);
     let classes = |u: &User| -> Vec<Option<i64>> {
         let s = guard(&u.b.s);
         let mut stmt =
@@ -939,4 +1033,47 @@ fn a_report_needs_the_gate_and_a_lock_forgets_it() {
     assert!(guard(&b.s).report.is_some());
     b.lock();
     assert!(guard(&b.s).report.is_none());
+}
+
+/// Design §8 brev-mail 7: each sync deletes the local invites past their
+/// life (made before day today − 7, as the relay counts), and keeps the
+/// others. The invite `create_invite` keeps is dated today.
+#[test]
+fn expired_local_invites_are_deleted() {
+    let net = net();
+    let u = user(&net);
+    join(&net, &u, "anna");
+    let today = crate::store::today();
+    {
+        let mut s = guard(&u.b.s);
+        for (i, day) in [today - 8, today - 7, today - 1].into_iter().enumerate() {
+            s.me.store_invite(&[u8::try_from(i).unwrap(); 16], day)
+                .unwrap();
+        }
+    }
+    u.b.create_invite().unwrap();
+    let days = |u: &User| -> Vec<u64> {
+        let mut days: Vec<u64> = guard(&u.b.s)
+            .me
+            .local_invites()
+            .unwrap()
+            .iter()
+            .map(|i| i.day)
+            .collect();
+        days.sort_unstable();
+        days
+    };
+    assert_eq!(days(&u), [today - 8, today - 7, today - 1, today]);
+    u.b.sync().unwrap();
+    assert_eq!(days(&u), [today - 7, today - 1, today]);
+    // Kept rows still open to their secrets.
+    let secrets: Vec<[u8; 16]> = guard(&u.b.s)
+        .me
+        .local_invites()
+        .unwrap()
+        .iter()
+        .filter(|i| i.day < today)
+        .map(|i| *i.secret)
+        .collect();
+    assert!(secrets.contains(&[1; 16]) && secrets.contains(&[2; 16]));
 }

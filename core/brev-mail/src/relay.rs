@@ -1,12 +1,13 @@
-//! `RelayTransport`: the relay client (docs/PHASE3_DESIGN.md §5.1). One
-//! blocking reqwest client per `Brev`, speaking binary bodies to
-//! `http://127.0.0.1:<port>` and nowhere else.
+//! `RelayTransport`: the relay client (docs/PHASE3_DESIGN.md §5.1,
+//! docs/PHASE4_DESIGN.md §3.2). One blocking reqwest client per `Brev`,
+//! speaking binary bodies to `http://127.0.0.1:<port>` and nowhere else.
 //!
-//! Only ciphertext envelopes, public keys, addresses, ids and the relay
-//! token pass through here, never letter content; the zeroing allocator
-//! wipes every buffer reqwest frees. No call takes the session mutex: the
-//! caller copies what a request needs, releases the mutex, and calls in
-//! (§5.2).
+//! Only ciphertext envelopes, public keys, addresses, ids, the relay token
+//! and the values derived from an invite's secret (`a`, SHA-256(`a`), the
+//! tag; never the secret) pass through here, never letter content; the
+//! zeroing allocator wipes every buffer reqwest frees. No call takes the
+//! session mutex: the caller copies what a request needs, releases the
+//! mutex, and calls in (§5.2).
 //!
 //! Answers are read through [`Read::take`] with a cap per endpoint and
 //! parsed strictly. A 4xx is [`NetError::Refused`] with its status; a
@@ -16,7 +17,9 @@
 use std::io::Read;
 use std::time::Duration;
 
-use brev_proto::body::{self, INBOX_ANSWER_MAX, LOOKUP_ANSWER_LEN};
+use brev_proto::body::{
+    self, EventKind, EVENTS_ANSWER_MAX, INBOX_ANSWER_MAX, INVITE_OPEN_ANSWER_MAX, LOOKUP_REPLY_LEN,
+};
 use brev_proto::{Envelope, MAX_WIRE};
 use reqwest::blocking::Client;
 use reqwest::header::CONTENT_TYPE;
@@ -25,6 +28,34 @@ use zeroize::Zeroizing;
 use crate::store::PublicBundle;
 use crate::transport::{NetError, Transport};
 use crate::Error;
+
+/// One event the relay holds for the caller (docs/PHASE4_DESIGN.md §2),
+/// owned. No `Debug`: the address is content in the app.
+pub(crate) struct Incoming {
+    /// What happened.
+    pub kind: EventKind,
+    /// Who it is about: the bundle registered at the relay.
+    pub bundle: PublicBundle,
+    /// And its address, valid by the address rules.
+    pub address: Zeroizing<Vec<u8>>,
+    /// The invitee's proof for an invited event; zeros otherwise.
+    pub tag: [u8; 32],
+}
+
+/// The inviter an invite-open answer names: its bundle and address; `None`
+/// for a root invite.
+pub(crate) type Inviter = Option<(PublicBundle, Zeroizing<Vec<u8>>)>;
+
+/// A peer of an answer body, owned.
+fn owned(peer: &body::Peer<'_>) -> (PublicBundle, Zeroizing<Vec<u8>>) {
+    (
+        PublicBundle {
+            signing_key: *peer.signing_key,
+            x25519: *peer.x25519,
+        },
+        Zeroizing::new(peer.address.to_vec()),
+    )
+}
 
 const PREFIX: &str = "http://127.0.0.1:";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -65,38 +96,170 @@ impl RelayTransport {
         })
     }
 
-    /// `POST /v1/register` with a signed registration body. 201 and 200
+    /// `POST /v1/register` with a signed registration v2 body. 201 and 200
     /// (already registered, same identity, address and token) are success;
-    /// 409 (address taken) is `Refused(409)`.
+    /// 403 (no valid invite), 409 (address taken) and 428 (attestation or
+    /// identity check) are `Refused` with their status.
     pub(crate) fn register(&self, body: &[u8]) -> Result<(), NetError> {
         self.post("/v1/register", body, &[201, 200], 0).map(drop)
     }
 
-    /// `POST /v1/lookup`: the bundle registered with `address`, `None` if
-    /// there is none (404). The bundle's signing key is checked.
+    /// `POST /v1/lookup`: the bundle registered with `address` and whether
+    /// that identity takes the caller's letters (the status byte, docs/
+    /// PHASE4_DESIGN.md §3.2), `None` if there is none (404). The bundle's
+    /// signing key is checked.
     pub(crate) fn lookup(
         &self,
         caller: &[u8; 32],
         token: &[u8; 32],
         address: &[u8],
-    ) -> Result<Option<PublicBundle>, NetError> {
+    ) -> Result<Option<(PublicBundle, bool)>, NetError> {
         let request = Zeroizing::new(
             body::lookup_body(caller, token, address).map_err(|_| NetError::Refused(400))?,
         );
-        match self.post("/v1/lookup", &request, &[200], LOOKUP_ANSWER_LEN) {
-            Ok(answer) => PublicBundle::from_bytes(&answer)
-                .map(Some)
-                .map_err(|_| NetError::Network),
+        match self.post("/v1/lookup", &request, &[200], LOOKUP_REPLY_LEN) {
+            Ok((_, answer)) => {
+                let (signing_key, x25519, approved) =
+                    body::parse_lookup_reply(&answer).map_err(|_| NetError::Network)?;
+                let bundle = PublicBundle {
+                    signing_key: *signing_key,
+                    x25519: *x25519,
+                };
+                Ok(Some((bundle, approved)))
+            }
             Err(NetError::Refused(404)) => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    /// `POST /v1/envelopes` with a signed envelope: 202 stored, 200 already
-    /// waiting (a resubmit).
-    pub(crate) fn submit(&self, envelope: &Envelope) -> Result<(), NetError> {
-        let wire = envelope.to_wire().map_err(|_| NetError::Refused(400))?;
-        self.post("/v1/envelopes", &wire, &[202, 200], 0).map(drop)
+    /// `POST /v1/envelopes` with the caller's token and a signed envelope
+    /// (prefix ‖ wire; the caller must be the envelope's sender): 202
+    /// stored, 200 already waiting (a resubmit). 409 (the recipient does
+    /// not take the sender's letters) and 429 (the daily limit) are
+    /// `Refused` with their status.
+    pub(crate) fn submit(
+        &self,
+        caller: &[u8; 32],
+        token: &[u8; 32],
+        envelope: &Envelope,
+    ) -> Result<(), NetError> {
+        let request = Zeroizing::new(
+            body::submit_body(caller, token, envelope).map_err(|_| NetError::Refused(400))?,
+        );
+        self.post("/v1/envelopes", &request, &[202, 200], 0)
+            .map(drop)
+    }
+
+    /// `POST /v1/requests`: asks `address` for contact. True if the target
+    /// already takes the caller's letters (200), false if the request was
+    /// taken in (202, which also stands for pending, declined and capped).
+    /// 404 unknown address, 429 over the daily limit.
+    pub(crate) fn request(
+        &self,
+        caller: &[u8; 32],
+        token: &[u8; 32],
+        address: &[u8],
+    ) -> Result<bool, NetError> {
+        let request = Zeroizing::new(
+            body::contact_request_body(caller, token, address)
+                .map_err(|_| NetError::Refused(400))?,
+        );
+        let (status, _) = self.post("/v1/requests", &request, &[200, 202], 0)?;
+        Ok(status == 200)
+    }
+
+    /// `POST /v1/events`: the events waiting for the caller, invited and
+    /// approved first. Deletes nothing.
+    pub(crate) fn events(
+        &self,
+        caller: &[u8; 32],
+        token: &[u8; 32],
+    ) -> Result<Vec<Incoming>, NetError> {
+        let request = Zeroizing::new(body::events_body(caller, token));
+        let (_, answer) = self.post("/v1/events", &request, &[200], EVENTS_ANSWER_MAX)?;
+        let events = body::parse_events_answer(&answer).map_err(|_| NetError::Network)?;
+        Ok(events
+            .iter()
+            .map(|e| {
+                let (bundle, address) = owned(&e.peer);
+                Incoming {
+                    kind: e.kind,
+                    bundle,
+                    address,
+                    tag: *e.tag,
+                }
+            })
+            .collect())
+    }
+
+    /// `POST /v1/events/answer`: the caller's answer to the event about
+    /// `peer`, `yes` to approve a request or mark another event seen, no
+    /// to decline a request. 204; 404 if no such event waits (answered
+    /// already).
+    pub(crate) fn answer(
+        &self,
+        caller: &[u8; 32],
+        token: &[u8; 32],
+        peer: &[u8; 32],
+        yes: bool,
+    ) -> Result<(), NetError> {
+        let request = Zeroizing::new(body::event_answer_body(caller, token, peer, yes));
+        self.post("/v1/events/answer", &request, &[204], 0)
+            .map(drop)
+    }
+
+    /// `POST /v1/block` (*Blokker*): the relay stores no more letters or
+    /// requests from `peer` for the caller. 204, also again; 404 unknown
+    /// peer.
+    pub(crate) fn block(
+        &self,
+        caller: &[u8; 32],
+        token: &[u8; 32],
+        peer: &[u8; 32],
+    ) -> Result<(), NetError> {
+        let request = Zeroizing::new(body::block_body(caller, token, peer));
+        self.post("/v1/block", &request, &[204], 0).map(drop)
+    }
+
+    /// `POST /v1/invites`: registers an invite by SHA-256(`a`). 201, or 200
+    /// for the same hash again; 409 held by another; 429 at a cap.
+    pub(crate) fn invite_create(
+        &self,
+        caller: &[u8; 32],
+        token: &[u8; 32],
+        hash: &[u8; 32],
+    ) -> Result<(), NetError> {
+        let request = Zeroizing::new(body::invite_create_body(caller, token, hash));
+        self.post("/v1/invites", &request, &[201, 200], 0).map(drop)
+    }
+
+    /// `POST /v1/invites/open` with `a` and no token: the inviter the relay
+    /// holds for it, `None` for a root invite. 404 unknown, used or
+    /// expired.
+    pub(crate) fn invite_open(&self, relay_key: &[u8; 32]) -> Result<Inviter, NetError> {
+        let (_, answer) = self.post(
+            "/v1/invites/open",
+            relay_key,
+            &[200],
+            INVITE_OPEN_ANSWER_MAX,
+        )?;
+        let inviter = body::parse_invite_open_answer(&answer).map_err(|_| NetError::Network)?;
+        Ok(inviter.as_ref().map(owned))
+    }
+
+    /// `POST /v1/invites/redeem` with `a` and the caller's tag: 200, also
+    /// again; 404 unknown, used by another or expired; 400 a root invite or
+    /// the caller's own.
+    pub(crate) fn invite_redeem(
+        &self,
+        caller: &[u8; 32],
+        token: &[u8; 32],
+        relay_key: &[u8; 32],
+        tag: &[u8; 32],
+    ) -> Result<(), NetError> {
+        let request = Zeroizing::new(body::invite_redeem_body(caller, token, relay_key, tag));
+        self.post("/v1/invites/redeem", &request, &[200], 0)
+            .map(drop)
     }
 
     /// `POST /v1/inbox`: the envelopes waiting for `caller`, oldest first.
@@ -108,7 +271,7 @@ impl RelayTransport {
         token: &[u8; 32],
     ) -> Result<Vec<Envelope>, NetError> {
         let request = Zeroizing::new(body::inbox_body(caller, token));
-        let answer = self.post("/v1/inbox", &request, &[200], INBOX_CAP)?;
+        let (_, answer) = self.post("/v1/inbox", &request, &[200], INBOX_CAP)?;
         let wires = body::parse_inbox_answer(&answer).map_err(|_| NetError::Network)?;
         wires
             .into_iter()
@@ -142,9 +305,15 @@ impl RelayTransport {
         }
     }
 
-    /// Posts `body` to `path`. Returns the answer body if the status is one
-    /// of `ok` and the body is at most `cap` bytes.
-    fn post(&self, path: &str, body: &[u8], ok: &[u16], cap: usize) -> Result<Vec<u8>, NetError> {
+    /// Posts `body` to `path`. Returns the status and the answer body if
+    /// the status is one of `ok` and the body is at most `cap` bytes.
+    fn post(
+        &self,
+        path: &str,
+        body: &[u8],
+        ok: &[u16],
+        cap: usize,
+    ) -> Result<(u16, Vec<u8>), NetError> {
         #[cfg(test)]
         record_request();
         let response = self
@@ -171,7 +340,7 @@ impl RelayTransport {
         if answer.len() > cap {
             return Err(NetError::Network);
         }
-        Ok(answer)
+        Ok((status, answer))
     }
 }
 
@@ -183,9 +352,21 @@ pub(crate) struct Mailbox<'a> {
     token: Zeroizing<[u8; 32]>,
 }
 
+impl Mailbox<'_> {
+    /// The events waiting for this identity.
+    pub(crate) fn events(&self) -> Result<Vec<Incoming>, NetError> {
+        self.relay.events(&self.caller, &self.token)
+    }
+
+    /// This identity's answer to the event about `peer`.
+    pub(crate) fn answer(&self, peer: &[u8; 32], yes: bool) -> Result<(), NetError> {
+        self.relay.answer(&self.caller, &self.token, peer, yes)
+    }
+}
+
 impl Transport for Mailbox<'_> {
     fn send(&self, envelope: &Envelope) -> Result<(), NetError> {
-        self.relay.submit(envelope)
+        self.relay.submit(&self.caller, &self.token, envelope)
     }
 
     fn poll(&self) -> Result<Vec<Envelope>, NetError> {

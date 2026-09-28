@@ -187,6 +187,7 @@ fn contact_request(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode>
             .contact_request()
             .map_err(|_| StatusCode::BAD_REQUEST)?,
     )?;
+    allow(relay.policy.request(request.caller, Endpoint::Request))?;
     relay.request(request.caller, target).map_err(failed)
 }
 
@@ -195,6 +196,7 @@ fn contact_request(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode>
 fn events(relay: &Relay, body: &[u8]) -> Result<Vec<u8>, StatusCode> {
     let request = authenticate(relay, body)?;
     request.events().map_err(|_| StatusCode::BAD_REQUEST)?;
+    allow(relay.policy.request(request.caller, Endpoint::Events))?;
     relay.events(request.caller).map_err(failed)
 }
 
@@ -205,6 +207,7 @@ fn answer(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
     let (peer, yes) = request
         .event_answer()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
+    allow(relay.policy.request(request.caller, Endpoint::Answer))?;
     relay.answer(request.caller, peer, yes).map_err(failed)
 }
 
@@ -213,6 +216,7 @@ fn answer(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
 fn block(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
     let request = authenticate(relay, body)?;
     let peer = request.block().map_err(|_| StatusCode::BAD_REQUEST)?;
+    allow(relay.policy.request(request.caller, Endpoint::Block))?;
     relay.block(request.caller, peer).map_err(failed)
 }
 
@@ -223,6 +227,7 @@ fn invite_create(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
     let hash = request
         .invite_create()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
+    allow(relay.policy.request(request.caller, Endpoint::InviteCreate))?;
     relay.invite_create(request.caller, hash).map_err(failed)
 }
 
@@ -241,6 +246,7 @@ fn invite_redeem(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
     let (relay_key, tag) = request
         .invite_redeem()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
+    allow(relay.policy.request(request.caller, Endpoint::InviteRedeem))?;
     relay
         .invite_redeem(request.caller, relay_key, tag)
         .map_err(failed)
