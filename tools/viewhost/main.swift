@@ -607,7 +607,8 @@ func announceReady(then next: @escaping () -> Void) {
 
 // MARK: - The compose sheet (--compose)
 
-/// "sent" or "closed" for each compose sheet that ended.
+/// "sent" or "closed" for each compose sheet that reported its end (a lock
+/// reports none).
 var composeEvents: [String] = []
 /// Secure event input is session-wide: another app's counts too.
 let secureInputBefore = IsSecureEventInputEnabled()
@@ -939,9 +940,10 @@ func composeSecondAndThird() {
         let buffers = views.flatMap { $0.pool }
         check("before lock: the sheet's fields hold pixels (control), secure input on if active",
               buffers.contains(where: hasPixels) && wasOn)
+        let events = composeEvents
         lock.lock(.manual)
-        check("lock: the compose sheet ended without sending, wiped, its pixels zero, secure input off",
-              composeSheet() == nil && composeEvents.last == "closed" && composeEvents.filter { $0 == "sent" }.count == 1
+        check("lock: the compose sheet ended without sending or reporting a close, wiped, its pixels zero, secure input off",
+              composeSheet() == nil && composeEvents == events && composeEvents.filter { $0 == "sent" }.count == 1
                   && third.recipient.name == nil && zeroed(third.subject.model.text) && zeroed(third.body.model.text)
                   && !buffers.contains(where: hasPixels) && views.allSatisfy { !$0.pool.contains(where: hasPixels) }
                   && secureInputOff())

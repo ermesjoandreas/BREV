@@ -256,8 +256,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// timer (docs/PHASE2_DESIGN.md §7.2). Nytt brev opens the compose sheet
     /// on the main window (§7.3), which signs through SignService with the
     /// reason send.reason; after a send the mail screen selects the new
-    /// thread, and after a close without sending it reads the contacts
-    /// again (the sheet may have found a changed key).
+    /// thread, and after Avbryt or Escape it reads the contacts again (the
+    /// sheet may have found a changed key). A lock reports nothing.
     private func showMailScreen() {
         guard let session else { return }
         let mail = MailViewController(session: session)

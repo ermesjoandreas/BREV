@@ -13,7 +13,7 @@
 // a contact whose key changed. Legg til kontakt opens AddContactSheet; a
 // contact it adds is selected. Godta ny kode opens ConfirmSheet, and only
 // its Godta accepts the code the header shows (acceptNewKey). After a
-// compose sheet closes without sending (it may have found a changed key),
+// compose sheet is cancelled (it may have found a changed key),
 // the contacts are read again. `sync()` fetches the
 // letters waiting at the relay: once at `start()`, every 5 seconds from a
 // timer in the common run-loop modes (D-0052 in the shifted numbering), and

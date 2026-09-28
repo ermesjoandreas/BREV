@@ -14,8 +14,9 @@
 // addresses it is given, and a UTF-16 copy of each code, made from the
 // code's SecretBytes, which it wipes, except the new code's, which it keeps
 // as `newCode` for acceptNewKey: the code accepted is exactly the code
-// shown. `clear()` (a new selection, the lock sequence) wipes all of it and
-// zeroes the pixels. No string here takes an address or a code.
+// shown. A new selection wipes line 2 and the block, and `clear()` (the lock
+// sequence) wipes all of it; both zero the pixels. No string here takes an
+// address or a code.
 
 import AppKit
 
@@ -37,9 +38,12 @@ final class ContactTextView: ContentView {
     }
 
     /// Shows `text` on row `i` from now on; the view owns it. The old text
-    /// of that row is wiped.
+    /// of that row is wiped and the pixels zeroed (until the next frame).
     func set(_ i: Int, _ text: SecretText?) {
-        lines[i]?.wipe()
+        if let old = lines[i] {
+            old.wipe()
+            blank()
+        }
         lines[i] = text
         needsDisplay = true
     }

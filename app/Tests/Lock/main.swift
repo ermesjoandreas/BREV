@@ -19,6 +19,9 @@
 //   docs/PHASE3_DESIGN.md §6.4);
 // - the lock sequence on the address page wipes the typed address and
 //   zeroes its pixels (docs/PHASE3_DESIGN.md §6.5);
+// - a replaced line of the contact header has its pixels zeroed, and a
+//   lock ends a compose sheet without reporting a close, so AppDelegate
+//   reads nothing again while Brev locks (WP5 review);
 // - a signature's Touch ID prompt with LockState's U4 switch in both
 //   positions (docs/PHASE3_DESIGN.md §3.2): on, every content view is blank
 //   during the prompt, and as this process is never the active app, its end
@@ -290,6 +293,55 @@ check("lock: the address page's field is wiped, its pixels zero, Rust locked",
       page.field.model.text.length == 0 && (0..<page.field.model.text.maxUnits).allSatisfy { page.field.model.text.units[$0] == 0 }
           && !fieldPool.contains(where: hasPixels) && session.brev.isLocked() && lockScreens == 2,
       "length \(page.field.model.text.length), lock screens \(lockScreens)")
+
+// MARK: - A new header line, and the lock sequence with a compose sheet open
+
+guard unlockRust() else {
+    check("unlock for the compose sheet", false)
+    finish()
+}
+_ = lock.state.endUnlock(lock.state.beginUnlock(), succeeded: true, appActive: true)
+let composing = MailViewController(session: session)
+window.root.show(composing)
+composing.start()
+composing.view.layoutSubtreeIfNeeded()
+let headerLines = [composing.header.addresses, composing.header.codes]
+headerLines.forEach { $0.updateLayer() }
+let linePools = headerLines.flatMap { $0.pool }
+check("control: the header's line 2 (the contact's address and code) is pixels in its buffers",
+      headerLines.allSatisfy { $0.lines[1] != nil } && linePools.contains(where: hasPixels))
+// What a new selection, an added contact, an accepted key or a closed
+// compose sheet does to the header: line 2 is replaced.
+composing.reloadContacts(selecting: nil)
+check("a replaced header line has its pixels zeroed in every buffer of the pool, until the next frame",
+      headerLines.allSatisfy { $0.lines[1] != nil } && !linePools.contains(where: hasPixels),
+      "\(linePools.filter(hasPixels).count) of \(linePools.count) buffers")
+headerLines.forEach { $0.updateLayer() }
+check("control: the next frame draws the header again", headerLines.allSatisfy { $0.pool.contains(where: hasPixels) })
+
+// AppDelegate's compose wiring: after a close it reads the contacts, the
+// subjects and the letters again. `reports` notes whether Brev was unlocked
+// each time the sheet reported a close.
+var reports: [String] = []
+composing.onNewLetter = { [weak composing] contact in
+    let id = contact.id
+    ComposeSheet.present(on: window, to: contact, session: session,
+                         signer: { _, done in done(.failure(BrevError.Signing)) }) { thread in
+        reports.append(lock.state.unlocked ? "unlocked" : "locking")
+        if let thread { composing?.showSent(thread: thread, contact: id) } else { composing?.reloadContacts(selecting: id) }
+    }
+}
+composing.newLetter(nil)
+let cancelled = window.attachedSheet as? ComposeSheet
+cancelled?.subject.onCancel()   // Avbryt or Escape
+check("control: Avbryt closes the compose sheet and reports the close",
+      cancelled != nil && window.attachedSheet == nil && reports == ["unlocked"], "reports \(reports)")
+composing.newLetter(nil)
+let sheetAtLock = window.attachedSheet as? ComposeSheet
+lock.lock(.manual)
+check("lock: the compose sheet ends without reporting a close, so nothing is read or laid out again while Brev locks",
+      sheetAtLock != nil && window.attachedSheet == nil && reports == ["unlocked"] && session.brev.isLocked(),
+      "reports \(reports)")
 
 // MARK: - A signature's prompt, with the U4 switch on and off
 

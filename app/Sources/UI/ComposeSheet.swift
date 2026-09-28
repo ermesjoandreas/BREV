@@ -78,16 +78,18 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
 
     /// Shows a new letter to `contact` on `parent`, with the subject
     /// focused. `completion` gets the new thread's id after a send, and nil
-    /// after Avbryt, Escape or a lock.
+    /// after Avbryt or Escape. A lock is not reported: the lock sequence
+    /// ends the sheet with `endSheet(_:)` (code .stop) while Rust is still
+    /// unlocked, and nothing may be read then (§1.10).
     @discardableResult
     static func present(on parent: NSWindow, to contact: ContactItem, session: Session, signer: @escaping Signer,
                         completion: @escaping (Data?) -> Void) -> ComposeSheet {
         let sheet = ComposeSheet(contact: contact, session: session, signer: signer, limits: limits())
-        parent.beginSheet(sheet) { _ in
+        parent.beginSheet(sheet) { code in
             if sheet.sentThread == nil { session.cancelSend() }
             sheet.wipeAll()
             GlyphFlush.flush()
-            completion(sheet.sentThread)
+            if code == .OK || code == .cancel { completion(sheet.sentThread) }
         }
         sheet.makeFirstResponder(sheet.subject)
         Hardening.assertAllWindows()
