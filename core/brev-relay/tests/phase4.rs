@@ -951,8 +951,9 @@ fn relay_file_holds_no_invite_secret() {
 }
 
 /// *Blokker* (owner answer 6): B blocks A, so the relay stores no more
-/// letters or requests from A, and A cannot tell; what waited at B about A
-/// goes; B undoes it by asking A.
+/// letters or requests from A. A's requests still get 202, but A sees the
+/// lookup status drop to 0 and its letters get 409. What waited at B about
+/// A goes; B undoes it by asking A.
 #[test]
 fn blokker_stops_letters_and_requests() {
     let r = Relayed::new();
@@ -969,6 +970,9 @@ fn blokker_stops_letters_and_requests() {
     assert_eq!(r.block(&b, &a), StatusCode::NO_CONTENT, "again");
     assert_eq!(r.lookup(&a, "bob"), (StatusCode::OK, b.reply(false)));
     assert_eq!(r.submit_as(&a, &to_b(2)), StatusCode::CONFLICT);
+    // The letter from before still waits, but A's resend of it gets 409
+    // too, so A does not learn whether B has fetched it.
+    assert_eq!(r.submit_as(&a, &to_b(1)), StatusCode::CONFLICT);
     assert_eq!(r.ask(&a, "bob"), StatusCode::ACCEPTED);
     assert!(r.events(&b).is_empty());
     assert_eq!(r.waiting(), 1, "only the letter from before");
