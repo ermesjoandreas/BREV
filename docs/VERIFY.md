@@ -17,7 +17,8 @@ Status: written in WP0, 2026-09-27, and revised after its review. WP4
 (2026-09-28) built the tools in `tools/verify/` and ran every row a machine
 can run without Touch ID; the results are in `docs/VERIFY-RESULTS.md`. Rows
 marked "per D-0060" become final after the human GUI-spike session. The
-Phase 3 rows were written in Phase 3's WP0 (2026-09-28); none has run yet.
+Phase 3 rows were written in Phase 3's WP0 (2026-09-28) and revised after
+its review; none has run yet.
 
 ## Setup
 
@@ -51,10 +52,20 @@ Phase 3 rows were written in Phase 3's WP0 (2026-09-28); none has run yet.
   The trace holds one line per request, path and status only (design §4.5);
   V63, V64 and V67 read it. `curl -s http://127.0.0.1:8787/v1/health` must
   print `brev-relay v1`.
+- Every full run starts with an empty relay. Addresses are permanent (Q3)
+  and waiting letters never expire (design §4.3), so a relay left from WP5
+  or an earlier run still holds `$ADDR_A` for an identity that is gone, and
+  V55 would get `address.error.taken`. Before starting the relay, stop any
+  relay that still runs and move its folder aside:
+  `[ -e "$RD" ] && mv "$RD" "$R/relay-before-$(date +%s)"`. Brev B then
+  starts with no `$DB` too (run order step 2).
 - Owner question Q1 (design §11) is open. If the owner picks (B), the relay
   runs as `_brevrelay` with its folder in `/Library/Application Support/brev-relay`:
-  change `RD`, and run the commands that read that folder, `release` and the
-  relay's `lsof` with `sudo`.
+  change `RD`, and run the commands that read or move that folder, `release`
+  and the relay's `lsof` with `sudo`. V63's timed line then stops and starts
+  the relay as that user (`sudo pkill -x brev-relay`,
+  `sudo -u _brevrelay "$RELAY" serve …`, or `launchctl` for a LaunchDaemon);
+  run `sudo -v` just before it, so it does not wait at a password prompt.
 - Start Brev with `open "$APP"`, not `open -a Brev`: the Debug build in
   DerivedData has the same name and bundle id.
 - Paste the block below into two terminals (three in Phase 3: the third runs
@@ -126,7 +137,12 @@ waiting() {  # the number of letters the relay holds (Phase 3; read-only)
   measurement of whether the Touch ID panel makes Brev resign active (the
   part of the GUI-spike item U4 that is still unmeasured; design §3.2), and
   the send-prompt rule WP5 applies from it. Update the row from the answer
-  before the run. Q1 changes only where the relay's files are (Setup).
+  before the run. Under Q4's fallback, Brev B is the same Brev.app run by
+  the second user: its container and processes are that user's, so
+  `pgrep -x Brev` also matches it (use `pgrep -x -u "$USER" Brev`) and V54's
+  `lsof` needs `sudo` to see its sockets. Q1 (B) changes where the relay's
+  files are and who runs the relay: the commands of Setup's Q1 item and V63's
+  stop and restart.
 - Only V1, V2, V45, V50, V53, V66, the `sdef` half of V3 and the binary half
   of V21 need no human and no running Brev. Every other row needs a store or
   a running Brev, and a human sets that up with Touch ID.
@@ -153,8 +169,8 @@ waiting() {  # the number of letters the relay holds (Phase 3; read-only)
 | V16 | Drag | dragging in a letter, onto TextEdit and the Finder, moves nothing out | H | – |
 | V17 | No plaintext on disk | `strings -a` and a UTF-16LE grep over every file in the container and in Brev's per-user cache and temp folders: the letter marker, the contact address marker `$ADDR_B` and Brev's own address `$ADDR_A` absent (no `Ekko` or `Speil` since Phase 3); control: `SQLite format 3` found in `brev.db`. Run while unlocked, again after V44's quit, and again after V20's crash | A | – |
 | V18 | Padding | `$T/padcheck`: every sealed column length in `brev.db`, the one store of schema v3, is nonce + bucket + tag; control: it checked more than 0 columns | A | – |
-| V19 | No plaintext in logs | `/usr/bin/log stream --level debug` for the whole run, and `/usr/bin/log show --info --debug` from the run's start afterwards (predicate `process == "Brev"`): marker absent (UTF-8 and UTF-16LE) in both; control: `lock reason=` lines present | A | – |
-| V20 | Crash report | `kill -SEGV` an unlocked Brev with a marker letter open (start with a delay: Terminal in front locks Brev); wait for the report of that kill (it is written a few seconds later, so the newest `Brev*.ips` right after the kill is an older one) and scan it: marker absent; control: the report names `SIGSEGV` and the killed PID, and the V19 stream's last lock or unlock line before the kill is `unlocked` | A | – |
+| V19 | No plaintext in logs | `/usr/bin/log stream --level debug` for the whole run, and `/usr/bin/log show --info --debug` from the run's start afterwards (predicate `process == "Brev"`): the letter marker and the address markers `$ADDR_A` and `$ADDR_B` absent (UTF-8 and UTF-16LE) in both; control: `lock reason=` lines present | A | – |
+| V20 | Crash report | `kill -SEGV` an unlocked Brev with a marker letter open (start with a delay: Terminal in front locks Brev); wait for the report of that kill (it is written a few seconds later, so the newest `Brev*.ips` right after the kill is an older one) and scan it: the letter marker and both address markers absent; control: the report names `SIGSEGV` and the killed PID, and the V19 stream's last lock or unlock line before the kill is `unlocked` | A | – |
 | V21 | Spotlight | `mdfind BREV-SECRET-BODY`: no path outside this checkout (the repo's docs hold the marker; Brev's container is not indexed, and V17 covers it); control: indexing is enabled and `mdfind` finds `docs/VERIFY.md`. The binary links no CoreSpotlight and references no `CSSearchable…` or `NSUserActivity` class (donation through the API) | A | – |
 | V22 | Switching app locks | ⌘-Tab away: the lock screen; log `lock reason=resignActive` | H + A | per D-0060 (U4) |
 | V23 | Screen lock locks | ⌃⌘Q: `lock reason=screenLocked` | H + A | per D-0060 (U4) |
@@ -180,7 +196,7 @@ waiting() {  # the number of letters the relay holds (Phase 3; read-only)
 | V43 | Dock / title | no minimise button; title "Brev"; the Dock window list shows only "Brev" | H | – |
 | V44 | Quit while unlocked | relaunch starts on the lock screen | H | – |
 | V45 | Automated suite | `scripts/test.sh` exits 0 on this Mac (including the Swift harness and the forbidden-API grep) | A | – |
-| V46 | Manual lock, blank-on-lock | with a marker letter open: ⌘L, the *Lås* button and the menu item *Lås Brev*; with the compose sheet open and the marker typed: ⌘L and *Lås Brev* (the sheet blocks clicks on the *Lås* button behind it). Each shows only the lock screen at once; the sheet is gone and secure input is off; after the next unlock the draft is gone; log `lock reason=manual` | H + A | – |
+| V46 | Manual lock, blank-on-lock | with a marker letter open: ⌘L, the *Lås* button and the menu item *Lås Brev*; with the compose sheet open and the marker typed: ⌘L and *Lås Brev* (the sheet blocks clicks on the *Lås* button behind it). Each shows only the lock screen at once; the sheet is gone and secure input is off; after the next unlock the draft is gone; log `lock reason=manual`. Phase 3 (addresses are content, design §6.4): the same with ⌘L, once with `AddContactSheet` open and `$ADDR_B` typed (after the next unlock a new sheet's field is empty), and once on the address page with `$ADDR_A` typed, before V55 (after the next unlock the page's field is empty) | H + A | – |
 | V47 | Unlock that ends while Brev is inactive | click *Lås opp med Touch ID*, switch to another app while the Touch ID panel is up, then authenticate: Brev stays on the lock screen | H | per D-0060 (U4.1) |
 | V48 | Unlock errors | wrong fingers until Touch ID locks out: `unlock.error.lockout`, never a password button. Then, as the last row of the run: add a fingerprint in System Settings: `unlock.error.fingers` with the reset button. This makes the test install unreadable, as designed, and also invalidates other apps' `.biometryCurrentSet` keys | H | per D-0060 (U4.3) |
 | V49 | Malloc scribbling in the real process | `ps -wwE` shows `MallocScribble=1` for Brev started with `open "$APP"`, from the Finder and from the Dock; `open --env MallocScribble=0 "$APP"` → a re-executed process with `MallocScribble=1`, or `launch.error.unsafe` | A + H launches | per D-0060 (M) |
@@ -188,9 +204,9 @@ waiting() {  # the number of letters the relay holds (Phase 3; read-only)
 | V51 | Unlock stack residue | `TouchIDProbe.app --unlock` (built by `tools/verify/build.sh`, team-signed with Brev's bundle id and keychain group) with the final `brev-core`: the exact §5.4 closure (`UnlockService.unlock`, unchanged: KEK lookup, `SecKeyCreateDecryptedData` with ECIES, `brev.unlock`, in-place wipe), needles for the DEK, the ECDH output, the AES key and the IV: it prints PASS, i.e. 0 hits for the ECDH output, AES key and IV after the closure, 0 for everything after lock, at the scrub depth recorded for the unlock drop guard (design D-0035, D-0038 after the renumbering); control: while unlocked, the DEK needle finds Rust's copy, and each needle is found once when made on purpose. Negative control (design §14.2 K): the same run with the build whose unlock scrub is disabled (`touchid-probe-scrub0`) prints `NEGATIVE CONTROL: residue …` and PASS for its own controls, so the scrub is what removes the residue; if it prints `NEGATIVE CONTROL EMPTY` instead, record that the PASS above does not show that the scrub works. If the shipped build fails, run the 128 KiB build (`touchid-probe-scrub128`); a change of depth goes to the owner (design §2.5). It uses Brev's own keychain names, so it runs only with Brev quit and not installed (run order step 2), and deletes what it made | H + A | per D-0060 (K) |
 | V52 | File substitution | copy the stores in `$D` aside before V38 (three in Phase 2, only `brev.db` since Phase 3); after the new onboarding, Brev quit, put the old stores back: the unlock fails with `unlock.error.damaged` (the new DEK does not open them), and nothing unlocks | H + A | – |
 | V53 | Entitlements | on `$APP` and `$VAPP`: `codesign -d --entitlements`: `app-sandbox`, `network.client`, group `AV26DNQ5SC.no.brev.app`; no `network.server` | A | – |
-| V54 | Loopback only | Brev unlocked: `lsof -nP -iTCP -a -p <Brev>`: only 127.0.0.1:8787, and at least one connection (Brev polls every 5 s); `lsof -nP -iTCP -sTCP:LISTEN`: brev-relay on 127.0.0.1 only; Brev and Brev B listen nowhere | A | – |
+| V54 | Loopback only | Brev unlocked: `lsof -nP -iTCP -a -p <Brev>`: only 127.0.0.1:8787, and at least one connection (Brev polls every 5 s); `lsof -nP -iTCP -sTCP:LISTEN`: brev-relay on 127.0.0.1 only; Brev and Brev B listen nowhere | A | Q4 |
 | V55 | Registration prompt | on the address page, *Registrer* with `$ADDR_A`: exactly one dialog, «Brev» … registrere adressen din, no password button | H | U4 (WP5) |
-| V56 | One prompt per letter | one dialog per *Send*, «… sende brevet»; *Avbryt* keeps the draft, relay count (`waiting`) unchanged | H + A | U4 (WP5) |
+| V56 | One prompt per letter | one dialog per *Send*, «… sende brevet», no password button; *Avbryt* keeps the draft, relay count (`waiting`) unchanged | H + A | U4 (WP5) |
 | V57 | Two instances exchange letters (replaces V42) | Brev and Brev B (Phase 3 design §7) add each other by address; a marker letter each way arrives on the recipient's first sync after unlock and shows in its three panes; Brev B's dialog says «Brev B»; separate containers (`$C`, `$CB`) and keychain groups (`AV26DNQ5SC.no.brev.app`, `AV26DNQ5SC.no.brev.app.b`) | H | Q4 |
 | V58 | Relay DB has no plaintext (DoD) | `strings -a` and a UTF-16LE grep of `relay.db*` after V57 with the marker letter, and once during V57 while a marker letter waits at the relay (`waiting` ≥ 1): marker absent; control: both addresses found | A | Q4 |
 | V59 | Deleted after delivery | `sqlite3 relay.db 'select count(*) from envelopes'` (`waiting`) = 0 once both have synced | A | – |
@@ -198,11 +214,11 @@ waiting() {  # the number of letters the relay holds (Phase 3; read-only)
 | V61 | Codes match | the code Brev shows for Brev B equals the own code in Brev B's header | H | Q4 |
 | V62 | App switch during the send prompt | ⌘-Tab while the send dialog is up: Brev locks; nothing sent (relay count unchanged) | H + A | U4 (WP5) |
 | V63 | Relay down | stop the relay: `sync failed: Network` logged once, not every 5 s; *Send* shows `net.error` and keeps the draft. After a restart, *Prøv igjen* sends once, with no second Touch ID: it appears only when the relay fails after signing, so the relay is stopped while the send dialog is up, and restarted, by a timed command (Terminal in front would lock Brev and clear the signed letter) | H + A | – |
-| V64 | No requests while locked | relay with `--trace`: no line while Brev and Brev B are locked; control: `/v1/inbox` lines while one of them is unlocked | A | – |
-| V65 | Heap residue with the network | V39 rewritten: on the Verify build the marker letter comes from Brev B over the relay; read it and lock: log `selfscan u8=0 u16=0 glyph=0`, with V39's control line (at the start of the lock, the letter still open: u16 > 0 and needle > 0; its glyph is 0) | H + A | Q4; per D-0060 (M) |
+| V64 | No requests while locked | relay with `--trace`: no line while Brev and Brev B are locked; controls: `/v1/inbox` lines while one of them is unlocked, and a `/v1/health` request right after the quiet minute adds one line (the relay was up and tracing) | A | – |
+| V65 | Heap residue with the network | V39 rewritten, with both of its halves: on the Verify build, write a marker letter to Brev B and send it (*Send*, one Touch ID), and read the new marker letter Brev B sent over the relay (it arrives on the first sync after unlock); lock with that letter open: log `selfscan u8=0 u16=0 glyph=0`, with V39's control line (at the start of the lock, the letter still open: u16 > 0 and needle > 0; its glyph is 0). `SelfScan`'s needle is the letter marker only, so this row does not measure address residue after lock | H + A | Q4; per D-0060 (M) |
 | V66 | No ATS, no URLSession, no pasteboard | `plutil -p Info.plist` has no `NSAppTransportSecurity`; `nm -u Brev` has no `NSURLSession`; the forbidden-API grep passes with `allowed-apis.txt`'s pasteboard lines unchanged (only OpaqueView's Services override) | A | – |
-| V67 | New controls | V9 (window exclusion) on the address page, `AddContactSheet` and the accept `ConfirmSheet`; V13 (AX press refused) on *Registrer*, *Legg til*, *Godta ny kode* and the accept `ConfirmSheet`'s *Godta*: no Touch ID dialog, no `/v1/register` or `/v1/lookup` in the relay trace, no new sheet, `$D` unchanged; record the `AXError` | A (H opens and looks, as in V9 and V13) | per D-0060 (U3) |
-| V68 | No contact data in AX or capture | with a contact whose address is a marker (`$ADDR_B`, selected, so the header shows both addresses and codes): V11's AX dump has neither address marker nor any identity code (6 groups of 5 of A–Z and 2–7); V5–V7's capture (`capture-probe` with the header as a `--pane`) shows the header blank; controls as in V11 and V6 | A | per D-0060 (U1, U3) |
+| V67 | New controls | V9 (window exclusion) on the address page, `AddContactSheet` and the accept `ConfirmSheet`; V13 (AX press refused) on *Registrer* with `$ADDR_A` typed, *Legg til* with `$ADDR_B` typed (a valid address, so that a press that gets through shows a dialog, a request or a new contact, not an address error), *Godta ny kode* and the accept `ConfirmSheet`'s *Godta*: no Touch ID dialog, no `/v1/register` or `/v1/lookup` in the relay trace, no new sheet, `$D` unchanged; record the `AXError` | A (H opens and looks, as in V9 and V13) | per D-0060 (U3) |
+| V68 | No contact data in AX or capture | with a contact whose address is a marker (`$ADDR_B`, selected, so the header shows both addresses and codes): V11's AX dump has neither address marker nor any identity code (6 groups of 5 of A–Z and 2–7); V5–V7's capture (`capture-probe` with the header's protected view as a `--pane`) shows the header blank, while a control `--pane` over one of the header's labels shows ink in every path that captures the window, and Brev does not lock during the run (`--pane` turns off the probe's own check for that); controls as in V11 and V6 | A | per D-0060 (U1, U3) |
 
 ## Commands
 
@@ -276,6 +292,8 @@ strings -a "$D/brev.db" | grep -c 'SQLite format 3'        # 1 (control)
 head -1 "$R/stream.log"                                    # in the first terminal, before the first launch: Filtering the log data using …
 /usr/bin/log show --info --debug --predicate 'process == "Brev"' --start "$START" > "$R/show.log"
 hits "$M" "$R/stream.log" "$R/show.log"                    # nothing
+hits "$ADDR_A" "$R/stream.log" "$R/show.log"               # nothing (Phase 3: the address markers)
+hits "$ADDR_B" "$R/stream.log" "$R/show.log"               # nothing
 grep -c 'lock reason=' "$R/stream.log"                     # > 0 (control)
 
 # V20 (Brev in front, unlocked, a marker letter open when the delay ends)
@@ -284,6 +302,7 @@ grep -E 'lock reason=|\] unlocked' "$R/stream.log" | tail -1   # ends in "] unlo
 for i in $(seq 60); do IPS="$(find ~/Library/Logs/DiagnosticReports -name 'Brev*.ips' -newer "$R/v20-mark" | head -1)"; [ -n "$IPS" ] && break; sleep 1; done
 echo "$IPS"                                                # one path (none after 60 s fails the row)
 hits "$M" "$IPS"                                           # nothing
+hits "$ADDR_A" "$IPS"; hits "$ADDR_B" "$IPS"               # nothing (Phase 3: the address markers)
 grep -c SIGSEGV "$IPS"                                     # > 0 (control)
 grep -c "\"pid\" : $PID," "$IPS"                           # 1 (control: the report of this kill)
 
@@ -369,19 +388,22 @@ waiting                                                     # 0
 # V60 (after Brev B's reset by V38's method on "$DB"; before Brev B registers again)
 "$RELAY" release --db "$RDB" "$ADDR_B"                      # frees the address and deletes its waiting letters
 
-# V63, part 1: stop the relay (⌃C in its terminal); switch to Brev, unlock, wait 30 s, press Send once (net.error, no dialog)
-grep -c 'sync failed: Network' "$R/stream.log"             # 1: once for the outage, not once per 5 s
+# V63, part 1: note the stream's length first. Then stop the relay (⌃C in its terminal); switch to Brev, unlock, wait 30 s,
+# press Send once (net.error, no dialog), and come back.
+s="$(wc -l < "$R/stream.log")"
+tail -n +"$((s + 1))" "$R/stream.log" | grep -c 'sync failed: Network'   # 1: once for the outage, not once per 5 s
 # V63, part 2: start the relay again as in Setup, with >> instead of >. Then run the line below, switch to Brev, unlock,
 # write a letter and press Send so that the dialog is up when the relay stops (at 30 s). Authenticate after that:
 # Prøv igjen appears. The relay is back at 60 s: press Prøv igjen once.
-sleep 30; pkill -x brev-relay; sleep 30; "$RELAY" serve --db "$RDB" --listen 127.0.0.1:8787 --trace >> "$R/relay.log"
-grep '/v1/envelopes' "$R/relay.log" | tail -3              # (another terminal) one line after the restart, a 2xx; no second Touch ID
+wc -l < "$R/relay.log" > "$R/v63-n"; sleep 30; pkill -x brev-relay; sleep 30; "$RELAY" serve --db "$RDB" --listen 127.0.0.1:8787 --trace >> "$R/relay.log"
+tail -n +"$(($(cat "$R/v63-n") + 1))" "$R/relay.log" | grep '/v1/envelopes'   # (another terminal) exactly one line, status 202; no second Touch ID
 
 # V64 (Terminal in front: Brev and Brev B locked)
 a="$(wc -l < "$R/relay.log")"; sleep 60; b="$(wc -l < "$R/relay.log")"; echo "$a $b"   # the same number twice
+curl -s http://127.0.0.1:8787/v1/health; echo; sleep 1; wc -l < "$R/relay.log"   # brev-relay v1, then b + 1 (control: the relay was up and tracing)
 grep -c '/v1/inbox' "$R/relay.log"                         # > 0 (control: unlocked sessions poll)
 
-# V65 (V39's command; Verify build; from the V19 stream)
+# V65 (V39's command; Verify build, after it sent a marker letter to Brev B and read Brev B's; from the V19 stream)
 grep -o 'selfscan .*' "$R/stream.log"                      # after the lock: selfscan u8=0 u16=0 glyph=0; the control line: u16 > 0 and needle > 0
 
 # V66 (the forbidden-API grep itself runs in V45)
@@ -389,8 +411,9 @@ for A in "$APP" "$VAPP"; do plutil -p "$A/Contents/Info.plist" | grep -c NSAppTr
 nm -u "$APP/Contents/MacOS/Brev" | grep -Eci 'URLSession|NSURLConnection'                             # 0
 grep -v '^#' scripts/allowed-apis.txt | grep -i pasteboard | cut -d'|' -f1   # app/Sources/UI/OpaqueView.swift twice, nothing else
 
-# V67: V9's command with the address page, AddContactSheet and the accept ConfirmSheet open. V13's command for Registrer,
-# Legg til, Godta ny kode and the ConfirmSheet's Godta, with the relay trace and the window list checked too:
+# V67: V9's command with the address page, AddContactSheet and the accept ConfirmSheet open. V13's command for Registrer
+# ($ADDR_A typed on the address page first), Legg til ($ADDR_B typed in AddContactSheet first), Godta ny kode and the
+# ConfirmSheet's Godta, with the relay trace and the window list checked too:
 sleep 30; n="$(wc -l < "$R/relay.log")"; "$T/windows" Brev > "$R/v67-win"; find "$D" -type f -exec stat -f '%N %z %Fm %i' {} + | sort > "$R/v67-before"
 "$T/axdump" Brev --press '<button title>'; sleep 5          # record the AXError; no Touch ID dialog appears
 find "$D" -type f -exec stat -f '%N %z %Fm %i' {} + | sort | diff "$R/v67-before" -   # no output
@@ -402,9 +425,20 @@ sleep 30; "$T/axdump" Brev > "$R/v68.txt"
 grep -cF -e "$ADDR_A" -e "$ADDR_B" "$R/v68.txt"            # 0
 grep -Ec '[A-Z2-7]{5}( [A-Z2-7]{5}){5}' "$R/v68.txt"       # 0: no identity code
 grep -c 'AXTitle = "Brev"' "$R/v68.txt"                    # > 0 (control)
-# <x,y,w,h>: the header's protected view in global points, origin top left (from $T/axdump, or --hit)
-sleep 30; for m in screencapture sck legacy; do "$T/capture-probe" --$m --pane header=<x,y,w,h> --out "$R/v68-$m" > "$R/v68-$m.txt"; echo "$m exit=$?"; done
-grep '^RESULT' "$R"/v68-*.txt                              # every line "pass"; exit 0 each
+# <x,y,w,h>: the header's protected view in global points, origin top left. It has no AX element (OpaqueView), so axdump
+# and --hit cannot give its frame: take it from the AXPosition and AXSize in $R/v68.txt of what surrounds it, the header's
+# labels (Du:, Sikkerhetskode:) and the tops of the thread and letter scroll areas below, with no label inside it (one
+# --pane each if the labels split it). <label>: one label's frame grown by 6 points on each side (the probe insets every
+# pane by 6): the control. --pane turns off the probe's own check for a lock during the run, so the stream is checked
+# instead: stay on Brev until the last number prints.
+sleep 30; s="$(wc -l < "$R/stream.log")"; for m in screencapture sck legacy; do "$T/capture-probe" --$m --pane header=<x,y,w,h> --pane label=<label> --out "$R/v68-$m" > "$R/v68-$m.txt"; echo "$m exit=$?"; done; sleep 2; tail -n +"$((s + 1))" "$R/stream.log" | grep -c 'lock reason='
+                                                           # 0: Brev did not lock during the run
+grep -h '^RESULT' "$R"/v68-*.txt                           # each line "pass" with the window excluded (or empty while the same method
+                                                           # shows the control window), or "window captured, ink in label"; never
+                                                           # "header" or INVALID. A captured window with every pane empty means the
+                                                           # label control was missed: the rects are off, run again. Exit 1 is
+                                                           # expected where the label shows ink
+grep -c 'window captured, ink in label$' "$R/v68-legacy.txt"   # > 0 (control: the paths of V7 that capture the window)
 ```
 
 ## Tools
@@ -426,7 +460,8 @@ grep '^RESULT' "$R"/v68-*.txt                              # every line "pass"; 
 ## Coverage
 
 The Phase 2 tables name V39 and V42 as Phase 2 ran them. From Phase 3 on,
-V65 covers what V39 covered, and V57 what V42 covered, except the echo
+V65 covers what V39 covered (it sends and reads a marker letter in the
+scanned process, as V39 did), and V57 what V42 covered, except the echo
 contacts, which Phase 3 removes.
 
 CLAUDE.md §5, Phase 2:
@@ -515,9 +550,9 @@ New mechanisms in the Phase 3 design:
 | One Touch ID per letter, none to retry; the send prompt keeps auto-lock (§3.2, §3.5) | V56, V63, V62, V26 |
 | Address page and registration after the first unlock; address rules (§3.2, §6.5, Q3) | V55, V67 |
 | Schema v3: one store, sealed addresses and `pending` (§6.1) | V17, V18, V40, V41 |
-| Contact data drawn only in the protected layer (§6.4) | V68, V17 |
+| Contact data drawn only in the protected layer; addresses in no log or crash report and gone on lock (§6.4) | V68, V17, V19, V20, V46 |
 | New sheets and buttons: `AddContactSheet`, contact header, accept `ConfirmSheet` (§6.5) | V67, V60, V68 |
-| Heap residue with letters from the network | V65 |
+| Heap residue with letters to and from the network (the draft and `sign_request`'s UTF-8 copies, §3.2) | V65 |
 | Two instances by bundle id (§7) | V57 |
 | Echo peers removed (§1.2) | V17, V41 |
 
@@ -533,22 +568,24 @@ The order below is Phase 3's run. V26 holds for the whole run.
    (it uses Brev's own keychain names, so it runs only while Brev is not
    installed, and deletes them again), V36, V29, V37, then onboarding to the
    end (the first unlock is V27's one prompt with no password button), V40,
-   V41. On the address page: V67's parts for the page and *Registrer*, then
-   V55 with `$ADDR_A`. Then Brev B: onboarding and `$ADDR_B` (its dialogs
+   V41. On the address page: V46's part for the page, V67's parts for the
+   page and *Registrer* (with `$ADDR_A` typed), then V55 with `$ADDR_A`.
+   Then Brev B, also with no `$DB`: onboarding and `$ADDR_B` (its dialogs
    say «Brev B», V57).
 3. Launches, with Brev quit before each: V28 (delete the global default at
    once), V49, V26's launch part, the `osascript` half of V3. On the lock
    screen: V27's *Avbryt*, V43, V48's lockout part.
-4. Unlocked: V67's parts for `AddContactSheet` and *Legg til*, then Brev
-   adds `$ADDR_B` and Brev B adds `$ADDR_A`. Marker letters both ways: V57,
+4. Unlocked: V67's parts for `AddContactSheet` and *Legg til* (with
+   `$ADDR_B` typed), then Brev adds `$ADDR_B` and Brev B adds `$ADDR_A`. Marker letters both ways: V57,
    with V58's first part while a letter waits, V59, V58's second part, V61,
    V56. Then the capture, accessibility (V13 on *Send* and *Lås opp med
    Touch ID*), V68, input, pasteboard, disk, log and lock rows, V46, V47,
    V54, V64, V62, V63, and V44 last. Grant Terminal Accessibility before the
    capture rows: `capture-probe` finds Brev's panes through it.
 5. With Brev quit after V44's relaunch: V17 and V41 again, so that what the
-   lock, discard and quit paths wrote is scanned. Then V65 on the Verify
-   build, with a marker letter from Brev B.
+   lock, discard and quit paths wrote is scanned. Then V65: Brev B sends
+   Brev a new marker letter; then, on the Verify build, write and send a
+   marker letter to Brev B, open Brev B's letter, and lock with it open.
 6. Destructive rows last: V20, then V17 and V41 again (the crash path). V60
    on Brev B, with V67's parts for *Godta ny kode* and the accept
    `ConfirmSheet` before a human presses them (Brev's store must still be
@@ -639,10 +676,20 @@ design, it is here:
 - Address markers: the design names "a contact address marker". The setup
   fixes two, `$ADDR_A` for Brev and `$ADDR_B` for Brev B, both valid under
   the address rules. V17 also searches for Brev's own address, which Brev
-  seals like the contact's (design §6.1, §6.4).
+  seals like the contact's (design §6.1, §6.4). Addresses are content that
+  is wiped on lock (design §6.4), so V19 and V20 also search the logs and
+  the crash report for both, and V46 also locks with an address typed in
+  `AddContactSheet` and on the address page.
+- Setup: every full run starts with an empty relay (its folder moved
+  aside) and a Brev B with no `$DB`. Addresses are permanent and waiting
+  letters never expire, so an old relay would refuse `$ADDR_A` in V55.
 - V26 adds *Prøv igjen* to the actions that never prompt (design §3.5:
   retrying a submit costs no Touch ID).
-- V54 has a control: at least one connection, so an empty list cannot pass.
+- V54 also checks that Brev B listens nowhere, and has a control: at least
+  one connection, so an empty list cannot pass.
+- V56 checks that the send dialog has no password button, as V27 and V55
+  do: its `LAContext` has `localizedFallbackTitle = ""` (design §3.2
+  step 2).
 - V58 also runs while a marker letter waits at the relay. After V57 the
   envelope is already deleted, so only that run has ciphertext in the file.
 - V60: Brev B adds Brev again before the last letter, because letters from
@@ -651,14 +698,37 @@ design, it is here:
   is signed (design §3.2 step 0).
 - V63: *Prøv igjen* appears only when the relay fails after signing (design
   §6.5), so the row stops the relay while the send dialog is up, with a
-  timed command.
+  timed command. Both parts count only the lines written after a noted line
+  count: the trace has no restart line.
+- V64 names Brev B too (with two instances, "no line" holds only when both
+  are locked) and has two controls: `/v1/inbox` lines, and a `/v1/health`
+  request right after the quiet minute that adds one line, so a relay that
+  stopped, or stopped tracing, cannot pass.
+- V65 keeps V39's send half: the Verify build also writes and sends a
+  marker letter, so the compose sheet, the draft kept through the Touch ID
+  prompt and `sign_request`'s UTF-8 copies (design §3.2 step 1) are in the
+  process `SelfScan` scans. The design names only the letter from Brev B.
+  `SelfScan` counts the letter marker only; address needles would be a
+  change to the tool.
 - V67 is marked "A (H opens and looks)", as V9 and V13 are: a human opens
   the page and sheets and watches for a Touch ID dialog. It also presses the
   accept `ConfirmSheet`'s *Godta* through AX, since pressing both buttons
-  would accept a new key.
+  would accept a new key. Its V13 part also checks the relay trace (no
+  `/v1/register` or `/v1/lookup`) and the window list (no new sheet), and
+  types a valid address before *Registrer* and *Legg til*: with an empty
+  field, a press that got through would end in an address error with no
+  dialog, request or write.
 - V68 judges the contact header by giving its frame to `capture-probe` as a
-  `--pane`, since the probe finds only scroll areas by itself.
-- The "Depends on" column names Q4 and U4 (WP5) (Legend). Q1 changes only
-  where the relay's files are (Setup).
+  `--pane`, since the probe finds only scroll areas by itself. The protected
+  view has no AX element, so the frame comes from the labels and scroll
+  areas around it. A second `--pane` over a label is the control that the
+  rects are right, and the V19 stream shows that Brev did not lock during
+  the run, because `--pane` turns off the probe's re-read of the panes.
+- `capture-probe --selftest` also draws the contact header's two addresses
+  and codes (Tools); the design names only the contacts pane's text.
+- The "Depends on" column names Q4 and U4 (WP5) (Legend). V54 carries Q4
+  too: under Q4's fallback its `lsof` sees the other user's Brev B only with
+  `sudo`. Q1 (B) also changes who runs the relay, so V63's stop and restart
+  change with it (Setup).
 - V52 is not in the design's list, but its "three stores" no longer exist:
   it now copies the stores that are there (`brev.db` since Phase 3).
