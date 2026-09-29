@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "brev-hand",
     "brev-mail",
     "brev-proto",
     "brev-vault",
@@ -40,6 +41,11 @@ zeroizing-alloc = "0.1.1"
 # `ecdsa` always brings ecdsa's `der`, so `Signature::from_der` needs no DER
 # code of ours.
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa"] }
+# Hand, the authorship token (docs/AUTHORSHIP.md, D-0107): decoding only.
+# Tokens are encoded as ciborium `Value`s built in a fixed key order, and
+# the decoder's `Value` is checked against that order (docs/AUTHORSHIP.md
+# §2.4); brev-hand only.
+ciborium = { version = "0.2.2", default-features = false, features = ["std"] }
 # The relay client in brev-core: `blocking` only, so no TLS, no system proxy
 # and no JSON.
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking"] }
