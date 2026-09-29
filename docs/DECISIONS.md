@@ -4671,8 +4671,11 @@ WP5 and their reviews record.
      (`Environment`, «opptaksvernet var av»). Faking the fact would make
      tokens lie.
   3. A Debug build has the same bundle id, container and keychain items
-     as the Release build of its instance, so it opens the same store;
-     CLAUDE.md §2 says so.
+     as the Release build of its instance, so it opens the same store, and
+     `open -a Brev`, a notification or the Dock can start it instead;
+     CLAUDE.md §2 says so. A Debug bundle id of its own would need its own
+     provisioning profile and keychain group, so it is not built; the
+     owner decides this again before the first real letter (CLAUDE.md §2).
   4. Only the three named triggers are off in a dev build: sleep, the
      displays sleeping and a user switch still lock.
   5. The «UTVIKLER» label is red 11 pt semibold text at the trailing end of
@@ -4684,14 +4687,23 @@ WP5 and their reviews record.
      facts that fail (before, class C named only `"key"`).
   7. The list's seal has no accessibility element: the message list is a
      ContentView and exposes nothing (§1.2), so the fixed text «Skrevet i
-     Brev» is read from the reading header's badge, as before.
-  8. ProofSheet's key line says «ja» for every verified letter, since a
-     verified letter met the hardware-key requirement; in a test archive
-     (`AnyKey`) it says «ja» for a software key too.
+     Brev» is read from the reading header's badge, as before. The owner
+     asked for a fixed AX label on the seal; this departure needs the
+     owner's confirmation (or the label is added as an accessibility
+     child of the list).
+  8. ProofSheet's key line is Rust's: `Proof.hardwareKey`, read from the
+     token's `"key"` (true for a Secure Enclave or a TPM, false for a
+     software key, nil for unknown; only when verified). Brev's app shows
+     «ja» for every verified letter, since that is a requirement; a test
+     archive (`AnyKey`) shows «nei» for a software key.
   9. The test tools (harness, lock probe, fixture, snapshot) now report
      `admin: false` instead of an unread admin fact, and the harness
      states Brev's design facts, because the test archive keeps every
-     requirement but the key.
+     requirement but the key. One harness case sends with a design whose
+     `axOpaque` is false and expects `Environment(["ax-opaque"])`.
+  10. `tools/verify/build.sh` runs `scripts/check-dev-flag.sh --release`
+      on the Verify app it builds, and `scripts/test.sh` checks a Verify
+      app left in app/build too.
 - **Verified:** scripts/test.sh, scripts/build.sh (both instances),
   tools/snapshot `--check` and its PNGs (no «Klasse» anywhere). Not run on
   screen or with Touch ID; V82–V84 need the owner's rerun.

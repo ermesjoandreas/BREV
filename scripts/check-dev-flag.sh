@@ -9,7 +9,7 @@
 #      (app/Sources/App/DevBuild.swift) anywhere in its bundle; each app
 #      named with --debug holds it (the control).
 # scripts/build.sh runs it after every build, scripts/test.sh after its
-# Debug compile check. Needs the generated Xcode project.
+# Debug compile check, tools/verify/build.sh on its Verify app. Needs the generated Xcode project.
 #
 # Usage: scripts/check-dev-flag.sh [--release <app>]... [--debug <app>]...
 set -euo pipefail

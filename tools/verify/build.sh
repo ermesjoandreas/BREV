@@ -199,6 +199,8 @@ if [[ "$MODE" == all ]]; then
     -destination "platform=macOS,arch=$ARCH" -derivedDataPath "$REPO_ROOT/app/build" ONLY_ACTIVE_ARCH=YES build -quiet
   VAPP="$REPO_ROOT/app/build/Build/Products/Verify/Brev.app"
   [[ -d "$VAPP" ]] || { echo "error: $VAPP is missing" >&2; exit 1; }
+  # Verify is Release plus the self-scan: no dev flag (CLAUDE.md §2, D-0115).
+  "$REPO_ROOT/scripts/check-dev-flag.sh" --release "$VAPP"
 fi
 
 echo
