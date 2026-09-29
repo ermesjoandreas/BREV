@@ -4151,3 +4151,20 @@ WP5 and their reviews record.
   and the V60 row added to it: KeyChanged at Send with no Touch ID and an
   unchanged envelope count, the warning with both codes, then after
   acceptance and Brev B re-adding Brev a letter delivered and deleted.
+
+### D-0106 — Owner skips the edge-case round (round 2); development continues
+
+- **Date:** 2026-09-29
+- **Decision:** After round 1 and V60 passed, the owner chose not to run
+  round 2 of `docs/USER_SESSION.md` and to continue development, "knowing
+  that such edge cases are not tested". The untested rows are listed in
+  `docs/SECURITY.md` §7 item 1; `docs/USER_SESSION.md` keeps them for a
+  later run. Phase 2's and Phase 4's definitions of done ("checklist
+  passes") are therefore met only for the machine-run rows and the round-1
+  rows; Phase 3's is met (D-0105).
+- **Reasoning:** Round 1 exercised the core promise end to end on real
+  hardware; round 2 (about 3 hours) probes edge cases and destructive
+  paths. The owner prefers to move on and accept that these are covered by
+  machine tests and design only.
+- **Verified:** Not applicable (a decision not to run tests). The list of
+  untested rows was checked against `docs/VERIFY-RESULTS.md`.

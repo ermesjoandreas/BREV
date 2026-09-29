@@ -347,12 +347,21 @@ built from the published source is in `docs/REPRODUCIBLE_BUILD.md`.
 These are open today. None is hidden in the residual-risk list; each is
 named here so a reviewer does not have to find it.
 
-1. **Human verification pending.** The `docs/VERIFY.md` rows that need a
-   human with Touch ID have not been run for Phase 2, Phase 3 (the
-   two-instance run, WP6) or Phase 4 (its definition-of-done run). The
-   machine-run rows are in `docs/VERIFY-RESULTS.md`. Until the human run
-   passes, the Touch ID paths, the real Secure Enclave signing prompt and
-   parts of the capture defence are tested only by machine and by design.
+1. **Edge cases not tested by a human.** On 2026-09-29 the owner ran round 1
+   on a real Mac (Touch ID onboarding, registration with an invite, two
+   instances exchanging letters, no plaintext at the relay, Blokker, and
+   the key-change warning: `docs/VERIFY-RESULTS.md`, D-0104, D-0105) and
+   then chose to skip round 2 (D-0106). So these are tested only by
+   machine and by design, not by a human on the real app: screen capture
+   and Accessibility tools against the running app (V4-V13, V68), typing,
+   dead keys and input monitoring (V30-V35, V14-V16), synthetic input
+   from other programs (V32, V33), launch tricks (V28, V49, V3, V26),
+   files, logs and crash reports on disk (V17-V21, V40, V41), lock on
+   screen lock, sleep and idle (V22-V25, V46, V47), relay down and codes
+   (V54, V56, V61-V64), requests and declines (V74-V76, V79), the letter
+   limit (V78), residue after quit (V65, V18), and the destructive cases
+   (crash, damaged or restored files, a fingerprint change: V20, V38,
+   V48, V51, V52, V80).
 2. **The developer Mac's signing key.** On a Mac that holds Brev's team
    signing key, any same-user program can sign itself into Brev's App ID
    and keychain group without a prompt, and then replace Brev's keychain
