@@ -402,7 +402,7 @@ if [[ -z "$AUTOSAVE" ]] || grep -v 'autosavesConfiguration = false' <<<"$AUTOSAV
   echo "error: the lines above save window, split view or toolbar state (only autosavesConfiguration = false is allowed; control: it must be found)" >&2
   exit 1
 fi
-if (cd "$REPO_ROOT" && grep -rnE 'orderFront|makeKeyAndOrderFront|activate\(|runModal|beginSheet|\.present\(' \
+if (cd "$REPO_ROOT" && grep -rnE 'orderFront|makeKeyAndOrderFront|activate\(|runModal|beginSheet|\.present\(|setIsVisible\(|orderBack|orderWindow\(|\.order\(|unhide' \
     tools/fixture tools/snapshot); then
   echo "error: the lines above show a window or take focus in the offscreen tools (docs/UI_REDESIGN.md §5.2)" >&2
   exit 1

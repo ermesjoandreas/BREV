@@ -196,9 +196,14 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         let retry = HumanButton(title: L10n.composeRetry, target: self, action: #selector(retryPressed(_:)))
         retryButton = retry
         let send = HumanButton(title: L10n.composeSend, target: self, action: #selector(sendPressed(_:)))
-        // The default look without a Return key equivalent: Return in the
-        // body is a new line, and ⌘↩ sends from a field.
+        // The main action: accent-filled, white title. ⌘↩ presses it (a
+        // human's key only, HumanButton); plain Return in the body stays a
+        // new line.
+        send.bezelStyle = .push
         send.bezelColor = .controlAccentColor
+        send.contentTintColor = .white
+        send.keyEquivalent = "\r"
+        send.keyEquivalentModifierMask = [.command]
         sendButton = send
         let buttons = NSStackView(views: [cancel, retry, send])
         buttons.spacing = 8
@@ -227,9 +232,10 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
             about.centerYAnchor.constraint(equalTo: subjectField.centerYAnchor),
             lines[1].topAnchor.constraint(equalTo: subjectField.bottomAnchor, constant: 4),
 
-            bodyField.topAnchor.constraint(equalTo: lines[1].bottomAnchor, constant: 12),
-            bodyField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
-            bodyField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            // The body's first glyph lines up with «Til:» and «Emne:».
+            bodyField.topAnchor.constraint(equalTo: lines[1].bottomAnchor, constant: 20),
+            bodyField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: m - SecureComposeView.inset.width),
+            bodyField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -(m - SecureComposeView.inset.width)),
             bodyField.bottomAnchor.constraint(equalTo: lines[2].topAnchor, constant: -8),
             lines[2].bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -Self.barHeight),
 

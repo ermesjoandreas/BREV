@@ -86,7 +86,6 @@
 "mailbox.inbox" = "Innboks";
 "mailbox.sent" = "Sendt";
 "sidebar.add" = "Legg til kontakt";
-"sidebar.nocontacts" = "Ingen kontakter ennå";
 "toolbar.new" = "Nytt brev";
 "toolbar.lock" = "Lås";
 

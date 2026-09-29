@@ -74,7 +74,6 @@ enum L10n {
     static let mailboxInbox = tr("mailbox.inbox")
     static let mailboxSent = tr("mailbox.sent")
     static let sidebarAdd = tr("sidebar.add")
-    static let sidebarNoContacts = tr("sidebar.nocontacts")
     static let toolbarNew = tr("toolbar.new")
     static let toolbarLock = tr("toolbar.lock")
     static let listEmptyInbox = tr("list.empty.inbox")

@@ -4540,6 +4540,37 @@ WP5 and their reviews record.
   moved to the sheet); ViewHost follows the same and skips its
   scrolled-pools check for a one-letter thread (the pane holds only the
   body now).
+- **Review round 2 (2026-09-29):**
+  1. Security: a mailbox is read only while `mailboxChosen` (a human chose
+     it). Brev falling back to Innboks by itself reads nothing, and a reload
+     (a contact that arrives by sync, a declined request) keeps a mailbox
+     only if a human chose it, else selects the first contact. The snapshot
+     tool checks it with a contact and a letter arriving for a new user
+     (control: the check fails with the old refresh).
+  2. Test coverage back: the snapshot tool checks that closing ContactSheet
+     wipes the own address and code and zeroes their pixels, that a sent
+     letter opens without a badge, and the scrolled-pools release on the
+     sidebar's two lists (ViewHost's own check skips a one-letter thread).
+     ViewHost lists `ownCode` too. test.sh's offscreen grep also catches
+     `setIsVisible(`, `orderBack`, `orderWindow(`, `.order(` and `unhide`;
+     an abort stops the relay and removes the temp stores.
+  3. SelfScan scans one glyph needle per content font laid out (F4, then
+     F1–F3, summed) and logs `fonts=` and a notice when none was, since
+     VERIFY puts the marker in subjects (SF) too.
+  4. The toolbar's Nytt brev and Lås stay plain toolbar items (harmless,
+     like their menu items); VERIFY V13 lists them.
+  5. Design: the sidebar has its own grey, the split view thin separator
+     dividers; the title is the mailbox's name (subtitle empty); a tracking
+     separator puts Nytt brev over the reading pane; a cut list text fades
+     out; the badge is secondary and lines up with «Fra:»; one empty state
+     (no «Ingen brev valgt» over an empty list, no «Ingen kontakter ennå»);
+     ContactSheet collapses rows with nothing in them; Send, Godta and Godta
+     ny kode get the accent bezel (Send also ⌘↩ as a key equivalent, a
+     human's key only); «Slett alt» has a red title and no Return; the
+     compose body lines up with «Til:»/«Emne:»; the contact bar lines up
+     with the rows. The accent bezel shows only in a key window, which the
+     snapshot tool never makes (it aborts if a window becomes key, §5.2), so
+     it checks the button settings instead of the pixels.
 - **Not verified:** nothing here was run on screen or with Touch ID (the
   owner does not test this by hand). VERIFY's GUI rows (capture, AX
   Inspector, V57) still apply to the new layout; see the note at the top of

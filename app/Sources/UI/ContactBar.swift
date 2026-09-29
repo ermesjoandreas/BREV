@@ -107,7 +107,8 @@ final class Hairline: NSView {
 final class ContactBar: NSView {
     /// A code (35 characters) in F1, with room.
     static let codeWidth: CGFloat = 300
-    private static let margin: CGFloat = 16
+    /// The message rows' text inset, so the bar and the rows line up.
+    private static let margin = SecureListView.messageX
 
     /// A human pressed Godta ny kode.
     var onAccept: () -> Void = {}
@@ -184,6 +185,14 @@ final class ContactBar: NSView {
         return b
     }
 
+    /// The main action's look: accent-filled with a white title. No key
+    /// equivalent: Return answers nothing here.
+    private static func primary(_ b: HumanButton) {
+        b.bezelStyle = .push
+        b.bezelColor = .controlAccentColor
+        b.contentTintColor = .white
+    }
+
     private func build() {
         let block = Self.small(L10n.contactBlock, self, #selector(blockPressed(_:)))
         blockButton = block
@@ -195,6 +204,7 @@ final class ContactBar: NSView {
         codes.translatesAutoresizingMaskIntoConstraints = false
 
         let accept = Self.small(L10n.contactAccept, self, #selector(acceptPressed(_:)))
+        Self.primary(accept)
         acceptButton = accept
         let newLabel = InterfaceText(L10n.contactNewCode, style: .caption, width: 200, alignment: .left)
         for v in [changedText, newLabel, newCodeView, accept, acceptError] as [NSView] {
@@ -216,6 +226,7 @@ final class ContactBar: NSView {
         ])
 
         let approve = HumanButton(title: L10n.requestAccept, target: self, action: #selector(approvePressed(_:)))
+        Self.primary(approve)
         let decline = HumanButton(title: L10n.requestDecline, target: self, action: #selector(declinePressed(_:)))
         approveButton = approve
         declineButton = decline

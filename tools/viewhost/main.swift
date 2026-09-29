@@ -1295,7 +1295,8 @@ func contactSheetStage() {
     mail.showContacts(nil)
     check("contact sheet: Kontakter does nothing while it is up", window.sheets.count == 1)
     check("contact sheet: Hardening's settings (V79)", hardened(sheet))
-    for (name, v) in [("field (ContactField)", sheet.field), ("own address", sheet.ownAddress), ("code", sheet.codeView),
+    for (name, v) in [("field (ContactField)", sheet.field), ("own address", sheet.ownAddress),
+                      ("own code", sheet.ownCode), ("code", sheet.codeView),
                       ("inviter", sheet.inviterView)] as [(String, ContentView)] {
         checkOpaque("contact sheet \(name)", v)
     }
@@ -1409,7 +1410,8 @@ func inviteStageInSheet(_ sheet: ContactSheet) {
                                   closed && relayTrace.count("/v1/invites/redeem", 200) == redeems + 1
                                       && contactState().count == 1 && shows(h.addresses.lines[0], addrC)
                                       && h.shownState == "verified" && zeroed(sheet.field.model.text) && sheet.code == nil
-                                      && sheet.ownAddress.lines[0] == nil && sheet.codeView.lines.allSatisfy { $0 == nil }
+                                      && sheet.ownAddress.lines[0] == nil && sheet.ownCode.lines[0] == nil
+                                      && sheet.codeView.lines.allSatisfy { $0 == nil }
                                       && sheet.inviterView.lines.allSatisfy { $0 == nil })
                             later(0.5, addByAddressStage)
                         }

@@ -11,11 +11,13 @@
 // newest first, under the ContactBar while a contact or request is
 // selected) and the reading pane (the ReadingHeaderView and the letter's
 // body, LetterStackView). The window's toolbar (MailToolbar) has Nytt brev
-// and Lås; the window's subtitle names the selected mailbox, never a
-// contact. One selection across the sidebar. Brev starts on the first
-// contact (with none, on Innboks, which then reads nothing) and never opens
-// a letter by itself: a body is read only when a human selects its row.
-// Innboks and Sendt are read only when a human selects them (DECISIONS.md,
+// and Lås; the window's title names the selected mailbox (else «Brev»),
+// never a contact. One selection across the sidebar. Brev starts on the
+// first contact (with none, on Innboks, which then reads nothing) and never
+// opens a letter by itself: a body is read only when a human selects its
+// row. Innboks and Sendt are read only when a human selects them, and a
+// reload keeps a mailbox only if a human chose it (`mailboxChosen`; a
+// contact that arrives by sync is selected instead) (DECISIONS.md,
 // UI redesign, Q1): reading one asks Rust for every contact's threads, which
 // decrypts every subject once per contact, and the list keeps each subject
 // and a copy of each name while it is open. No body is read to draw a list.
@@ -141,6 +143,11 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
 
     private weak var session: Session?
     private(set) var selection: SidebarSelection?
+    /// True only while Innboks or Sendt is selected because a human chose
+    /// it: only then is a mailbox read (DECISIONS.md, UI redesign, Q1). A
+    /// mailbox Brev falls back to by itself (a new user, a declined request)
+    /// reads nothing, and a reload moves off it to the first contact.
+    private(set) var mailboxChosen = false
     private var contacts: [ContactItem] = []
     /// The contact requests, oldest first, as the requests list shows them;
     /// their codes are wiped when the requests are read again or wiped.
@@ -172,9 +179,16 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     private let readingStack = NSStackView()
     private let emptyList = EmptyStateView()
     private let noLetter = InterfaceText(L10n.readingNone, style: .placeholder, width: 260)
-    let split = NSSplitViewController()
+    let split: NSSplitViewController = {
+        let split = NSSplitViewController()
+        let view = MailSplitView()
+        view.isVertical = true
+        view.dividerStyle = .thin
+        split.splitView = view
+        return split
+    }()
     private(set) lazy var mailToolbar = MailToolbar(target: self, new: #selector(newLetter(_:)),
-                                                    lock: #selector(lockPressed(_:)))
+                                                    lock: #selector(lockPressed(_:)), split: split.splitView)
     /// The toolbar the window shows with this screen.
     var toolbar: NSToolbar { mailToolbar.toolbar }
     /// The contact whose new code was not accepted (accept.error shows).
@@ -275,7 +289,8 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         pane.addSubview(emptyList)
         NSLayoutConstraint.activate([
             emptyList.centerXAnchor.constraint(equalTo: listScroll.centerXAnchor),
-            emptyList.centerYAnchor.constraint(equalTo: listScroll.centerYAnchor, constant: -20),
+            // Centred on the pane below the toolbar, as «Ingen brev valgt» is.
+            emptyList.centerYAnchor.constraint(equalTo: listScroll.centerYAnchor),
         ])
         emptyList.isHidden = true
         return pane
@@ -339,12 +354,12 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     // MARK: - Reading and showing
 
     /// After unlock: the requests and the contacts, the first contact (or
-    /// Innboks with no contact, which reads nothing) and its list, no letter
-    /// open; then the sync timer.
+    /// Innboks with no contact, not chosen by a human, which reads nothing)
+    /// and its list, no letter open; then the sync timer.
     func start() {
         readRequests()
         readContacts()
-        apply(contacts.first.map { .contact($0.id) } ?? .inbox)
+        apply(contacts.first.map { .contact($0.id) } ?? .inbox, byHuman: false)
         syncTimer?.invalidate()
         syncTimer = commonModeTimer(every: Self.syncInterval) { [weak self] in self?.syncNow() }
         syncNow()
@@ -386,9 +401,11 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
 
     /// Makes `selection` the sidebar's selection: marks it, shows the
     /// ContactBar for a contact or request, reads the list (no letter
-    /// open) and names a mailbox in the window's subtitle.
-    private func apply(_ next: SidebarSelection) {
+    /// open) and names a mailbox in the window's title. `byHuman` says a
+    /// human chose it: a mailbox is read only then.
+    private func apply(_ next: SidebarSelection, byHuman: Bool) {
         selection = next
+        mailboxChosen = byHuman && next.isMailbox
         markSidebar()
         readList(keeping: nil)
     }
@@ -398,7 +415,16 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         mailboxes.setSelected(selection == .inbox ? 0 : selection == .sent ? 1 : nil)
         contactList.setSelected(selectedContact.flatMap { c in contacts.firstIndex { $0.id == c.id } })
         requestList.setSelected(selectedRequest.flatMap { r in requests.firstIndex { $0.peer == r.peer } })
-        view.window?.subtitle = selection == .inbox ? L10n.mailboxInbox : selection == .sent ? L10n.mailboxSent : ""
+        showTitle()
+    }
+
+    /// The window's title: a mailbox's fixed name while one is selected,
+    /// else «Brev»; never a contact. The subtitle stays empty, so the title
+    /// is one line and does not move.
+    private func showTitle() {
+        view.window?.title = selection == .inbox ? L10n.mailboxInbox
+            : selection == .sent ? L10n.mailboxSent : L10n.windowMainTitle
+        view.window?.subtitle = ""
     }
 
     /// Reads the contacts again, keeping the selection (the contact `id`,
@@ -411,14 +437,18 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
 
     /// Reads the requests and the contacts again and selects `wanted` if it
     /// is still there, else what was selected, else the first contact, else
-    /// Innboks. The same selection keeps its letter by thread id.
+    /// Innboks (not chosen, so it reads nothing). A mailbox is kept only if
+    /// a human chose it: a contact that arrives by sync while Brev sits on
+    /// Innboks by itself is selected, and no mailbox is read. The same
+    /// selection keeps its letter by thread id.
     private func refresh(_ wanted: SidebarSelection?) {
         let before = selection
         let thread = selectedThreadID
         readRequests()
         readContacts()
-        let next = [wanted, before].compactMap { $0 }.first(where: exists)
+        let next = [wanted, before].compactMap { $0 }.first { exists($0) && (!$0.isMailbox || mailboxChosen) }
             ?? contacts.first.map { .contact($0.id) } ?? .inbox
+        mailboxChosen = mailboxChosen && next == before && next.isMailbox
         selection = next
         markSidebar()
         readList(keeping: next == before ? thread : nil)
@@ -435,21 +465,21 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     /// A human selected Innboks (0) or Sendt (1).
     private func mailboxSelected(_ i: Int) {
         acceptFailed = nil
-        apply(i == 0 ? .inbox : .sent)
+        apply(i == 0 ? .inbox : .sent, byHuman: true)
     }
 
     /// A human selected a contact.
     private func contactSelected() {
         guard let i = contactList.selected, contacts.indices.contains(i) else { return }
         acceptFailed = nil
-        apply(.contact(contacts[i].id))
+        apply(.contact(contacts[i].id), byHuman: true)
     }
 
     /// A human selected a request: the asker in the bar, no list.
     private func requestSelected() {
         guard let i = requestList.selected, requests.indices.contains(i) else { return }
         acceptFailed = nil
-        apply(.request(requests[i].peer))
+        apply(.request(requests[i].peer), byHuman: true)
     }
 
     /// The ContactBar for the selection: over the list for a contact or a
@@ -512,12 +542,15 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
             switch selection {
             case .request: break
             case .contact(let id): (listed, rows) = readThreads(of: id, session)
-            case .inbox, .sent: (listed, rows) = readMailbox(sent: selection == .sent, session)
+            case .inbox, .sent:
+                // Only a mailbox a human chose is read (Q1).
+                if mailboxChosen { (listed, rows) = readMailbox(sent: selection == .sent, session) }
             }
         }
         let kept = threadID.flatMap { id in listed.firstIndex { $0.id == id } }
         messageList.setRows(rows, selected: kept)
         showEmptyState()
+        showNoLetter()
         if kept != nil { showLetter(scrolledTo: origin) } else { showBar() }
     }
 
@@ -605,13 +638,19 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     }
 
     /// Wipes the open letter (its bodies, the reading header's copies) and
-    /// shows «Ingen brev valgt», or nothing for a request.
+    /// shows «Ingen brev valgt» (see showNoLetter).
     private func closeLetter() {
         letters.clear()
         readingHeader.clear()
         proofs = []
-        noLetter.isHidden = selection == nil || selectedRequest != nil
+        showNoLetter()
         updateButtons()
+    }
+
+    /// «Ingen brev valgt» while the list has rows and none is open; not for
+    /// a request, and not over an empty list, whose own empty state says it.
+    private func showNoLetter() {
+        noLetter.isHidden = selection == nil || selectedRequest != nil || messageList.count == 0 || !letters.isEmpty
     }
 
     /// Reads the selected thread's letters (the old bodies are wiped first)
@@ -813,10 +852,11 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         contacts = []
         listed = []
         selection = nil
+        mailboxChosen = false
         mailboxes.setSelected(nil)
         sidebar.update()
         emptyList.isHidden = true
-        view.window?.subtitle = ""
+        showTitle()
         updateButtons()
     }
 
@@ -956,6 +996,12 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     private static func name(_ error: Error) -> String {
         (error as? BrevError).map { "\($0)" } ?? "other"
     }
+}
+
+/// The split view: thin dividers in the separator colour, so the three
+/// panes read apart in light and dark. Chrome.
+private final class MailSplitView: NSSplitView {
+    override var dividerColor: NSColor { .separatorColor }
 }
 
 /// The reading pane's background (textBackgroundColor). Chrome.

@@ -20,7 +20,9 @@
 // `clear()` wipes the old ones. Selection is of rows, never of text: a click
 // or ↑/↓ selects a row and calls `onSelect` with its index. As a
 // ContentView it is not an accessibility element and has no menu, so
-// accessibility can neither read nor select a row.
+// accessibility can neither read nor select a row. A text cut at its
+// column's edge fades out over its last 24 pt into the row's background
+// (chrome drawn over the clipped line; nothing more is laid out or read).
 
 import AppKit
 
@@ -189,14 +191,19 @@ final class SecureListView: ContentView {
         for i in first..<last {
             let r = rowRect(i)
             let isSelected = i == selected
+            let box = style == .sidebar ? r.insetBy(dx: 8, dy: 1) : r.insetBy(dx: 8, dy: 2)
+            let background = color(isSelected ? (focused ? .selectedContentBackgroundColor
+                                                         : .unemphasizedSelectedContentBackgroundColor)
+                                              : style == .sidebar ? SidebarView.background : .textBackgroundColor)
             if isSelected {
-                let box = style == .sidebar ? r.insetBy(dx: 8, dy: 1) : r.insetBy(dx: 8, dy: 2)
-                ctx.setFillColor(color(focused ? .selectedContentBackgroundColor
-                                               : .unemphasizedSelectedContentBackgroundColor))
+                ctx.setFillColor(background)
                 ctx.addPath(CGPath(roundedRect: box, cornerWidth: 6, cornerHeight: 6, transform: nil))
                 ctx.fillPath()
             }
             let onAccent = isSelected && focused
+            // Where a fade may paint: inside the selection, or clear of the
+            // hairlines between rows.
+            fadeBand = (isSelected ? box : r.insetBy(dx: 0, dy: 1), background)
             switch style {
             case .sidebar:
                 drawSidebarRow(rows[i], r, onAccent: onAccent, in: ctx)
@@ -212,6 +219,27 @@ final class SecureListView: ContentView {
         ctx.restoreGState()
     }
 
+    /// The current row's band and background, for `fade`.
+    private var fadeBand: (CGRect, CGColor)?
+
+    /// Fades the last 24 pt before `end` of the line in `clip` into the
+    /// row's background, so a cut text ends softly. Chrome only.
+    private func fade(_ clip: CGRect, end: CGFloat, in ctx: CGContext) {
+        guard let (band, background) = fadeBand else { return }
+        let width: CGFloat = 24
+        let r = CGRect(x: end - width, y: clip.minY, width: width, height: clip.height).intersection(clip)
+            .intersection(band)
+        guard !r.isNull, r.width > 0, r.height > 0, let clear = background.copy(alpha: 0),
+              let gradient = CGGradient(colorsSpace: background.colorSpace, colors: [clear, background] as CFArray,
+                                        locations: [0, 1])
+        else { return }
+        ctx.saveGState()
+        ctx.clip(to: r)
+        ctx.drawLinearGradient(gradient, start: CGPoint(x: r.minX, y: r.minY), end: CGPoint(x: r.maxX, y: r.minY),
+                               options: [])
+        ctx.restoreGState()
+    }
+
     private func drawSidebarRow(_ row: Row, _ r: CGRect, onAccent: Bool, in ctx: CGContext) {
         let text: NSColor = onAccent ? .alternateSelectedControlTextColor : row.dim ? .tertiaryLabelColor : .labelColor
         if let symbol {
@@ -221,11 +249,13 @@ final class SecureListView: ContentView {
         let dot: CGFloat = 6
         let end = r.maxX - 16 - (row.flag ? dot + 6 : 0)
         let ascent = CTFontGetAscent(regular.font), descent = CTFontGetDescent(regular.font)
+        let clip = CGRect(x: Self.textX, y: r.minY, width: max(end - Self.textX, 0), height: r.height)
         ctx.saveGState()
-        ctx.clip(to: CGRect(x: Self.textX, y: r.minY, width: max(end - Self.textX, 0), height: r.height))
+        ctx.clip(to: clip)
         ctx.setFillColor(color(text))
         regular.drawLine(row.text, TextLayout.firstLine(row.text), in: ctx, x: Self.textX,
                          baseline: r.minY + (r.height - ascent - descent) / 2 + ascent)
+        fade(clip, end: end, in: ctx)
         ctx.restoreGState()
         if row.flag {
             ctx.setFillColor(color(.systemOrange))
@@ -246,10 +276,12 @@ final class SecureListView: ContentView {
             drawMeta(date, in: ctx, x: right - w, baseline: line1, color: meta)
             end1 = right - w - 8
         }
+        let clip1 = CGRect(x: x, y: r.minY, width: max(end1 - x, 0), height: r.height / 2 + 4)
         ctx.saveGState()
-        ctx.clip(to: CGRect(x: x, y: r.minY, width: max(end1 - x, 0), height: r.height / 2 + 4))
+        ctx.clip(to: clip1)
         ctx.setFillColor(text)
         bold.drawLine(row.text, TextLayout.firstLine(row.text), in: ctx, x: x, baseline: line1)
+        fade(clip1, end: end1, in: ctx)
         ctx.restoreGState()
         // Line 2: the subject or the direction, and the chip at the end.
         var end2 = right
@@ -267,10 +299,12 @@ final class SecureListView: ContentView {
             end2 = box.minX - 8
         }
         if let text2 = row.text2 {
+            let clip2 = CGRect(x: x, y: r.midY - 4, width: max(end2 - x, 0), height: r.height / 2 + 4)
             ctx.saveGState()
-            ctx.clip(to: CGRect(x: x, y: r.midY - 4, width: max(end2 - x, 0), height: r.height / 2 + 4))
+            ctx.clip(to: clip2)
             ctx.setFillColor(text)
             regular.drawLine(text2, TextLayout.firstLine(text2), in: ctx, x: x, baseline: line2)
+            fade(clip2, end: end2, in: ctx)
             ctx.restoreGState()
         } else if let note = row.note {
             drawMeta(note, in: ctx, x: x, baseline: line2, color: meta)

@@ -58,6 +58,19 @@ final class ConfirmSheet: HardenedWindow {
         cancel.keyEquivalent = "\u{1b}"
         let ok = HumanButton(title: okTitle, target: self, action: #selector(confirm(_:)))
         ok.hasDestructiveAction = kind == .reset
+        // A free-standing button ignores hasDestructiveAction: red text says
+        // it, in an active window or not (a bordered button's title ignores
+        // contentTintColor while its window is inactive). Neither button has
+        // Return, so a stray Return deletes nothing.
+        if kind == .reset {
+            ok.contentTintColor = .systemRed
+            let centred = NSMutableParagraphStyle()
+            centred.alignment = .center
+            ok.attributedTitle = NSAttributedString(string: okTitle, attributes: [
+                .foregroundColor: NSColor.systemRed, .font: ok.font ?? NSFont.systemFont(ofSize: 13),
+                .paragraphStyle: centred,
+            ])
+        }
         okButton = ok
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)

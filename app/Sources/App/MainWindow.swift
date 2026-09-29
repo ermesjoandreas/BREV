@@ -51,7 +51,8 @@ final class MainWindow: HardenedWindow {
         )
         Hardening.apply(self)
 
-        // §1.5: the title is the app name and must never carry message content.
+        // §1.5: the title is the app name (or, on the mail screen, a selected
+        // mailbox's fixed name) and must never carry message content.
         title = L10n.windowMainTitle
         titlebarAppearsTransparent = true
 
@@ -69,12 +70,15 @@ final class MainWindow: HardenedWindow {
     }
 
     /// Shows `toolbar` (the mail screen's) or none, with the frame kept. A
-    /// removed toolbar takes the subtitle with it.
+    /// removed toolbar takes a mailbox's title and the subtitle with it.
     func setToolbar(_ next: NSToolbar?) {
         guard toolbar !== next else { return }
         let kept = frame
         toolbar = next
-        if next == nil { subtitle = "" }
+        if next == nil {
+            title = L10n.windowMainTitle
+            subtitle = ""
+        }
         setFrame(kept, display: false)
     }
 

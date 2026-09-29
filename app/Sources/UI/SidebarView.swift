@@ -4,8 +4,9 @@
 // Upholds CLAUDE.md §1.2, §1.10 and §2 (docs/UI_REDESIGN.md §2.3). The
 // mailbox rows are chrome: two fixed names and SF Symbols, drawn by AppKit.
 // The requests and the contacts are SecureListViews (content: an address is
-// a name). A section title and its list are hidden while the list is empty;
-// «Ingen kontakter ennå» stands under «Kontakter» while there are none.
+// a name). A section title and its list are hidden while the list is empty
+// (the requests); with no contacts the footer's «Legg til kontakt» says
+// what to do. The background is a plain colour set apart from the list's.
 // Selecting a mailbox row makes the mail screen read every contact's
 // subjects, so only a human may do it (review 3): MailboxListView takes a
 // selection only from mouseDown and keyDown (↑/↓), which BrevApplication
@@ -172,12 +173,16 @@ private func padded(_ view: NSView) -> NSView {
 final class SidebarView: NSView {
     override var isOpaque: Bool { true }
 
-    /// The sidebar's plain background (no material; MailViewController).
+    /// The sidebar's plain background (no material; MailViewController):
+    /// light and dark greys set apart from the list's text background.
+    static let background = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(white: 0.17, alpha: 1) : NSColor(white: 0.965, alpha: 1)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
+        Self.background.setFill()
         dirtyRect.fill()
-        NSColor.quaternarySystemFill.setFill()
-        dirtyRect.fill(using: .sourceOver)
     }
 
     let mailboxes = MailboxListView()
@@ -186,11 +191,8 @@ final class SidebarView: NSView {
     private(set) var addButton: HumanButton?
     private let requestsTitle = InterfaceText(L10n.requestsTitle, style: .section, width: 180, alignment: .left)
     private let contactsTitle = InterfaceText(L10n.contactsTitle, style: .section, width: 180, alignment: .left)
-    private let noContacts = InterfaceText(L10n.sidebarNoContacts, style: .caption, width: 180, alignment: .left,
-                                           color: .tertiaryLabelColor)
     private lazy var requestsHeader = padded(requestsTitle)
     private lazy var contactsHeader = padded(contactsTitle)
-    private lazy var noContactsRow = padded(noContacts)
 
     init(target: AnyObject, add: Selector) {
         super.init(frame: NSRect(x: 0, y: 0, width: 220, height: 600))
@@ -203,8 +205,7 @@ final class SidebarView: NSView {
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = document
-        let column = NSStackView(views: [mailboxes, requestsHeader, requestList, contactsHeader, contactList,
-                                         noContactsRow])
+        let column = NSStackView(views: [mailboxes, requestsHeader, requestList, contactsHeader, contactList])
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 0
@@ -255,11 +256,12 @@ final class SidebarView: NSView {
         nil
     }
 
-    /// Shows or hides the section titles and «Ingen kontakter ennå» for the
-    /// lists' counts; call after setting their rows.
+    /// Shows or hides the section titles for the lists' counts; call after
+    /// setting their rows.
     func update() {
         requestsHeader.isHidden = requestList.count == 0
         requestList.isHidden = requestList.count == 0
-        noContactsRow.isHidden = contactList.count > 0
+        contactsHeader.isHidden = contactList.count == 0
+        contactList.isHidden = contactList.count == 0
     }
 }

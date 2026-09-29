@@ -31,10 +31,14 @@ func check(_ what: String, _ ok: Bool, _ detail: @autoclosure () -> String = "")
 }
 var report: [String] = []
 
+/// Stops the relay and removes the temp stores; set once they exist.
+var cleanUp: () -> Void = {}
 /// A window became key, main or visible, or the app active: stop at once,
-/// before anything else can happen on screen.
+/// before anything else can happen on screen (the relay and the temp
+/// stores go too).
 func abortShown(_ what: String) -> Never {
     print("FAIL offscreen: \(what); stopping at once")
+    cleanUp()
     exit(1)
 }
 let center = NotificationCenter.default
@@ -88,10 +92,13 @@ try? FileManager.default.removeItem(at: dir)
 try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                          attributes: [.posixPermissions: 0o700])
 var relayProcess: Process?
-func finish() -> Never {
+cleanUp = {
     relayProcess?.terminate()
     relayProcess?.waitUntilExit()
     try? FileManager.default.removeItem(at: dir)
+}
+func finish() -> Never {
+    cleanUp()
     NSApp.windows.forEach { $0.close() }
     guardOffscreen("exit")
     if let outDir {
@@ -258,8 +265,9 @@ func composite(_ under: CGImage, _ sheet: CGImage, dark: Bool) -> CGImage? {
 
 /// Fake addresses (contact names are content: they show only in previews).
 let hostAddress = "andreas", kariAddress = "kari-nordmann", olaAddress = "ola-hansen"
-let ingridAddress = "ingrid-berg", perAddress = "per-olsen", liseAddress = "lise-dahl"
-let fakeAddresses = [hostAddress, kariAddress, olaAddress, ingridAddress, perAddress, liseAddress, "ny-bruker"]
+let ingridAddress = "ingrid-berg", perAddress = "per-olsen", liseAddress = "lise-dahl", toneAddress = "tone-lie"
+let fakeAddresses = [hostAddress, kariAddress, olaAddress, ingridAddress, perAddress, liseAddress, "ny-bruker",
+                     toneAddress]
 /// Fake subjects and bodies (Norwegian, long and short).
 let subjects = ["Middag på lørdag?", "Bildene fra turen", "Takk for sist", "Nøklene til hytta",
                 "Bursdagen til mor", "En ting til"]
@@ -454,9 +462,9 @@ func checkWindow(_ scene: String, _ window: NSWindow, control: String?) {
     check("\(scene): accessibility has no fake name, subject, body or code" + (control.map { " (control: «\($0)»)" } ?? ""),
           leaks.isEmpty && control.map { strings.contains($0) } ?? true, "\(leaks.count) of \(strings.count)")
     if window === mainWindow {
-        check("\(scene): title «Brev», subtitle empty or a mailbox",
-              window.title == L10n.windowMainTitle
-                  && ["", L10n.mailboxInbox, L10n.mailboxSent].contains(window.subtitle))
+        check("\(scene): title «Brev» or a mailbox's name, subtitle empty",
+              [L10n.windowMainTitle, L10n.mailboxInbox, L10n.mailboxSent].contains(window.title)
+                  && window.subtitle == "")
     }
 }
 
@@ -591,9 +599,9 @@ scene("mail-inbox", control: L10n.mailboxInbox) {
     mailboxes.keyDown(with: hardwareKey(down))
     window.makeFirstResponder(mailboxes)
 }
-expect("Innboks, by a human's ↓: every received letter, newest first, none open; the subtitle says «Innboks»",
-      mail.selection == .inbox && mail.messageList.count == 3 && mail.letters.isEmpty
-          && window.subtitle == L10n.mailboxInbox)
+expect("Innboks, by a human's ↓: every received letter, newest first, none open; the title says «Innboks»",
+      mail.selection == .inbox && mail.mailboxChosen && mail.messageList.count == 3 && mail.letters.isEmpty
+          && window.title == L10n.mailboxInbox && window.subtitle == "")
 scene("mail-inbox-letter", control: L10n.mailboxInbox) {
     mail.messageList.keyDown(with: hardwareKey(down))
     window.makeFirstResponder(mail.messageList)
@@ -620,6 +628,9 @@ scene("mail-sent", control: L10n.mailboxSent) {
 }
 expect("Sendt: every sent letter, none open", mail.selection == .sent && mail.messageList.count == 2
           && mail.letters.isEmpty)
+mail.messageList.keyDown(with: hardwareKey(down))
+expect("Sendt: a sent letter opens with no badge in the reading header",
+      mail.openThread != nil && !mail.readingHeader.isHidden && mail.readingHeader.badge?.isHidden == true)
 
 // A new user: no contacts, Innboks with «Legg til kontakt».
 let emptyMail = MailViewController(session: newUser.session)
@@ -628,7 +639,33 @@ scene("mail-empty", control: L10n.sidebarAdd) {
     window.root.show(emptyMail)
     emptyMail.start()
 }
-expect("a new user: Innboks, empty, nothing read", emptyMail.selection == .inbox && emptyMail.messageList.count == 0)
+expect("a new user: Innboks (not chosen by a human), empty, nothing read",
+      emptyMail.selection == .inbox && !emptyMail.mailboxChosen && emptyMail.messageList.count == 0)
+// A contact and a letter arrive by sync while the new user sits on Innboks,
+// which no human chose: the contact is selected, no mailbox is read and no
+// letter opens (DECISIONS.md, UI redesign, Q1).
+if onlyScene == nil {
+    do {
+        let tone = try User(in: dir.appendingPathComponent("tone"), relay: relayURL)
+        try newUser.invite(tone, as: toneAddress)
+        try tone.send(to: try tone.contact("ny-bruker"), subject: fake([subjects[0]]), body: body(shortBody))
+        tone.session.brev.lock()
+        emptyMail.syncOnce()
+        let arrived = spin(until: { emptyMail.contactList.count == 1 })
+        expect("a new user on Innboks by itself: a contact arrives by sync; the contact is selected, no mailbox read, "
+                + "nothing open",
+              arrived && !emptyMail.mailboxChosen && emptyMail.selection.map { !$0.isMailbox } == true
+                  && emptyMail.letters.isEmpty && emptyMail.openThread == nil,
+              "\(arrived) \(String(describing: emptyMail.selection)) \(emptyMail.messageList.count)")
+        emptyMail.syncOnce()
+        _ = spin(until: { false }, 1.5)
+        expect("… and after its letter arrives, still no mailbox read and nothing open",
+              emptyMail.selection.map { !$0.isMailbox } == true && emptyMail.openThread == nil
+                  && emptyMail.letters.isEmpty)
+    } catch {
+        expect("a contact for the new user by invite, and a letter", false, "\(error)")
+    }
+}
 emptyMail.wipeAll()
 
 // The sheets, each drawn as its own window (never begun as a sheet), then
@@ -646,7 +683,28 @@ func sheetScene(_ name: String, control: String?, _ make: () -> NSWindow) {
     checkWindow(name, sheet, control: control)
     check("\(name): secure input stays off (no field took focus)",
           !SecureInput.isOn && IsSecureEventInputEnabled() == secureInputAtStart)
+    if let compose = sheet as? ComposeSheet, let send = compose.sendButton {
+        // Accent and white show only in a key window, which this tool never
+        // makes (§5.2); the settings are checked instead.
+        check("\(name): Send is the main action (accent bezel, white title, ⌘↩)",
+              send.bezelColor == .controlAccentColor && send.contentTintColor == .white
+                  && send.keyEquivalent == "\r" && send.keyEquivalentModifierMask == [.command])
+    }
+    if let confirm = sheet as? ConfirmSheet, let ok = confirm.okButton {
+        check("\(name): the confirming button has no key equivalent (a stray Return confirms nothing)",
+              ok.keyEquivalent.isEmpty)
+    }
+    let contacts = sheet as? ContactSheet
+    let own = contacts.map { [$0.ownAddress, $0.ownCode] } ?? []
+    own.forEach { $0.updateLayer() }
+    let held = own.allSatisfy { $0.lines[0] != nil && $0.pool.contains(where: hasPixels) }
+    let pools = own.flatMap(\.pool)
     if let holder = sheet as? ContentHolder { holder.wipeAll() }
+    if !own.isEmpty {
+        check("\(name): a close wipes the own address and code and zeroes their pixels "
+                + "(control: both were shown and drawn)",
+              held && own.allSatisfy { $0.lines.allSatisfy { $0 == nil } } && !pools.contains(where: hasPixels))
+    }
     sheet.close()
     guardOffscreen(name)
     print("scene \(name)")
@@ -756,6 +814,53 @@ sheetScene("list-rows", control: nil) {
     return w
 }
 
+// The sidebar's two lists in one scroll view: only a list in sight holds
+// pixel buffers. The requests scroll out of sight (their pool zeroed and
+// given up), then back in, 10 pt a step, keeping one pool (ContentView).
+if onlyScene == nil || onlyScene == "sidebar-scroll" {
+    let w = HardenedWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 300), styleMask: [.titled],
+                           backing: .buffered, defer: false)
+    Hardening.apply(w)
+    w.isReleasedWhenClosed = false
+    let side = SidebarView(target: mail, add: #selector(MailViewController.showContacts(_:)))
+    w.contentView = side
+    side.requestList.setRows([perAddress, liseAddress].map { SecureListView.Row(text: fake([$0])) }, selected: nil)
+    side.contactList.setRows((0..<30).map { SecureListView.Row(text: fake([fakeAddresses[$0 % fakeAddresses.count]])) },
+                             selected: nil)
+    side.update()
+    side.layoutSubtreeIfNeeded()
+    let lists = [side.requestList, side.contactList]
+    let clip = side.requestList.enclosingScrollView!.contentView
+    func scroll(_ y: CGFloat) {
+        clip.scroll(to: NSPoint(x: 0, y: y))
+        clip.enclosingScrollView?.reflectScrolledClipView(clip)
+        lists.forEach { $0.updateLayer() }
+    }
+    scroll(0)
+    let drawn = lists.allSatisfy { $0.pool.contains(where: hasPixels) }
+    let old = side.requestList.pool
+    let out = side.requestList.convert(side.requestList.bounds, to: clip.documentView).maxY + 20
+    let room = clip.documentView!.frame.height - clip.bounds.height >= out
+    scroll(out)
+    let gone = side.requestList.pool.isEmpty && !old.isEmpty && !old.contains(where: hasPixels)
+        && !side.contactList.pool.isEmpty
+    check("sidebar-scroll: a list scrolled out of sight holds no pixel buffers, and its old ones are zero "
+            + "(control: both lists drew)", room && drawn && gone,
+          "room=\(room) drawn=\(drawn) pool=\(side.requestList.pool.count)")
+    var entering: CVPixelBuffer?, kept = true
+    for step in 1...8 {
+        scroll(max(out - CGFloat(step * 10), 0))
+        guard !side.requestList.visibleRect.intersection(side.requestList.bounds).isEmpty else { continue }
+        if let entering { kept = kept && side.requestList.pool.first === entering }
+        else { entering = side.requestList.pool.first }
+    }
+    check("sidebar-scroll: scrolling in, a list keeps one pool", entering != nil && kept)
+    side.requestList.clear()
+    side.contactList.clear()
+    w.close()
+    guardOffscreen("sidebar-scroll")
+}
+
 // The real lock sequence on the mail window, with a letter open.
 scene("locked-after", control: L10n.unlockTitle) {
     lock.session = host.session
@@ -771,7 +876,7 @@ scene("locked-after", control: L10n.unlockTitle) {
           open && mail.messageList.count == 0 && mail.contactList.count == 0 && mail.letters.isEmpty
               && mail.header.newCode == nil && mail.readingHeader.subjectView.lines.allSatisfy { $0 == nil }
               && views.allSatisfy { v in !v.pool.contains { hasPixels($0) } } && host.session.brev.isLocked()
-              && window.toolbar == nil && window.subtitle == "")
+              && window.toolbar == nil && window.title == L10n.windowMainTitle && window.subtitle == "")
 }
 if onlyScene == nil {
     let distinct = Set(frames.values.map { "\($0)" })

@@ -32,6 +32,9 @@
 //    is wiped and request.sent shows, or, if the contact already takes the
 //    user's letters, the sheet closes with it.
 // 4. One fixed text: the outcome or the error, or none.
+// Rows with nothing to show collapse (the code and Kopier koden until a code
+// exists, «Invitert av:» until an invite is opened), and the sheet fits its
+// content again.
 // Every button is a HumanButton. While a call is on its way the field is
 // read-only and the buttons are off. Lukk (or Escape) closes the sheet, and
 // so does a lock. However it closes, the field, the own address, the code
@@ -70,6 +73,9 @@ final class ContactSheet: HardenedWindow, ContentHolder {
     private(set) var addButton: HumanButton?
     private(set) var acceptInviteButton: HumanButton?
     private var closeButton: HumanButton?
+    /// «Invitert av:», the inviter and Godta invitasjonen: collapsed until
+    /// an invite is opened.
+    private var inviterRow: NSStackView?
     private let inviterLabel = InterfaceText(L10n.inviteFrom, style: .secondary, width: 90, alignment: .left)
 
     private let requestSent = ContactSheet.message(L10n.requestSent)
@@ -164,7 +170,8 @@ final class ContactSheet: HardenedWindow, ContentHolder {
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 10
-        column.detachesHiddenViews = false
+        // A hidden row collapses (the code until one exists, the inviter).
+        column.detachesHiddenViews = true
         column.translatesAutoresizingMaskIntoConstraints = false
         panel.addSubview(column)
         NSLayoutConstraint.activate([
@@ -233,8 +240,17 @@ final class ContactSheet: HardenedWindow, ContentHolder {
             NSLayoutConstraint.activate([m.topAnchor.constraint(equalTo: messageArea.topAnchor),
                                          m.leadingAnchor.constraint(equalTo: messageArea.leadingAnchor)])
         }
+        // A spacer before a trailing button, so it ends 12 pt from the panel
+        // edge, as the leading inset.
+        func trailing(_ views: [NSView]) -> NSStackView {
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            let row = Self.row(Array(views.dropLast()) + [spacer, views.last!])
+            row.widthAnchor.constraint(equalToConstant: inner).isActive = true
+            return row
+        }
         let me = Self.group(L10n.contactsSectionMe, [
-            Self.row([Self.labelled(L10n.contactsAddress, ownAddress, inner - 180, line), copyMe]),
+            trailing([Self.labelled(L10n.contactsAddress, ownAddress, inner - 180, line), copyMe]),
             Self.labelled(L10n.contactsCode, ownCode, inner, line),
         ])
         let invite = Self.group(L10n.contactsSectionInvite, [
@@ -242,10 +258,12 @@ final class ContactSheet: HardenedWindow, ContentHolder {
             Self.sized(codeView, inner, 2 * line),
             InterfaceText(L10n.inviteNote, style: .caption, width: inner, alignment: .left),
         ])
+        let inviter = Self.row([inviterLabel, Self.sized(inviterView, Self.codeWidth, 2 * line), accept])
+        inviterRow = inviter
         let addGroup = Self.group(L10n.contactsSectionAdd, [
             InterfaceText(L10n.contactsField, style: .caption, width: inner, alignment: .left),
-            Self.row([Self.sized(fieldBox, inner - 100, 28), add]),
-            Self.row([inviterLabel, Self.sized(inviterView, Self.codeWidth, 2 * line), accept]),
+            trailing([Self.sized(fieldBox, inner - 100, 28), add]),
+            inviter,
         ])
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -257,7 +275,8 @@ final class ContactSheet: HardenedWindow, ContentHolder {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 16
-        // Hidden views keep their place, so the sheet keeps its size.
+        // The messages' row keeps its place; the groups' rows collapse
+        // (group()), and `show` fits the sheet to them.
         stack.detachesHiddenViews = false
         stack.edgeInsets = NSEdgeInsets(top: Self.margin, left: Self.margin, bottom: Self.margin, right: Self.margin)
         bottom.widthAnchor.constraint(equalToConstant: Self.width - 2 * Self.margin).isActive = true
@@ -279,17 +298,26 @@ final class ContactSheet: HardenedWindow, ContentHolder {
     }
 
     /// Shows `message` (or none), with the buttons and the field on unless
-    /// a call is under way. Kopier koden needs a code; Godta invitasjonen
-    /// and «Invitert av:» an opened invite.
+    /// a call is under way. The code and Kopier koden show only with a
+    /// code; «Invitert av:» and Godta invitasjonen only with an opened
+    /// invite. The sheet then fits its content.
     private func show(_ message: InterfaceText?, busy: Bool = false) {
         self.busy = busy
         for m in messages { m.isHidden = m !== message }
         field.isEditable = !busy
         for b in [copyAddressButton, makeInviteButton, addButton, closeButton] { b?.isEnabled = !busy }
+        copyCodeButton?.isHidden = code == nil
         copyCodeButton?.isEnabled = !busy && code != nil
+        codeView.isHidden = code == nil
+        inviterRow?.isHidden = !inviteOpened
         inviterLabel.isHidden = !inviteOpened
         acceptInviteButton?.isHidden = !inviteOpened
         acceptInviteButton?.isEnabled = !busy
+        if let content = contentView {
+            content.layoutSubtreeIfNeeded()
+            let size = content.fittingSize
+            if size != content.frame.size { setContentSize(size) }
+        }
     }
 
     // MARK: - Actions (HumanButton: only a human's press gets here; the view

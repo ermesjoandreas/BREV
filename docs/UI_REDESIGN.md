@@ -135,9 +135,9 @@ Words used below:
   `splitView.autosaveName` stays nil (no state on disk). Every item has
   `canCollapse = false` and, on macOS 14+, `canCollapseFromWindowResize =
   false` (review 7): there is no View menu to bring a hidden pane back.
-- The window title stays «Brev». The subtitle is the selected mailbox's
-  fixed name («Innboks», «Sendt») and empty for a contact or a request.
-  Never a name or address.
+- The window title is the selected mailbox's fixed name («Innboks»,
+  «Sendt»), else «Brev»; the subtitle stays empty, so the title is one line
+  and does not move (review round 2). Never a name or address.
 - The toolbar exists only on the mail screen. `RootViewController.show`
   sets it on the mail screen and removes it for every other screen, and
   clears the subtitle whenever it removes it (review 10). Adding or removing
@@ -719,7 +719,7 @@ Plus `report.txt` (check lines, as ViewHost prints them) and nothing else.
 - `cacheDisplay` of each ContentView alone has no ink (the ViewHost check).
 - The in-process AX tree holds no fake name, subject, body or code (the
   marker check ViewHost has), and does hold the fixed labels (control).
-- Window title is «Brev»; subtitle is empty or a mailbox name.
+- Window title is «Brev» or a mailbox name; the subtitle is empty.
 - The window frame is the same on the lock screen and the mail screen.
 - Every letter body open in a scene was opened by a selection the tool made
   (no auto-open: after `start()` and after a sync the reading pane holds no
@@ -738,7 +738,7 @@ listed in docs/VERIFY.md where a row exists.
 
 **MainWindow + toolbar**
 - [ ] Hardening.apply unchanged; `sharingType .none`, not restorable, no tabs.
-- [ ] Title «Brev», subtitle only a fixed mailbox name.
+- [ ] Title «Brev» or a fixed mailbox name; subtitle empty.
 - [ ] Toolbar: no customization, no autosave, no search/share items, no tooltips.
 - [ ] Toolbar actions harmless (new letter, lock), same as the menu.
 - [ ] Frame unchanged across lock/unlock (toolbar on/off).

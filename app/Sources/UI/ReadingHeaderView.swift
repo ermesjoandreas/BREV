@@ -52,6 +52,7 @@ final class ReadingHeaderView: NSView {
         badge.bezelStyle = .inline
         badge.controlSize = .small
         badge.imagePosition = .imageLeading
+        badge.font = .systemFont(ofSize: 11, weight: .medium)
         self.badge = badge
         let line = Hairline()
         for v in [subjectView, nameView, dateView, from, to, badge, line] as [NSView] {
@@ -75,7 +76,8 @@ final class ReadingHeaderView: NSView {
             dateView.widthAnchor.constraint(equalToConstant: 160),
             dateView.heightAnchor.constraint(equalToConstant: 16),
             badge.topAnchor.constraint(equalTo: nameView.bottomAnchor, constant: 8),
-            badge.leadingAnchor.constraint(equalTo: leadingAnchor, constant: m - 2),
+            // Its symbol lines up with «Fra:» and the subject.
+            badge.leadingAnchor.constraint(equalTo: leadingAnchor, constant: m - 6),
             line.topAnchor.constraint(equalTo: nameView.bottomAnchor, constant: 44),
             line.leadingAnchor.constraint(equalTo: leadingAnchor, constant: m),
             line.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -m),
@@ -104,7 +106,7 @@ final class ReadingHeaderView: NSView {
             badge.title = verdict.title
             badge.image = NSImage(systemSymbolName: verdict.verified ? "checkmark.seal" : "exclamationmark.triangle",
                                   accessibilityDescription: nil)
-            badge.contentTintColor = verdict.verified ? nil : .systemOrange
+            badge.contentTintColor = verdict.verified ? .secondaryLabelColor : .systemOrange
             badge.isHidden = false
         }
         isHidden = false
