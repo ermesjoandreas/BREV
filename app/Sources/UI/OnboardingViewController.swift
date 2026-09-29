@@ -39,15 +39,16 @@ final class OnboardingViewController: NSViewController {
         next.keyEquivalent = "\r"
         page.show([
             InterfaceText(L10n.onboardingWelcomeTitle, style: .title, width: PageView.columnWidth),
-            InterfaceText(L10n.onboardingWelcomeBody, width: PageView.columnWidth),
+            InterfaceText(L10n.onboardingWelcomeBody, style: .secondary, width: PageView.columnWidth),
             next,
-        ])
+        ], symbol: "envelope")
     }
 
     /// Page 2, or the Touch ID notice instead of it.
     private func showRules() {
         guard Enclave.touchIDAvailable() else {
-            page.show([InterfaceText(L10n.onboardingErrorNoTouchID, width: PageView.columnWidth)])
+            page.show([InterfaceText(L10n.onboardingErrorNoTouchID, width: PageView.columnWidth)],
+                      symbol: "touchid")
             return
         }
         let understood = HumanButton(checkboxWithTitle: L10n.onboardingRulesConfirm, target: self,
@@ -57,23 +58,34 @@ final class OnboardingViewController: NSViewController {
         create.isEnabled = false
         self.understood = understood
         self.create = create
-        let rules = [L10n.onboardingRulesTouchID, L10n.onboardingRulesNoBackup, L10n.onboardingRulesFingers,
-                     L10n.onboardingRulesPrompt, L10n.onboardingRulesGone]
+        let rules = [("touchid", L10n.onboardingRulesTouchID), ("externaldrive.badge.xmark", L10n.onboardingRulesNoBackup),
+                     ("hand.point.up.left", L10n.onboardingRulesFingers),
+                     ("exclamationmark.bubble", L10n.onboardingRulesPrompt),
+                     ("doc.questionmark", L10n.onboardingRulesGone)]
         page.show([InterfaceText(L10n.onboardingRulesTitle, style: .title, width: PageView.columnWidth)]
-                  + rules.map { InterfaceText($0, width: PageView.columnWidth, alignment: .natural) }
-                  + [understood, create])
+                  + rules.map { PageView.rule($0.0, $0.1) }
+                  + [understood, create], symbol: "hand.raised")
     }
 
     /// Keys are being made; no button.
     func showWorking() {
-        page.show([InterfaceText(L10n.onboardingWorking, width: PageView.columnWidth)])
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.startAnimation(nil)
+        let row = NSStackView(views: [spinner, InterfaceText(L10n.onboardingWorking, style: .secondary, width: 200,
+                                                             alignment: .left)])
+        row.orientation = .horizontal
+        row.spacing = 8
+        page.show([row])
     }
 
     /// Making the keys failed: Prøv igjen starts over from the cleanup.
     func showFailed() {
         let retry = PageView.button(L10n.onboardingErrorRetry, target: self, action: #selector(retryPressed(_:)))
         retry.keyEquivalent = "\r"
-        page.show([InterfaceText(L10n.onboardingErrorFailed, width: PageView.columnWidth), retry])
+        page.show([InterfaceText(L10n.onboardingErrorFailed, width: PageView.columnWidth), retry],
+                  symbol: "exclamationmark.triangle")
     }
 
     // MARK: - Actions (HumanButton: human input only)
