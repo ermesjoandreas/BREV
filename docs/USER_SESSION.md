@@ -139,6 +139,19 @@ Nullstill Brev B betyr: avslutt Brev B, `mv "$DB/brev.db" "$R/brevb-$(date +%s).
 
 Radene uten menneske (V1, V2, V45, V50, V53, V66, V69, og halvparten av V3 og V21) kjører maskinen på de samme byggene.
 
+## Hand-test (ca. 15 min)
+
+Brevene har nå et bevis på hvordan de ble skrevet (D-0111). Bruk Brev og Brev B fra Runde 1, bygd på nytt fra denne grenen. Radene er V82 til V84 i `docs/VERIFY.md`. Noter pass eller feil for hver.
+
+1. **Ett brev, én Touch ID (V84).** I Brev: nytt brev til Brev B, skriv noe, «Send». Forventet: nøyaktig én dialog, «… sende brevet», ingen passordknapp. Brevet kommer frem hos Brev B.
+   - Et nytt brev, «Send», og «Avbryt» i dialogen. Forventet: tilbake til utkastet, ingenting sendt, ingen ny dialog.
+2. **Merket (V83).** Lås opp Brev B og åpne brevet. Øverst i brevet står «Skrevet i Brev · klasse A». Ditt eget brev i Brev har ikke noe merke.
+   - Klikk på merket. Et ark viser tallene: nøkkel i maskinvare, andre vinduer, AI-programmer, admin, blokkerte forsøk, skrivetid, SIP og sudo. Siste linje: «Appen er ikke bekreftet av Apple (støttes ikke på Mac)». «Lukk» eller Escape lukker arket.
+3. **sudo låser Brev (V82).** Ha Brev ulåst. I Terminal: `sudo sleep 20`, og skriv passordet.
+   - Innen et par sekunder låser Brev seg og skriver «Brev låste seg fordi sudo kjører.».
+   - Prøv å låse opp mens `sleep` går. Forventet: «Brev kan ikke åpnes mens sudo kjører.».
+   - Vent til `sleep` er ferdig (20 sekunder), og lås opp igjen. Nå virker det.
+
 ## Rydd opp (5 min)
 
 1. Stopp releet: ⌃C i vindu 3.

@@ -4355,3 +4355,103 @@ WP5 and their reviews record.
   `scripts/test.sh` pass on them. `padcheck.swift` type-checks. cargo-deny
   bans, licenses and sources pass. Not run: `scripts/test.sh` (its Swift
   steps fail until step 3), the app, `app/Generated` (not touched).
+
+### D-0111 — Hand steps 3 and 4: the Swift adapter, one Touch ID for two signatures, the badge
+
+- **Date:** 2026-09-29
+- **Decision:** docs/AUTHORSHIP.md §9 steps 3 and 4 in `app/`, on the FFI of
+  D-0110, as the owner's brief for this step fixed them:
+  1. **Sampler.** `Shared/HandSampler.swift` reads raw facts and never
+     counts: `IsSecureEventInputEnabled()`, `csr_get_active_config` (dlsym;
+     nil unless it returns 0), every process's `p_comm` through `sysctl`
+     KERN_PROC_ALL (not `proc_listallpids`, which the sandbox blocks), every
+     on-screen window's owner pid and layer (only those two keys of
+     `CGWindowListCopyWindowInfo`'s dictionaries are read; no title, no
+     owner name), and admin membership through `mbr_check_membership`
+     (dlsym), once per compose session. `App/EnvironmentProbe.swift` adds
+     the sampled window's `sharingType == .none` and the protected layers'
+     `preventsCapture` (the compose sheet while one is up, else the main
+     window), and the design facts. `EnvironmentReport`,
+     `EnvironmentProbe.Keys`, `UnlockService.unlockedWithTouchID` and
+     LockController's Touch ID generation are gone with `report_environment`.
+  2. **Lock on sudo and SIP.** LockController samples every 2 s while
+     unlocked (a common-mode timer from `confirmActive` on, stopped by every
+     lock) and calls `observe`; causes back mean Rust has locked, and the
+     lock sequence runs with `LockReason.environment` and a notice for the
+     lock screen («Brev låste seg fordi sudo kjører.» / «… SIP er slått
+     av.»). `Locked` from `observe` (Rust's idle deadline) runs the lock
+     sequence as the idle timer does. `confirmActive` takes a sample; its
+     `Environment` error locks with «Brev kan ikke åpnes mens sudo kjører.»
+     (or SIP). The notice is cleared when an unlock begins.
+  3. **Compose.** `ComposeSheet.present` calls `composeStarted` with the
+     design, the admin read and the identity key's origin from its own
+     `kSecAttrTokenID` (a software key says software); its completion
+     handler, which runs on every close (send, cancel, lock), calls
+     `composeClosed`. BrevApplication's drop path calls `syntheticDropped`
+     through a hook AppDelegate sets. `paste_accepted` is never called.
+  4. **Send.** `prepareSend(contact, sample)` → `signRequest(…, sample)`
+     (a new sample) → `SignService.signLetter`: one run on `no.brev.sign`
+     with a fresh LAContext (`localizedFallbackTitle = ""`), the identity
+     key looked up with it, the token digest signed (the one prompt), the
+     token signature handed to main (`attachTokenSignature`, after
+     LockController's `endSign` check) for the envelope digest, which the
+     same key and context sign without a prompt → `attachSignature` →
+     `submit`. Any failure after `signRequest` calls `cancelSend`, except
+     the relay's `Network` at `submit`, which keeps the signed letter for
+     Prøv igjen as before. An `Environment` refusal shows one line per
+     fact: «Kan ikke sende: målingen hadde et hull (max-gap).», the texts
+     in Localizable.strings (`fact.*`).
+  5. **Where the context and the key are dropped.** The key reference is a
+     local of `SignService.signWith`, released when it returns: after the
+     second signature, or when a signature, the lookup or `attachToken`
+     throws. The context is invalidated by `defer` in `SignService.run` on
+     every exit of the run (success, a cancelled prompt, any error), and
+     cleared from `inFlight` there. A lock invalidates the context in
+     flight (`LockController.lock` step 1 → `cancelSignature` →
+     `SignService.cancel`), which ends a prompt that is up; a lock between
+     the two signatures also fails `endSign`, so `attachToken` throws and no
+     envelope is signed. Nothing keeps a context or a key beyond one run.
+     A registration's one signature goes through the same run.
+  6. **Badge.** Each received letter's header in the letter pane has a
+     HumanButton badge: «Skrevet i Brev · klasse A» (B, C) when verified,
+     «Ikke verifisert» otherwise; a sent letter (`None`) has none. The
+     letter pane exposes to accessibility exactly its badges (their text);
+     bodies and headers stay opaque. A press opens `ProofSheet`, a hardened
+     sheet (no popover: AppKit-made windows over content are captured,
+     OpaqueView.swift), with each failed check in plain Norwegian, the
+     class facts, and for a verified letter the numbers of §4.2 plus SIP
+     and sudo («ukjent» for nil), and always «Appen er ikke bekreftet av
+     Apple (støttes ikke på Mac)».
+- **Choices the brief did not settle, taken the conservative way:**
+  1. The design facts are read at `composeStarted` from what Brev does (no
+     accessibility element or value in any content view, no responder for
+     Copy, Cut or Paste, BrevApplication), as the old report did at Send,
+     instead of three constants. In a correct Brev they are the brief's
+     `true, true, true`; a bug that breaks one lowers the letter's class.
+  2. The samples at `prepareSend` and `signRequest` are real reads, so a
+     `sudo` or SIP off at Send locks too (D-0110's choice 1).
+  3. A proof Rust cannot read shows «Ikke verifisert» with «Beviset kan
+     ikke leses», never a class.
+  4. The key line says «nei» for class C (a software key), «ja» for A and B.
+  5. `ProofSheet`'s last line is shown whenever `attested` is false, which
+     is always on Mac.
+- **Reasoning:** The adapter passes what it saw and Rust decides
+  (AUTHORSHIP §3.1); one LAContext per letter gives one prompt for both
+  signatures (D-0109 item 1), and dropping it on every way out keeps a
+  kept authentication from signing later digests (§3.2).
+- **Verified:** the Rust workspace as in D-0110; `scripts/test.sh` (see the
+  commit): the harness (every case five times; case 2 checks HandSampler's
+  reads, case 8 the new send flow with a fixed clean sample, the
+  recipient's proof, verified in class C with the sample's counts, and a
+  sudo sample locking a session) and the lock probe (the design facts and
+  a sample of the main window, a dropped event told to Rust, the badge in
+  class C on the received letter and none on the sent one, the letter
+  pane's accessibility children, the detail's lines, and `observeNow` with
+  a sudo sample locking with the notice), the view host (compile only),
+  the verification tools (type-check) and the Debug xcodebuild.
+  `scripts/build.sh` and `--instance b` build. **Not verified (needs the
+  app, Touch ID and the owner):** that one LAContext signs both digests
+  with one prompt, that a lock ends a prompt that is up, the badge and the
+  sheet on screen, the samples' values in the sandboxed app (the Hand spike
+  read them there, D-0108), and the lock on a real `sudo`: V82 to V84,
+  untested, and «Hand-test» in docs/USER_SESSION.md.

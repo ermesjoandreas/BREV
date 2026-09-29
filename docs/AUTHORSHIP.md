@@ -1,7 +1,8 @@
 # Authorship attestation ("Hand"), v1 — design
 
-Status: the owner's design (D-0107 to D-0109). §9 steps 1 and 2, and the
-Rust half of step 4, are built (D-0110); the Swift adapter (step 3) is not.
+Status: the owner's design (D-0107 to D-0109). §9 steps 1 to 4 are built
+(D-0110, D-0111); the owner test (step 5, docs/VERIFY.md V82 to V84) is not
+run yet.
 
 ## 1. What a letter proves today, and what Hand adds
 
