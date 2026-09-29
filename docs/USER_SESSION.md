@@ -158,10 +158,10 @@ Brevformatet er nytt (versjon 2, lager v6, relé-fil v3). Lagrene og reléet fra
    - Et nytt brev, «Send», og «Avbryt» i dialogen. Forventet: tilbake til utkastet, ingenting sendt, ingen ny dialog.
 2. **Merket (V83).** Lås opp Brev B og åpne brevet. Øverst i brevet står «Skrevet i Brev · klasse A». Ditt eget brev i Brev har ikke noe merke.
    - Klikk på merket. Et ark viser tallene: nøkkel i maskinvare, andre vinduer, AI-programmer, admin, blokkerte forsøk, skrivetid, SIP og sudo. Siste linje: «Appen er ikke bekreftet av Apple (støttes ikke på Mac)». «Lukk» eller Escape lukker arket.
-3. **sudo låser Brev (V82).** Ha Brev ulåst. I Terminal: `sudo sleep 20`, og skriv passordet.
-   - Innen et par sekunder låser Brev seg og skriver «Brev låste seg fordi sudo kjører.».
+3. **sudo låser Brev (V82).** Brev låser seg når Terminal kommer foran, så sudo må starte forsinket. I Terminal: `sudo -v && sleep 15 && sudo sleep 20`, skriv passordet, og lås opp Brev innen 15 sekunder.
+   - Når sudo starter, låser Brev seg innen et par sekunder og skriver «Brev låste seg fordi sudo kjører.».
    - Prøv å låse opp mens `sleep` går. Forventet: «Brev kan ikke åpnes mens sudo kjører.».
-   - Vent til `sleep` er ferdig (20 sekunder), og lås opp igjen. Nå virker det.
+   - Vent til Terminal er ferdig, og lås opp igjen. Nå virker det.
 
 ## Rydd opp (5 min)
 

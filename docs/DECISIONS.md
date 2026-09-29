@@ -4455,3 +4455,19 @@ WP5 and their reviews record.
   sheet on screen, the samples' values in the sandboxed app (the Hand spike
   read them there, D-0108), and the lock on a real `sudo`: V82 to V84,
   untested, and «Hand-test» in docs/USER_SESSION.md.
+
+### D-0112 — Hand's owner test passes on the real Mac
+
+- **Date:** 2026-09-29
+- **Decision:** Hand (Phase 3b) is done for Mac. The owner ran the
+  «Hand-test» on the real Mac with Release builds, the Enclave keys and real
+  Touch ID. V82 (sudo locks Brev and blocks unlock), V83 (the badge
+  «Skrevet i Brev · klasse A» and its detail) and V84 (one Touch ID for
+  both signatures, and Avbryt) passed. Results are in
+  docs/VERIFY-RESULTS.md, "Owner run, Hand-test".
+- **Reasoning:** Steps 1–4 were covered by machine tests only. This run
+  shows the parts that need the real app, keys and sandbox: the sampler
+  sees a real `sudo`, one `LAContext` signs twice with one prompt, and the
+  badge shows.
+- **Verified:** owner run, 2026-09-29, at 4d2e92c. Not run: the A parts of
+  V82–V84 and SIP off (not practical on this Mac).

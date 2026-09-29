@@ -312,3 +312,28 @@ Touch ID.
    from Terminal prompts on this Mac, which is why no row read `$D`.
 3. With Terminal in front, Brev locks, so a human cannot type a command while
    Brev is unlocked. VERIFY.md now says to start such commands with a delay.
+
+## Owner run, Hand-test (2026-09-29, 4d2e92c)
+
+The owner ran `docs/USER_SESSION.md` «Hand-test» on the real Mac (macOS
+26.2), with Release builds of Brev and Brev B, the Enclave keys and real
+Touch ID. Both instances and the relay started blank (letter v2, store v6,
+relay file v3). Setup: root invite → Brev registered as `brev-secret-me`;
+Brev's invite → Brev B registered as `brev-secret-peer` (relay trace: two
+`/v1/invites/open`, two `/v1/register` 201, one `/v1/invites` 201).
+
+- **V84 pass.** «Send»: exactly one Touch ID dialog for both signatures;
+  the letter arrived. «Avbryt» in the dialog: back to the draft, nothing
+  sent, no second dialog.
+- **V83 pass.** Brev B showed «Skrevet i Brev · klasse A» on the letter; the
+  click opened the detail with the numbers and «Appen er ikke bekreftet av
+  Apple (støttes ikke på Mac)».
+- **V82 pass.** With `sudo -v && sleep 15 && sudo sleep 20` and Brev unlocked
+  in the 15 s: Brev locked with «Brev låste seg fordi sudo kjører.»; unlock
+  during the `sleep` was refused with «Brev kan ikke åpnes mens sudo
+  kjører.»; after it ended, unlock worked. The row's plain `sudo sleep 20`
+  could not work as written (Brev locks when Terminal comes forward); the
+  row and the owner guide now use the delayed form.
+
+Not run: the A parts of V82–V84 (log lines, V9/V11 on the sheet, ⌘L during
+the dialog) and the exact numbers in the detail.
