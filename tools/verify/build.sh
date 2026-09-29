@@ -86,18 +86,22 @@ if [[ "$MODE" == check ]]; then
     echo "error: $CRYPTO no longer has exactly one '$SCRUB_LINE' (scrub_stack_deep); update V51's scrub variants in tools/verify/build.sh" >&2
     exit 1
   fi
-  # One swiftc per tool, in parallel; each prints its own errors.
+  # One swiftc per tool, in parallel; each prints its own errors. Warnings
+  # are errors (CLAUDE.md §5 Phase 5), except in capture-probe: it calls the
+  # CoreGraphics captures that macOS 14 deprecates, on purpose (V7), and its
+  # two deprecation warnings are not shown here. Swift 6.0 (Xcode 16.2) has
+  # no switch for one warning group, and a nominal type cannot call
+  # legacyCG() (it captures the script's globals), so -suppress-warnings
+  # stays, for this one file.
   pids=()
   for t in windows axdump keylisten padcheck; do
-    xcrun swiftc -typecheck -swift-version 5 -target "$T14" "$HERE/$t.swift" & pids+=($!)
+    xcrun swiftc -typecheck -warnings-as-errors -swift-version 5 -target "$T14" "$HERE/$t.swift" & pids+=($!)
   done
-  # capture-probe calls the CoreGraphics captures that macOS 14 deprecates,
-  # on purpose (V7); its two deprecation warnings are not shown here.
   xcrun swiftc -typecheck -suppress-warnings -swift-version 5 -target "$T14" "$HERE/capture-probe.swift" & pids+=($!)
-  xcrun swiftc -typecheck -swift-version 5 -target "$ARCH-apple-macos26.0" "$HERE/capture-probe-26.swift" & pids+=($!)
-  xcrun swiftc -typecheck -swift-version 5 -target "$T14" -import-objc-header "$HERE/poster-shim.h" "$HERE/poster.swift" & pids+=($!)
-  xcrun swiftc -typecheck -swift-version 5 -target "$T14" -import-objc-header "$LAB/bridging.h" "$LAB/lab.swift" & pids+=($!)
-  xcrun swiftc -typecheck -swift-version 5 -target "$T14" -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" \
+  xcrun swiftc -typecheck -warnings-as-errors -swift-version 5 -target "$ARCH-apple-macos26.0" "$HERE/capture-probe-26.swift" & pids+=($!)
+  xcrun swiftc -typecheck -warnings-as-errors -swift-version 5 -target "$T14" -import-objc-header "$HERE/poster-shim.h" "$HERE/poster.swift" & pids+=($!)
+  xcrun swiftc -typecheck -warnings-as-errors -swift-version 5 -target "$T14" -import-objc-header "$LAB/bridging.h" "$LAB/lab.swift" & pids+=($!)
+  xcrun swiftc -typecheck -warnings-as-errors -swift-version 5 -target "$T14" -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" \
     -I "$REPO_ROOT/app/Generated" -I "$REPO_ROOT/app/Tests" "${PROBE_SOURCES[@]}" & pids+=($!)
   failed=0
   for p in "${pids[@]}"; do wait "$p" || failed=1; done

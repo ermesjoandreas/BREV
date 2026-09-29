@@ -550,8 +550,8 @@ if [[ "$DARWIN" == yes ]]; then
   HARNESS_DIR="$TARGET_DIR/harness"
   rm -rf "$HARNESS_DIR"
   mkdir -p "$HARNESS_DIR/tmp"
-  xcrun clang -O2 -Wall -target "$ARCH-apple-macos14.0" -c "$REPO_ROOT/app/Tests/scan.c" -o "$HARNESS_DIR/scan.o"
-  xcrun swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" \
+  xcrun clang -O2 -Wall -Werror -target "$ARCH-apple-macos14.0" -c "$REPO_ROOT/app/Tests/scan.c" -o "$HARNESS_DIR/scan.o"
+  xcrun swiftc -O -warnings-as-errors -swift-version 5 -target "$ARCH-apple-macos14.0" \
     -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
     "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT/app/Sources/Keys/Attestor.swift" "$BINDINGS" \
     "$REPO_ROOT"/app/Tests/*.swift "$HARNESS_DIR/scan.o" "$TEST_ARCHIVE_DIR/release/libbrev_core.a" \
@@ -614,7 +614,7 @@ if [[ "$DARWIN" == yes ]]; then
   LOCK_DIR="$TARGET_DIR/lock-probe"
   rm -rf "$LOCK_DIR"
   mkdir -p "$LOCK_DIR/tmp"
-  xcrun swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" \
+  xcrun swiftc -O -warnings-as-errors -swift-version 5 -target "$ARCH-apple-macos14.0" \
     -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
     "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/App/*.swift \
     "$REPO_ROOT"/app/Sources/UI/*.swift "$REPO_ROOT"/app/Sources/Keys/*.swift \
@@ -639,7 +639,7 @@ fi
 # keeps up with app/Sources; never built into Brev.app by this script.
 if [[ "$DARWIN" == yes ]]; then
   echo "==> P1 variant (b) (BREV_PASTE_MENU, type-check only)"
-  xcrun swiftc -typecheck -swift-version 5 -D BREV_PASTE_MENU -target "$ARCH-apple-macos14.0" \
+  xcrun swiftc -typecheck -warnings-as-errors -swift-version 5 -D BREV_PASTE_MENU -target "$ARCH-apple-macos14.0" \
     -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
     "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/App/*.swift \
     "$REPO_ROOT"/app/Sources/UI/*.swift "$REPO_ROOT"/app/Sources/Keys/*.swift \
@@ -673,6 +673,8 @@ if [[ "$DARWIN" == yes ]]; then
   # window, no capture, no permission.
   echo "==> capture-probe --selftest"
   mkdir -p "$TARGET_DIR/verify-selftest"
+  # -suppress-warnings, not -warnings-as-errors: capture-probe calls the
+  # captures macOS 14 deprecates on purpose (V7; see tools/verify/build.sh).
   xcrun swiftc -suppress-warnings -swift-version 5 -target "$ARCH-apple-macos14.0" \
     "$REPO_ROOT/tools/verify/capture-probe.swift" -o "$TARGET_DIR/verify-selftest/capture-probe"
   "$TARGET_DIR/verify-selftest/capture-probe" --selftest

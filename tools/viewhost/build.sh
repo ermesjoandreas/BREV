@@ -62,8 +62,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-xcrun clang -O2 -Wall -target "$ARCH-apple-macos14.0" -c "$REPO_ROOT/app/Tests/scan.c" -o "$OUT/scan.o"
-xcrun swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" -D BREV_SELFSCAN \
+xcrun clang -O2 -Wall -Werror -target "$ARCH-apple-macos14.0" -c "$REPO_ROOT/app/Tests/scan.c" -o "$OUT/scan.o"
+xcrun swiftc -O -warnings-as-errors -swift-version 5 -target "$ARCH-apple-macos14.0" -D BREV_SELFSCAN \
   -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
   "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/App/*.swift "$REPO_ROOT"/app/Sources/UI/*.swift \
   "$REPO_ROOT/app/Sources/Keys/Attestor.swift" "$REPO_ROOT/app/Sources/Verify/SelfScan.swift" \

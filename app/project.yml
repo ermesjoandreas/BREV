@@ -159,9 +159,10 @@ targets:
         SWIFT_VERSION: "5.0"
         # Optional-but-wanted strictness; "complete" is a later-phase item.
         SWIFT_STRICT_CONCURRENCY: minimal
-        # Warnings-as-errors is a Phase 5 item (CLAUDE.md §5, Phase 5); off for now.
-        GCC_TREAT_WARNINGS_AS_ERRORS: "NO"
-        SWIFT_TREAT_WARNINGS_AS_ERRORS: "NO"
+        # Warnings are errors, in every configuration (CLAUDE.md §5 Phase 5):
+        # Swift, and clang for the bridging headers and Tests/scan.c (Verify).
+        GCC_TREAT_WARNINGS_AS_ERRORS: "YES"
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: "YES"
 
         # --- UniFFI "compiled inline" FFI wiring (CLAUDE.md §3.1) -----------------
         # The generated BrevCore.swift does `#if canImport(BrevCoreFFI)`; we do not
