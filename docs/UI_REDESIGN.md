@@ -1,7 +1,9 @@
 # UI redesign: a calm, Mail-like Brev
 
-Status: spec, 2026-09-29, with the review of 2026-09-29 applied (below).
-Built on branch `claude/ui-redesign`; DECISIONS.md «D-XXXX (UI redesign)».
+Status: built 2026-09-29 on branch `claude/ui-redesign`, with the review of
+2026-09-29 applied (below); DECISIONS.md «D-XXXX (UI redesign)» lists what
+the build settled that this spec did not. `tools/snapshot` draws every scene
+of §5.4 (light and dark) and runs §5.6's checks in scripts/test.sh.
 Scope: the Swift app only (`app/Sources/App`, `app/Sources/UI`, one file in
 `app/Sources/Shared`), plus a new offscreen tool under `tools/`.
 No change to the Rust core or the FFI (`scripts/ffi-surface.txt` stays as it is).

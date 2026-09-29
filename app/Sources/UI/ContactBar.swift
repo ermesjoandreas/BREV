@@ -217,7 +217,6 @@ final class ContactBar: NSView {
 
         let approve = HumanButton(title: L10n.requestAccept, target: self, action: #selector(approvePressed(_:)))
         let decline = HumanButton(title: L10n.requestDecline, target: self, action: #selector(declinePressed(_:)))
-        approve.keyEquivalent = ""
         approveButton = approve
         declineButton = decline
         for v in [requestBody, Self.row([approve, decline]), answerError] as [NSView] { request.addArrangedSubview(v) }

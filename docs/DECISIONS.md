@@ -4488,3 +4488,59 @@ WP5 and their reviews record.
 - **Reasoning:** CLAUDE.md §1.10 (plaintext no longer than needed). Starting
   on Innboks would decrypt every subject at each unlock and each sync with
   new letters, with nobody asking to see them.
+- **Built (2026-09-29, branch `claude/ui-redesign`):** docs/UI_REDESIGN.md
+  with its review applied: a Mail-like window (sidebar, message list,
+  reading pane, unified toolbar), a Mail-like compose sheet, a grouped
+  Kontakter sheet with the own code, alert-like ConfirmSheet, ProofSheet with
+  its symbol, calmer pages, four content fonts (New York 15 for bodies) with
+  GlyphFlush per font, and `tools/snapshot`, which draws every screen
+  offscreen in light and dark and runs its checks in scripts/test.sh.
+- **Settled here (the spec left them open):**
+  1. No `.fullSizeContentView` (review 1 allowed dropping it); the snapshot
+     tool checks every ContentView lies inside `contentLayoutRect`.
+  2. The sidebar is a plain split view item with a flat tinted background,
+     not `sidebarWithViewController:`: on macOS 26 that is a floating glass
+     material that blurs what is behind it (no capture probe covers content
+     on it), and cacheDisplay cannot draw it. The toolbar's items are
+     unbordered for the same reason (their glass bezel drew as blank discs
+     offscreen).
+  3. The toolbar items target the mail screen directly (not the responder
+     chain), so they work whatever has focus; Lås calls the same `onLock`
+     the old Lås button did. MainWindow puts the frame back after adding or
+     removing the toolbar, and clears the subtitle with it.
+  4. In a mailbox, the whole ContactBar moves above the reading header for a
+     key-changed or blocked contact (review 5); the reading header does not
+     scroll with the letter.
+  5. After a send the list is read again with the open letter kept by
+     thread id; the sent letter is not opened (no auto-open).
+  6. Send gets the accent bezel, not a Return key equivalent (Return is a
+     new line in the body; ⌘↩ sends).
+  7. A one-letter thread shows its badge in the reading header; an older
+     multi-letter thread keeps a meta line and badge per letter.
+  8. List dates: today the time, this week the weekday, else dd.MM.yyyy
+     (nb_NO). A contact's rows say «Mottatt»/«Sendt» under the subject.
+  9. SecureListView's and MailboxListView's mouseDown/keyDown also drop a
+     synthetic event themselves (BrevApplication already does).
+  10. Test hooks: ComposeSheet's and ContactSheet's `init`, ContactSheet's
+      `made`, `SecureComposeView.relayout()`, `MailViewController.openThread`
+      and `syncOnce()` are internal for the snapshot tool; nothing in them
+      adds input, text or a way to show a window.
+  11. Unused strings removed: `mail.new`, `mail.lock`, `mail.nothreads`,
+      `header.me`, `header.code`, `contacts.me`.
+  12. The snapshot tool cannot count `body(message:)` calls (Session is
+      final), so it checks that no letter is open after start and after a
+      sync. Secure input after a compose scene must be off in Brev and as it
+      was before the run session-wide (another app may hold it). GlyphFlush
+      is timed per font there (about 25 ms each, budget 50); the harness
+      case is not repeated per font.
+- **Pinned expectations changed (the property still holds):** the lock
+  probe opens the letter with a human's ↓ (no auto-open) and finds the
+  badge in the reading header (still a HumanButton with the fixed title,
+  the only AX text there); the bar has one address row (the own address
+  moved to the sheet); ViewHost follows the same and skips its
+  scrolled-pools check for a one-letter thread (the pane holds only the
+  body now).
+- **Not verified:** nothing here was run on screen or with Touch ID (the
+  owner does not test this by hand). VERIFY's GUI rows (capture, AX
+  Inspector, V57) still apply to the new layout; see the note at the top of
+  docs/VERIFY.md.
