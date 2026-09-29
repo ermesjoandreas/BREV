@@ -8,12 +8,14 @@
 # dependency whitelist, the check that no production code makes a P-256
 # signing key, the FFI surface and patch-marker checks (macOS), the test
 # archive, its allow-software-keys marker and its bindings (macOS),
-# the forbidden-API grep, the check that
-# AVFoundation, CoreMedia and CoreVideo stay in the protected layer, the
-# check that the Xcode minimum is stated alike, the dependency audit, a relay
+# the forbidden-API grep, the pasteboard greps (the contact screen only),
+# the check that AVFoundation, CoreMedia and CoreVideo stay in the protected
+# layer, the check that the Xcode minimum is stated alike, the dependency
+# audit, a relay
 # on 127.0.0.1 with a fresh database and the owner's limits (macOS; stopped
 # when the script ends), the Swift heap-scan harness and the lock probe
-# against it, each run with a root invite of its own (macOS), a
+# against it, each run with a root invite of its own (macOS), a type-check
+# of spike P1's variant (b) (macOS), a
 # compile check of the view host (macOS), a type-check of the verification
 # tools and capture-probe's self-test (macOS) and an Xcode compile check
 # (macOS with xcodegen).
@@ -377,6 +379,63 @@ if [[ -n "$STALE" ]]; then
   exit 1
 fi
 
+# The pasteboard on the contact screen only (docs/PHASE4_DESIGN.md §6.2;
+# CLAUDE.md §1.3, §5 Phase 4). ContactPasteboard is named only in its own
+# file, ContactField (the one read, ⌘V), ContactSheet (the two writes) and
+# AppDelegate (the quit hook's self-clear); each of those uses is found, so
+# the greps cannot pass by matching nothing. No responder answers copy:,
+# cut:, paste:, pasteAsPlainText:, pasteAsRichText: or selectAll:, and no
+# selector names them, except EnvironmentProbe's list of the actions it
+# checks (found: the control) and, only inside `#if BREV_PASTE_MENU` (spike
+# P1's variant (b), not built by default), ContactField's paste: and
+# MainMenu's «Lim inn» (found: the control).
+echo "==> pasteboard only on the contact screen"
+PB_FILES="$(cd "$REPO_ROOT" && grep -rl 'ContactPasteboard' app/Sources | LC_ALL=C sort || true)"
+PB_WANT="$(printf '%s\n' app/Sources/AppDelegate.swift app/Sources/UI/ContactField.swift \
+  app/Sources/UI/ContactPasteboard.swift app/Sources/UI/ContactSheet.swift | LC_ALL=C sort)"
+if [[ "$PB_FILES" != "$PB_WANT" ]]; then
+  echo "error: ContactPasteboard must be named in exactly these files (found < / wanted >):" >&2
+  diff <(printf '%s\n' "$PB_FILES") <(printf '%s\n' "$PB_WANT") >&2 || true
+  exit 1
+fi
+pb_uses() {  # pb_uses <pattern> <file>: the lines of app/Sources that name <pattern>, all in <file>, at least one
+  local hits
+  hits="$(cd "$REPO_ROOT" && grep -rnF "$1" app/Sources || true)"
+  if [[ -z "$hits" ]] || grep -v "^$2:" <<<"$hits"; then
+    echo "error: '$1' must appear in $2 and nowhere else in app/Sources (above: the other places)" >&2
+    exit 1
+  fi
+  grep -c . <<<"$hits"
+}
+pb_uses 'ContactPasteboard.read(' app/Sources/UI/ContactField.swift >/dev/null
+if [[ "$(pb_uses 'ContactPasteboard.write(' app/Sources/UI/ContactSheet.swift)" != 2 ]]; then
+  echo "error: ContactSheet must write to the pasteboard in exactly two places (Kopier adressen min, Kopier koden)" >&2
+  exit 1
+fi
+pb_uses 'ContactPasteboard.clearOwn()' app/Sources/AppDelegate.swift >/dev/null
+EDIT_RE='func (copy|cut|paste|pasteAsPlainText|pasteAsRichText|selectAll)\(_|#selector\([^)]*(copy|cut|paste|pasteAsPlainText|pasteAsRichText|selectAll)\(_:\)|"(copy|cut|paste|pasteAsPlainText|pasteAsRichText|selectAll):"'
+# "path:line:a|b:source" for every hit, b inside `#if BREV_PASTE_MENU`.
+# The pattern reaches awk through the environment: -v would turn its \( into (.
+EDIT_HITS="$(cd "$REPO_ROOT" && find app/Sources -name '*.swift' -print0 | LC_ALL=C sort -z \
+  | xargs -0 env EDIT_RE="$EDIT_RE" awk '
+  FNR == 1 { inb = 0 }
+  /^[[:space:]]*#if BREV_PASTE_MENU/ { inb = 1; next }
+  /^[[:space:]]*#endif/ { inb = 0; next }
+  $0 ~ ENVIRON["EDIT_RE"] { print FILENAME ":" FNR ":" (inb ? "b" : "a") ":" $0 }')"
+EDIT_OK='^app/Sources/App/EnvironmentProbe\.swift:[0-9]+:a:.*"copy:", "cut:", "paste:"|^app/Sources/UI/ContactField\.swift:[0-9]+:b:.*func paste\(_|^app/Sources/App/MainMenu\.swift:[0-9]+:b:.*#selector\(ContactField\.paste\(_:\)\)'
+EDIT_BAD="$(grep -Ev "$EDIT_OK" <<<"$EDIT_HITS" | grep -v '^$' || true)"
+if [[ -n "$EDIT_BAD" ]]; then
+  echo "$EDIT_BAD" >&2
+  echo "error: the lines above answer or name an edit action outside EnvironmentProbe and P1's variant (b)" >&2
+  exit 1
+fi
+for want in 'EnvironmentProbe\.swift:[0-9]+:a:' 'ContactField\.swift:[0-9]+:b:' 'MainMenu\.swift:[0-9]+:b:'; do
+  if ! grep -Eq "$want" <<<"$EDIT_HITS"; then
+    echo "error: the edit-action grep finds nothing matching '$want'; fix the check" >&2
+    exit 1
+  fi
+done
+
 # AVFoundation, CoreMedia and CoreVideo are approved only for the
 # capture-protected content layer (CLAUDE.md §4; docs/DECISIONS.md D-0034),
 # which is OpaqueView.swift. Grepping their imports cannot hold them there:
@@ -559,6 +618,23 @@ if [[ "$DARWIN" == yes ]]; then
   grep -E '^(skip|note) ' <<<"$out" | sed 's/^/      /' || true
 else
   echo "==> lock probe skipped: not macOS ($(uname -s))"
+fi
+
+# Spike P1's fallback (docs/PHASE4_DESIGN.md §6.2): Brev is built with
+# variant (a), ⌘V read in ContactField's keyDown. Variant (b), a «Rediger»
+# menu with only «Lim inn» (paste:), is kept ready behind the compilation
+# condition BREV_PASTE_MENU, in case a human finds that (a) raises a
+# pasteboard alert. Type-checked here with the lock probe's sources, so it
+# keeps up with app/Sources; never built into Brev.app by this script.
+if [[ "$DARWIN" == yes ]]; then
+  echo "==> P1 variant (b) (BREV_PASTE_MENU, type-check only)"
+  xcrun swiftc -typecheck -swift-version 5 -D BREV_PASTE_MENU -target "$ARCH-apple-macos14.0" \
+    -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
+    "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/App/*.swift \
+    "$REPO_ROOT"/app/Sources/UI/*.swift "$REPO_ROOT"/app/Sources/Keys/*.swift \
+    "$BINDINGS" "$REPO_ROOT/app/Tests/Lock/main.swift"
+else
+  echo "==> P1 variant (b) skipped: not macOS ($(uname -s))"
 fi
 
 # The view host (tools/viewhost): Brev's mail window with fake letters, for

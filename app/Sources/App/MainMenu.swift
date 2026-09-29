@@ -6,7 +6,12 @@
 // Services or Share menu, and AppKit is never told of a Services menu.
 // Accessibility can press every item here; each action is harmless: lock,
 // quit, or open an empty compose sheet. Anything added to these menus must
-// be checked against §1 first.
+// be checked against §1 first. Only a build with the compilation condition
+// BREV_PASTE_MENU (spike P1's variant (b), docs/PHASE4_DESIGN.md §6.2; not
+// built by default) adds «Rediger» with one item, «Lim inn» (⌘V), whose
+// paste: only ContactField answers, so AppKit enables it only while an
+// address or invite code field has focus; that build must pass V15's
+// variant-(b) row, which looks for items macOS adds to such a menu.
 
 import AppKit
 
@@ -38,6 +43,12 @@ enum MainMenu {
         file.addItem(NSMenuItem(title: L10n.menuFileNew, action: #selector(MailActions.newLetter(_:)),
                                 keyEquivalent: "n"))
         add(file, to: main)
+
+        #if BREV_PASTE_MENU
+        let edit = NSMenu(title: L10n.menuEditTitle)
+        edit.addItem(NSMenuItem(title: L10n.menuEditPaste, action: #selector(ContactField.paste(_:)), keyEquivalent: "v"))
+        add(edit, to: main)
+        #endif
 
         return main
     }

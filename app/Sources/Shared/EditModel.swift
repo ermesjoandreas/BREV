@@ -7,7 +7,9 @@
 // or as a newline (Return in the body). An insert that would pass the
 // field's UTF-8 limit (Rust's limits()) is refused, and the view beeps. An
 // address field (docs/PHASE3_DESIGN.md §6.5) takes only a–z, 0–9 and "-",
-// with A–Z folded to a–z; any other keystroke is refused the same way.
+// with A–Z folded to a–z; any other keystroke is refused the same way. A
+// contact field (docs/PHASE4_DESIGN.md §6.2: an address or an invite code)
+// also takes "."; it alone takes pasted bytes (`insertPasted`), ASCII only.
 // Delete and ←/→ go by composed character (SecretText.composedRange); ↑/↓,
 // line start and end, and clicks use the lines of the field's TextLayout.
 // No AppKit: compiled into the app and the CLI harness. Main thread only.
@@ -24,6 +26,10 @@ final class EditModel {
         /// with A–Z taken as a–z; every other unit is refused. Rust checks
         /// the rest (3 to 32 characters, a letter first).
         case address
+        /// An address or an invite code (docs/PHASE4_DESIGN.md §3.1,
+        /// §6.2): the address units and "."; A–Z taken as a–z. Rust parses
+        /// the rest.
+        case contact
     }
 
     /// The field's text. The compose sheet sends it; `wipe` clears it.
@@ -59,6 +65,15 @@ final class EditModel {
         }
     }
 
+    /// A contact field's unit for `u`: an address unit, or "." as it is.
+    static func contactUnit(_ u: UInt16) -> UInt16? {
+        u == 0x2E ? u : addressUnit(u)
+    }
+
+    /// The most bytes one paste may bring (the pasteboard read's limit;
+    /// Rust's `open_invite` takes as many).
+    static let maxPaste = 256
+
     // MARK: Edits
 
     /// Inserts one keystroke's units at the caret and moves the caret past
@@ -70,17 +85,43 @@ final class EditModel {
     func insert(_ u: UnsafeBufferPointer<UInt16>) -> Bool {
         goalX = nil
         guard !u.contains(where: { $0 < 0x20 || $0 == 0x7F }) else { return false }
-        guard charset == .address, !u.isEmpty else { return put(u) }
-        // An address field refuses the keystroke if one unit is not allowed,
-        // and takes the others folded, from a stack buffer zeroed after.
+        guard charset != .text, !u.isEmpty else { return put(u) }
+        // An address or contact field refuses the keystroke if one unit is
+        // not allowed, and takes the others folded, from a stack buffer
+        // zeroed after.
+        let rule = charset == .address ? Self.addressUnit : Self.contactUnit
         return withUnsafeTemporaryAllocation(of: UInt16.self, capacity: u.count) { folded in
             folded.initialize(repeating: 0)
             defer { _ = memset_s(folded.baseAddress!, folded.count * 2, 0, folded.count * 2) }
             for (i, unit) in u.enumerated() {
-                guard let a = Self.addressUnit(unit) else { return false }
+                guard let a = rule(unit) else { return false }
                 folded[i] = a
             }
             return put(UnsafeBufferPointer(folded))
+        }
+    }
+
+    /// A paste into a contact field (docs/PHASE4_DESIGN.md §6.2): at most
+    /// `maxPaste` bytes, ASCII only. Spaces, tabs and line breaks are left
+    /// out (a code copied from a file or a message often ends with one; Rust
+    /// trims them too); every other byte must pass the contact rule, or the
+    /// whole paste is refused and nothing changes, as is one that would not
+    /// fit. The units go in at the caret as one insert, from a stack buffer
+    /// zeroed after. The caller wipes `bytes`. Refused in any other field.
+    @discardableResult
+    func insertPasted(_ bytes: UnsafeRawBufferPointer) -> Bool {
+        goalX = nil
+        guard charset == .contact, bytes.count <= Self.maxPaste else { return false }
+        return withUnsafeTemporaryAllocation(of: UInt16.self, capacity: Self.maxPaste) { units in
+            units.initialize(repeating: 0)
+            defer { _ = memset_s(units.baseAddress!, units.count * 2, 0, units.count * 2) }
+            var n = 0
+            for b in bytes where ![0x20, 0x09, 0x0A, 0x0D].contains(b) {
+                guard let u = Self.contactUnit(UInt16(b)) else { return false }
+                units[n] = u
+                n += 1
+            }
+            return n > 0 && put(UnsafeBufferPointer(rebasing: units[0..<n]))
         }
     }
 

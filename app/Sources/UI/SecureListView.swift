@@ -1,6 +1,7 @@
 // SecureListView.swift — the contacts list and the thread list.
 //
-// Upholds CLAUDE.md §1.2, §1.3, §1.10 and §3.2 (docs/PHASE2_DESIGN.md §7.2).
+// Upholds CLAUDE.md §1.2, §1.3, §1.10 and §3.2 (docs/PHASE2_DESIGN.md §7.2;
+// docs/PHASE4_DESIGN.md §6.1: also the contact requests, by address).
 // Rows have a fixed height. Each row draws the first line of its SecretText
 // (a name or a subject: at most 448 units, up to the first line break,
 // clipped at the row's edge) through TextLayout, and optionally one line of
@@ -56,6 +57,15 @@ final class SecureListView: ContentView {
     /// Wipes every row's text and removes the rows.
     func clear() {
         setRows([], selected: nil)
+    }
+
+    /// No row selected, the rows kept, without calling `onSelect`: another
+    /// list's row was selected (the requests and the contacts share the
+    /// header).
+    func deselect() {
+        guard selected != nil else { return }
+        selected = nil
+        needsDisplay = true
     }
 
     // MARK: - Size: the scroll view's width, and at least its height

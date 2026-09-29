@@ -1,31 +1,43 @@
 // MailViewController.swift — the unlocked screen: contacts, threads, letters.
 //
 // Upholds CLAUDE.md §1.2, §1.10 and §3.2 (docs/PHASE2_DESIGN.md §7.2, §9;
-// docs/PHASE3_DESIGN.md §5.3, §6.3, §6.5). A bar with Nytt brev, Legg til
-// kontakt and Lås (HumanButtons), the contact header (ContactHeaderView: the
-// own address and code, the selected contact's, and a changed key's warning
-// with Godta ny kode, all contact data in the protected layer), and an
-// NSSplitView with three panes: contacts (SecureListView; a contact's name
-// is its address), the contact's threads, newest first (SecureListView),
-// and the selected thread's letters, oldest first (LetterStackView).
-// `start()` reads the own address and the contacts and selects the first,
-// then its newest thread, then that thread's letters. Nytt brev is off for
-// a contact whose key changed. Legg til kontakt opens AddContactSheet; a
-// contact it adds is selected. Godta ny kode opens ConfirmSheet, and only
-// its Godta accepts the code the header shows (acceptNewKey). After a
-// compose sheet is cancelled (it may have found a changed key),
+// docs/PHASE3_DESIGN.md §5.3, §6.3, §6.5; docs/PHASE4_DESIGN.md §6.1). A
+// bar with Nytt brev, Kontakter and Lås (HumanButtons), the contact header
+// (ContactHeaderView: the own address and code, the selected contact's with
+// its state and Blokker, a changed key's warning with Godta ny kode, or a
+// selected request's asker with Godta and Avslå, all contact data in the
+// protected layer), and an NSSplitView with three panes: the contacts pane
+// (under «Forespørsler», while there are any, the contact requests by the
+// asker's address, then the contacts; both SecureListViews, one row
+// selected in either; a contact's name is its address), the contact's
+// threads, newest first (SecureListView), and the selected thread's
+// letters, oldest first (LetterStackView). `start()` reads the own address,
+// the requests (none before the first sync) and the contacts and selects
+// the first contact, then its newest thread, then that thread's letters.
+// Nytt brev is off for a contact whose key changed or that is blocked, and
+// while a request is selected. Kontakter opens ContactSheet; a contact it
+// adds is selected when it closes. Godta ny kode opens ConfirmSheet, and
+// only its Godta accepts the code the header shows (acceptNewKey). Godta and
+// Avslå answer the selected request with one click (`answerRequest` on
+// `Session.net`): Godta selects the new contact, Avslå drops the request;
+// Blokker blocks the selected contact with one click (`blockContact` on
+// `Session.net`). No Touch ID and no confirmation for either (design §6.1,
+// owner answers 6 and 7); a result from before `wipeAll()` is dropped.
+// After a compose sheet is cancelled (it may have found a changed key),
 // the contacts are read again. `sync()` handles the relay's events and
 // fetches the letters waiting there: once at `start()`, every 5 seconds from a
 // timer in the common run-loop modes (docs/DECISIONS.md D-0050), and
 // once after a letter is sent. It runs on `Session.net`, never on main; a
 // sync still running makes the next tick skip, and its result returns to
 // main, where a result from before `wipeAll()` is dropped. When a contact
-// changed (added by an invite or an approval, or its state or key), the
-// contacts are read again, keeping the selected contact and thread by id
+// changed (added by an invite or an approval, or its state or key) or the
+// number of requests changed, the requests and the contacts are read again,
+// keeping the selected request or contact and thread by id
 // (docs/PHASE4_DESIGN.md §6.1); when only letters arrived, the thread and
 // letter panes are read again (their old texts wiped) and keep the selected
-// thread by id. Every text read here is a SecretText
-// owned by a list or letter view; a new selection wipes what it replaces,
+// thread by id. Every text read here is a SecretText owned by a list or
+// letter view, and every request's code a SecretBytes kept here until the
+// requests are read again; a new selection wipes what it replaces,
 // and `wipeAll()` (lock sequence §8.4 step 3) wipes everything and stops the
 // timer. The controller holds the Session weakly, never an OpenText. Logs
 // carry counts and error names only (§6.3 rule 7); a sync failure is logged
@@ -55,6 +67,9 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
 
     private weak var session: Session?
     private var contacts: [ContactItem] = []
+    /// The contact requests, oldest first, as the requests list shows them;
+    /// their codes are wiped when the requests are read again or wiped.
+    private var requests: [RequestItem] = []
     /// The selected contact's threads, newest first, as the list shows them.
     private var threads: [ThreadItem] = []
     private var syncTimer: Timer?
@@ -65,6 +80,12 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     /// The last sync's outcome ("ok" or an error name), logged on change.
     private var syncOutcome = "ok"
 
+    let requestList = SecureListView(rowHeight: 32)
+    /// «Forespørsler», inset like the rows below it.
+    private let requestsTitle = NSView()
+    private var requestScroll: NSScrollView?
+    /// The requests list's height: its rows, at most four.
+    private var requestsHeight: NSLayoutConstraint?
     private let contactList = SecureListView(rowHeight: 32)
     private let threadList = SecureListView(rowHeight: 48)
     private let letters = LetterStackView()
@@ -73,9 +94,16 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     private let noLetters = InterfaceText(L10n.mailNoThreads, width: 260)
     let header = ContactHeaderView()
     private var newButton: HumanButton?
-    private(set) var addButton: HumanButton?
+    private(set) var contactsButton: HumanButton?
     /// The contact whose new code was not accepted (accept.error shows).
     private var acceptFailed: Data?
+    /// The contact whose block the relay was not told of (net.error shows,
+    /// Blokker stays).
+    private var blockFailed: Data?
+    /// The request whose answer did not reach the relay (net.error shows).
+    private var answerFailed: Data?
+    /// True while an answer or a block is on `Session.net`.
+    private var answering = false, blocking = false
     private var dividersPlaced = false
 
     private let dates: DateFormatter = {
@@ -105,19 +133,21 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
 
         let new = HumanButton(title: L10n.mailNew, target: self, action: #selector(newLetter(_:)))
-        let add = HumanButton(title: L10n.mailAddContact, target: self, action: #selector(addContact(_:)))
+        let people = HumanButton(title: L10n.contactsTitle, target: self, action: #selector(showContacts(_:)))
         let lock = HumanButton(title: L10n.mailLock, target: self, action: #selector(lockPressed(_:)))
         newButton = new
-        addButton = add
+        contactsButton = people
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let bar = NSStackView(views: [new, add, spacer, lock])
+        let bar = NSStackView(views: [new, people, spacer, lock])
         bar.orientation = .horizontal
         header.onAccept = { [weak self] in self?.acceptNewKey() }
+        header.onBlock = { [weak self] in self?.blockSelected() }
+        header.onAnswer = { [weak self] approve in self?.answerSelected(approve: approve) }
 
         split.isVertical = true
         split.dividerStyle = .thin
-        split.addSubview(Self.scrollView(contactList, background: .controlBackgroundColor))
+        split.addSubview(contactsPane())
         split.addSubview(Self.scrollView(threadList, background: .controlBackgroundColor))
         split.addSubview(letterPane())
         // Each pane keeps its minimum width, by divider or window (auto
@@ -146,12 +176,56 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
             split.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
 
+        requestList.onSelect = { [weak self] _ in self?.requestSelected() }
         contactList.onSelect = { [weak self] _ in self?.contactSelected() }
         threadList.onSelect = { [weak self] _ in self?.showLetters(scrolledTo: .zero) }
+        requestList.nextKeyView = contactList
         contactList.nextKeyView = threadList
-        threadList.nextKeyView = contactList
+        threadList.nextKeyView = requestList
         view = root
         updateButtons()
+    }
+
+    /// «Forespørsler» and the requests list (both hidden while there are
+    /// none), then the contacts list, which takes the rest of the height.
+    private func contactsPane() -> NSView {
+        let pane = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 500))
+        let requestScroll = Self.scrollView(requestList, background: .controlBackgroundColor)
+        let contactScroll = Self.scrollView(contactList, background: .controlBackgroundColor)
+        self.requestScroll = requestScroll
+        let title = InterfaceText(L10n.requestsTitle, style: .heading, width: 180, alignment: .left)
+        title.translatesAutoresizingMaskIntoConstraints = false
+        requestsTitle.addSubview(title)
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: requestsTitle.topAnchor, constant: 8),
+            title.bottomAnchor.constraint(equalTo: requestsTitle.bottomAnchor),
+            title.leadingAnchor.constraint(equalTo: requestsTitle.leadingAnchor, constant: SecureListView.inset),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: requestsTitle.trailingAnchor),
+        ])
+        let stack = NSStackView(views: [requestsTitle, requestScroll, contactScroll])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.detachesHiddenViews = true
+        stack.setHuggingPriority(.defaultLow, for: .vertical)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        pane.addSubview(stack)
+        let height = requestScroll.heightAnchor.constraint(equalToConstant: 0)
+        requestsHeight = height
+        contactScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: pane.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: pane.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
+            requestScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            contactScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            height,
+        ])
+        stack.setCustomSpacing(0, after: requestScroll)
+        requestsTitle.isHidden = true
+        requestScroll.isHidden = true
+        return pane
     }
 
     /// The letters' scroll view, with "Ingen brev ennå" over it while no
@@ -205,6 +279,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         } catch {
             Self.log.error("me failed: \(Self.name(error), privacy: .public)")
         }
+        readRequests(selecting: nil)
         readContacts(selecting: nil)
         showContactHeader()
         showThreads(keeping: nil)
@@ -215,7 +290,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     }
 
     /// Reads the contacts (the old names are wiped) and selects the one
-    /// with `id`, or else the first.
+    /// with `id`, or else the first unless a request is selected.
     private func readContacts(selecting id: Data?) {
         let rows: [ContactItem]
         do {
@@ -225,34 +300,83 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
             rows = []
         }
         contacts = rows
-        let chosen = id.flatMap { id in rows.firstIndex { $0.id == id } } ?? (rows.isEmpty ? nil : 0)
+        let first = rows.isEmpty || requestList.selected != nil ? nil : 0
+        let chosen = id.flatMap { id in rows.firstIndex { $0.id == id } } ?? first
         contactList.setRows(rows.map { SecureListView.Row(text: $0.name, meta: nil) }, selected: chosen)
+        if chosen != nil { requestList.deselect() }
+    }
+
+    /// Reads the requests the last sync fetched (the old addresses and
+    /// codes are wiped) and selects the asker `peer` if it is still there.
+    /// The list shows at most four rows at once, and hides with its title
+    /// while there are none.
+    private func readRequests(selecting peer: Data?) {
+        requests.forEach { $0.code.wipe() }
+        let rows: [RequestItem]
+        do {
+            rows = try session?.requests() ?? []
+        } catch {
+            Self.log.error("requests failed: \(Self.name(error), privacy: .public)")
+            rows = []
+        }
+        requests = rows
+        let chosen = peer.flatMap { p in rows.firstIndex { $0.peer == p } }
+        requestList.setRows(rows.map { SecureListView.Row(text: $0.address, meta: nil) }, selected: chosen)
+        requestsTitle.isHidden = rows.isEmpty
+        requestScroll?.isHidden = rows.isEmpty
+        requestsHeight?.constant = CGFloat(min(rows.count, 4)) * requestList.rowHeight
     }
 
     /// Reads the contacts again with `id` selected (or the first), its
     /// header line and its threads, keeping the selected thread if it is
     /// the same contact's: after a contact is added, a key is accepted, or
-    /// a compose sheet closed without sending.
+    /// a compose sheet closed without sending. The requests are read again
+    /// too, none selected.
     func reloadContacts(selecting id: Data?) {
+        reload(request: nil, contact: id)
+    }
+
+    /// Reads the requests and the contacts again: the request `peer` stays
+    /// selected if it is still there, else the contact `id` (or the first).
+    private func reload(request peer: Data?, contact id: Data?) {
         let before = selectedContact?.id
         let thread = threadList.selected.flatMap { threads.indices.contains($0) ? threads[$0].id : nil }
-        readContacts(selecting: id)
+        readRequests(selecting: peer)
+        readContacts(selecting: requestList.selected == nil ? id : nil)
         showContactHeader()
         showThreads(keeping: selectedContact?.id == before ? thread : nil)
     }
 
     /// A human selected a contact: its header line and its threads.
     private func contactSelected() {
+        requestList.deselect()
         acceptFailed = nil
         showContactHeader()
         showThreads(keeping: nil)
     }
 
-    /// The header's line 2 for the selected contact (the old one is wiped).
+    /// A human selected a request: the asker in the header, no threads.
+    private func requestSelected() {
+        contactList.deselect()
+        acceptFailed = nil
+        showContactHeader()
+        showThreads(keeping: nil)
+    }
+
+    /// The header's line 2 for the selected request or contact (the old
+    /// one is wiped). The header gets its own copies of a request's address
+    /// and code.
     private func showContactHeader() {
+        if let request = selectedRequest {
+            let code = SecretBytes(capacity: request.code.count)
+            request.code.withBytes { _ = code.append($0) }
+            return header.showRequest(address: request.address.copy(), code: code,
+                                      failed: answerFailed == request.peer)
+        }
         guard let contact = selectedContact, let session else { return header.showContact(nil) }
         do {
-            header.showContact(try session.contactInfo(contact: contact.id), acceptFailed: acceptFailed == contact.id)
+            header.showContact(try session.contactInfo(contact: contact.id), acceptFailed: acceptFailed == contact.id,
+                               blockFailed: blockFailed == contact.id)
         } catch {
             Self.log.error("contact info failed: \(Self.name(error), privacy: .public)")
             header.showContact(nil)
@@ -318,6 +442,11 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         contactList.selected.flatMap { contacts.indices.contains($0) ? contacts[$0] : nil }
     }
 
+    /// The selected request, while one is selected (then no contact is).
+    private var selectedRequest: RequestItem? {
+        requestList.selected.flatMap { requests.indices.contains($0) ? requests[$0] : nil }
+    }
+
     private func date(_ seconds: Int64) -> String {
         dates.string(from: Date(timeIntervalSince1970: TimeInterval(seconds)))
     }
@@ -338,19 +467,22 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         }
     }
 
-    /// On main. When a contact changed, the contacts are read again; else
-    /// when letters arrived, the thread and letter panes are. A locked
-    /// session stops the timer.
+    /// On main. When a contact changed or the number of requests did, the
+    /// requests and the contacts are read again; else when letters arrived,
+    /// the thread and letter panes are. A locked session stops the timer.
     private func synced(_ result: Result<SyncResult, Error>, _ generation: Int) {
         syncing = false
         guard generation == syncGeneration else { return }
         switch result {
         case .success(let got):
             noteSync("ok")
-            guard got.letters > 0 || got.contactsChanged else { return }
+            let asked = Int(got.requests) != requests.count
+            guard got.letters > 0 || got.contactsChanged || asked else { return }
             Self.log.notice(
-                "sync arrived=\(got.letters, privacy: .public) contacts=\(got.contactsChanged, privacy: .public)")
-            if got.contactsChanged { return reloadContacts(selecting: selectedContact?.id) }
+                "sync arrived=\(got.letters, privacy: .public) contacts=\(got.contactsChanged, privacy: .public) requests=\(got.requests, privacy: .public)")
+            if got.contactsChanged || asked {
+                return reload(request: selectedRequest?.peer, contact: selectedContact?.id)
+            }
             let kept = threadList.selected.flatMap { threads.indices.contains($0) ? threads[$0].id : nil }
             showThreads(keeping: kept)
         case .failure(BrevError.Locked):
@@ -383,6 +515,15 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         stopSync()
         header.clear()
         acceptFailed = nil
+        blockFailed = nil
+        answerFailed = nil
+        answering = false
+        blocking = false
+        requests.forEach { $0.code.wipe() }
+        requests = []
+        requestList.clear()
+        requestsTitle.isHidden = true
+        requestScroll?.isHidden = true
         contactList.clear()
         threadList.clear()
         letters.clear()
@@ -404,14 +545,74 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         onLock()
     }
 
-    /// Legg til kontakt: the sheet on this window; a contact it adds is
-    /// selected. One sheet at a time.
-    @objc func addContact(_ sender: Any?) {
+    /// Kontakter: the sheet on this window. When it closes, the requests
+    /// and contacts are read again, with the contact it added last selected
+    /// (else the one selected before). One sheet at a time.
+    @objc func showContacts(_ sender: Any?) {
         guard !composing, let window = view.window, let session else { return }
-        AddContactSheet.present(on: window, session: session) { [weak self] added in
-            guard let added else { return }
-            self?.reloadContacts(selecting: added)
+        ContactSheet.present(on: window, session: session) { [weak self] added in
+            guard let self else { return }
+            self.reload(request: added == nil ? self.selectedRequest?.peer : nil,
+                        contact: added ?? self.selectedContact?.id)
         }
+    }
+
+    /// Godta or Avslå on the selected request: one click, no Touch ID
+    /// (`answerRequest` on `Session.net`). Godta selects the new contact;
+    /// either way the request leaves the list. A failed answer shows
+    /// net.error and can be given again.
+    func answerSelected(approve: Bool) {
+        guard !answering, !composing, let session, let request = selectedRequest else { return }
+        let peer = request.peer, generation = syncGeneration
+        answering = true
+        header.setAnswering(true)
+        Session.net.async {
+            let result = Result { try session.answerRequest(peer: peer, approve: approve) }
+            DispatchQueue.main.async { [weak self] in self?.answered(result, peer, generation) }
+        }
+    }
+
+    private func answered(_ result: Result<Data, Error>, _ peer: Data, _ generation: Int) {
+        guard generation == syncGeneration else { return }
+        answering = false
+        switch result {
+        case .success(let id):
+            answerFailed = nil
+            Self.log.notice("request answered")
+            reload(request: nil, contact: id.isEmpty ? selectedContact?.id : id)
+        case .failure(let error):
+            Self.log.error("answer failed: \(Self.name(error), privacy: .public)")
+            answerFailed = (error as? BrevError) == .Network ? peer : nil
+            reload(request: peer, contact: selectedContact?.id)
+        }
+    }
+
+    /// Blokker on the selected contact: one click, no Touch ID
+    /// (`blockContact` on `Session.net`). The local block holds at once; if
+    /// the relay was not told, net.error shows and Blokker tells it again.
+    func blockSelected() {
+        guard !blocking, !composing, let session, let contact = selectedContact else { return }
+        let id = contact.id, generation = syncGeneration
+        blocking = true
+        header.setBlocking(true)
+        Session.net.async {
+            let result = Result { try session.blockContact(contact: id) }
+            DispatchQueue.main.async { [weak self] in self?.blocked(result, id, generation) }
+        }
+    }
+
+    private func blocked(_ result: Result<Void, Error>, _ id: Data, _ generation: Int) {
+        guard generation == syncGeneration else { return }
+        blocking = false
+        switch result {
+        case .success:
+            blockFailed = nil
+            Self.log.notice("contact blocked")
+        case .failure(let error):
+            Self.log.error("block failed: \(Self.name(error), privacy: .public)")
+            blockFailed = (error as? BrevError) == .Network ? id : nil
+        }
+        reloadContacts(selecting: id)
     }
 
     /// Godta ny kode: ConfirmSheet, and on its Godta the code the header
@@ -450,7 +651,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     }
 
     private var canWriteNewLetter: Bool {
-        onNewLetter != nil && selectedContact.map { !$0.keyChanged } == true
+        onNewLetter != nil && selectedContact.map { !$0.keyChanged && !$0.blocked } == true
     }
 
     private func updateButtons() {

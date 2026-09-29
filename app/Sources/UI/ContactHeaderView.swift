@@ -8,15 +8,22 @@
 // stand fixed labels from Localizable.strings (InterfaceText): "Du:" before
 // line 1, which shows the own address and code, and "Sikkerhetskode:"
 // before each code. Line 2 shows the selected contact's address and pinned
-// code. While the contact's key has changed, a block below shows
-// contact.changed, "Ny kode:" beside the new code (protected too) and Godta
-// ny kode (a HumanButton). The header owns every text it draws: the
-// addresses it is given, and a UTF-16 copy of each code, made from the
-// code's SecretBytes, which it wipes, except the new code's, which it keeps
-// as `newCode` for acceptNewKey: the code accepted is exactly the code
-// shown. A new selection wipes line 2 and the block, and `clear()` (the lock
-// sequence) wipes all of it; both zero the pixels. No string here takes an
-// address or a code.
+// code. Below it (docs/PHASE4_DESIGN.md §5.2, §6.1, owner answer 6), the
+// contact's state (contact.blocked, else contact.waiting, else
+// contact.verified, else nothing) and Blokker (a HumanButton; hidden once
+// blocked, unless telling the relay failed, when net.error shows beside it
+// and a press tells it again). While the contact's key has changed, a block
+// below shows contact.changed, "Ny kode:" beside the new code (protected
+// too) and Godta ny kode (a HumanButton). With a contact request selected
+// instead (docs/PHASE4_DESIGN.md §6.1), line 2 shows the asker's address
+// and code, and a block below shows request.body with Godta and Avslå
+// (HumanButtons: one click each, no confirm), and net.error after a failed
+// answer. The header owns every text it draws: the addresses it is given,
+// and a UTF-16 copy of each code, made from the code's SecretBytes, which it
+// wipes, except the new code's, which it keeps as `newCode` for
+// acceptNewKey: the code accepted is exactly the code shown. A new selection
+// wipes line 2 and the blocks, and `clear()` (the lock sequence) wipes all
+// of it; both zero the pixels. No string here takes an address or a code.
 
 import AppKit
 
@@ -75,10 +82,15 @@ final class ContactHeaderView: NSView {
 
     /// A human pressed Godta ny kode.
     var onAccept: () -> Void = {}
+    /// A human pressed Blokker.
+    var onBlock: () -> Void = {}
+    /// A human pressed Godta (true) or Avslå (false) on a request.
+    var onAnswer: (Bool) -> Void = { _ in }
 
-    /// Row 0: the own address; row 1: the selected contact's.
+    /// Row 0: the own address; row 1: the selected contact's (or asker's).
     let addresses = ContactTextView(rows: 2)
-    /// Row 0: the own code; row 1: the selected contact's pinned code.
+    /// Row 0: the own code; row 1: the selected contact's pinned code (or
+    /// the asker's code).
     let codes = ContactTextView(rows: 2)
     /// The code of the contact's changed key.
     let newCodeView = ContactTextView(rows: 1)
@@ -86,10 +98,22 @@ final class ContactHeaderView: NSView {
     /// block is shown: what acceptNewKey is given.
     private(set) var newCode: SecretBytes?
     private(set) var acceptButton: HumanButton?
+    private(set) var blockButton: HumanButton?
+    private(set) var approveButton: HumanButton?
+    private(set) var declineButton: HumanButton?
 
     private let contactCodeLabel = InterfaceText(L10n.headerCode, width: 110, alignment: .right)
     private let changed = NSStackView()
     private let acceptError = InterfaceText(L10n.acceptError, width: 560, alignment: .left)
+    /// The contact's state and Blokker.
+    private let stateRow = NSStackView()
+    private let waiting = InterfaceText(L10n.contactWaiting, width: 180, alignment: .left)
+    private let verified = InterfaceText(L10n.contactVerified, width: 180, alignment: .left)
+    private let blocked = InterfaceText(L10n.contactBlocked, width: 180, alignment: .left)
+    private let blockError = InterfaceText(L10n.netError, width: 380, alignment: .left)
+    /// A selected request: request.body, Godta, Avslå.
+    private let request = NSStackView()
+    private let answerError = InterfaceText(L10n.netError, width: 380, alignment: .left)
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 52))
@@ -151,7 +175,31 @@ final class ContactHeaderView: NSView {
         changed.spacing = 6
         changed.detachesHiddenViews = true
 
-        let stack = NSStackView(views: [top, changed])
+        let block = HumanButton(title: L10n.contactBlock, target: self, action: #selector(blockPressed(_:)))
+        blockButton = block
+        for v in [waiting, verified, blocked, block, blockError] as [NSView] { stateRow.addArrangedSubview(v) }
+        stateRow.orientation = .horizontal
+        stateRow.alignment = .centerY
+        stateRow.spacing = 8
+        stateRow.detachesHiddenViews = true
+
+        let approve = HumanButton(title: L10n.requestAccept, target: self, action: #selector(approvePressed(_:)))
+        let decline = HumanButton(title: L10n.requestDecline, target: self, action: #selector(declinePressed(_:)))
+        approveButton = approve
+        declineButton = decline
+        let answers = NSStackView(views: [approve, decline, answerError])
+        answers.orientation = .horizontal
+        answers.alignment = .centerY
+        answers.spacing = 8
+        answers.detachesHiddenViews = true
+        for v in [InterfaceText(L10n.requestBody, width: 560, alignment: .left), answers] as [NSView] {
+            request.addArrangedSubview(v)
+        }
+        request.orientation = .vertical
+        request.alignment = .leading
+        request.spacing = 6
+
+        let stack = NSStackView(views: [top, stateRow, changed, request])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -178,16 +226,25 @@ final class ContactHeaderView: NSView {
         code.wipe()
     }
 
-    /// Line 2 and the block below it: the selected contact, or nothing.
+    /// Line 2 and the rows below it: the selected contact, or nothing.
     /// The header owns the address and the new code, and wipes the pinned
-    /// code after copying it. `acceptFailed` shows accept.error in the block.
-    func showContact(_ contact: ContactDetails?, acceptFailed: Bool = false) {
+    /// code after copying it. `acceptFailed` shows accept.error in the
+    /// key-change block; `blockFailed` shows net.error beside Blokker, which
+    /// then stays.
+    func showContact(_ contact: ContactDetails?, acceptFailed: Bool = false, blockFailed: Bool = false) {
         clearContact()
         guard let contact else { return }
         addresses.set(1, contact.address)
         codes.set(1, Self.text(of: contact.code))
         contact.code.wipe()
         contactCodeLabel.isHidden = false
+        blocked.isHidden = !contact.blocked
+        waiting.isHidden = contact.blocked || !contact.waiting
+        verified.isHidden = contact.blocked || contact.waiting || !contact.verified
+        blockButton?.isHidden = contact.blocked && !blockFailed
+        blockButton?.isEnabled = true
+        blockError.isHidden = !blockFailed
+        stateRow.isHidden = false
         guard contact.newCode.count > 0 else { return contact.newCode.wipe() }
         newCode = contact.newCode
         newCodeView.set(0, Self.text(of: contact.newCode))
@@ -195,10 +252,43 @@ final class ContactHeaderView: NSView {
         changed.isHidden = false
     }
 
+    /// Line 2 and the block below it: a contact request's asker. The header
+    /// owns `address` and wipes `code` after copying it. `failed` shows
+    /// net.error beside Godta and Avslå.
+    func showRequest(address: SecretText, code: SecretBytes, failed: Bool = false) {
+        clearContact()
+        addresses.set(1, address)
+        codes.set(1, Self.text(of: code))
+        code.wipe()
+        contactCodeLabel.isHidden = false
+        answerError.isHidden = !failed
+        setAnswering(false)
+        request.isHidden = false
+    }
+
+    /// Godta and Avslå off while an answer is on its way.
+    func setAnswering(_ busy: Bool) {
+        approveButton?.isEnabled = !busy
+        declineButton?.isEnabled = !busy
+    }
+
+    /// Blokker off while the relay is being told.
+    func setBlocking(_ busy: Bool) {
+        blockButton?.isEnabled = !busy
+    }
+
     /// Whether the changed-key block is shown.
     var showsKeyChange: Bool { !changed.isHidden }
+    /// Whether a request's block is shown.
+    var showsRequest: Bool { !request.isHidden }
+    /// The state shown for the contact: "blocked", "waiting", "verified" or
+    /// "" (for the view host's checks).
+    var shownState: String {
+        stateRow.isHidden ? "" : !blocked.isHidden ? "blocked" : !waiting.isHidden ? "waiting"
+            : !verified.isHidden ? "verified" : ""
+    }
 
-    /// Line 2 and the block: wiped, their pixels zeroed.
+    /// Line 2 and the rows below it: wiped, their pixels zeroed.
     private func clearContact() {
         addresses.set(1, nil)
         codes.set(1, nil)
@@ -206,7 +296,9 @@ final class ContactHeaderView: NSView {
         newCode?.wipe()
         newCode = nil
         contactCodeLabel.isHidden = true
+        stateRow.isHidden = true
         changed.isHidden = true
+        request.isHidden = true
     }
 
     /// Everything wiped and zeroed: a new screen or the lock sequence.
@@ -227,5 +319,17 @@ final class ContactHeaderView: NSView {
 
     @objc private func acceptPressed(_ sender: Any?) {
         onAccept()
+    }
+
+    @objc private func blockPressed(_ sender: Any?) {
+        onBlock()
+    }
+
+    @objc private func approvePressed(_ sender: Any?) {
+        onAnswer(true)
+    }
+
+    @objc private func declinePressed(_ sender: Any?) {
+        onAnswer(false)
     }
 }

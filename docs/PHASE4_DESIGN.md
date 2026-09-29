@@ -259,7 +259,7 @@ impl Brev {
 ### 6.2 Pasteboard (`UI/ContactPasteboard.swift`, the only new `NSPasteboard` file)
 
 - `write(_ bytes: SecretBytes)`: `clearContents`; `declareTypes([.string, ConcealedType, TransientType])`; `setData`; remember `changeCount`. Only two callers: *Kopier adressen min* (bytes of `me().address`) and *Kopier koden* (bytes from `create_invite`). No generic entry point.
-- **Self-clear:** after 60 s, or when Brev locks, whichever is first, if `changeCount` is still Brev's own, `clearContents`. Not on sheet close: the user may close the sheet before pasting elsewhere.
+- **Self-clear:** after 60 s, or when Brev locks, whichever is first, if `changeCount` is still Brev's own, `clearContents`. Not on sheet close: the user may close the sheet before pasting elsewhere. *Owner decision (2026-09-29, WP5):* after 60 s and when Brev quits, not at every lock: Brev locks when another app becomes active, which would clear the address or code before it can be pasted there.
 - `read() -> [UInt8]?`: `data(forType: .string)`, at most 256 bytes. Called only from `ContactField`. Bytes go through the `.contact` charset filter (a–z, 0–9, `-`, `.`; A–Z folded) into the field's `EditModel`, then are wiped; never a `String`, drawn only in the protected layer.
 - `ContactField` is a `SecureComposeView` configuration (one line, 96 units, secure input while focused, synthetic events refused) with ⌘V. **Spike P1** (WP5, human, macOS 26.2): (a) ⌘V handled in `keyDown`, reading directly; (b) a «Rediger» menu with only «Lim inn» (`paste:`), enabled only in `ContactField`. Take (a) if it raises no alert (V15 unchanged, no responder answers `paste:`); else (b), rewrite V15, rely on §5.5.2. If both alert, one alert is accepted and recorded.
 - test.sh: `allowed-apis.txt` gains `ContactPasteboard.swift`'s lines only; a grep fails if `ContactPasteboard` appears outside `ContactField.swift`, `ContactSheet.swift`, `AddressViewController.swift` (and the lock hook that clears it); no `copy:`, `cut:`, `selectAll:` anywhere; `paste:` only in `ContactField.swift` (variant b).
@@ -370,7 +370,7 @@ Numbered after D-0068. **Collision:** DECISIONS.md reserves the numbers after D-
 - **D-0074** Rate limits: values, what counts (202 only), per identity per UTC day, 429 before any write, the sender's token on submit, and what the caps do not stop (§4.4).
 - **D-0075** brev-mail schema v5: sealed `flags`, sealed local `invites`; requests and opened invites only in the session; `SyncResult`; event processing, forged-event drop, key-change interplay.
 - **D-0076** Phase 4 FFI additions and the four error variants.
-- **D-0077** Pasteboard on the contact screen only: one file, two write buttons, Concealed/Transient, self-clear after 60 s or at lock, read on ⌘V only, bytes never `String`; P1 result and variant; `pasteboardDisabled` meaning.
+- **D-0077** Pasteboard on the contact screen only: one file, two write buttons, Concealed/Transient, self-clear after 60 s and at quit (the owner's decision of 2026-09-29, not at lock), read on ⌘V only, bytes never `String`; P1 result and variant; `pasteboardDisabled` meaning.
 - **D-0078** App Attest stub, why it is a stub, both App IDs later, and its future link to the environment class.
 - **D-0079** `IdentityVerifier`/`DevVerifier` and the BankID/ID-porten future task.
 - **D-0080** Phase 4 review record (the eleven review findings and what changed, §12) and VERIFY results.

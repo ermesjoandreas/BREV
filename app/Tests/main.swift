@@ -903,6 +903,39 @@ func caseEditModel() {
         return EditModel.addressUnit(c) == want
     } && (UInt16(0x80)...UInt16(0xFFFF)).allSatisfy { EditModel.addressUnit($0) == nil }
     check("EditModel, address: the unit rule over every UTF-16 unit", map)
+    check("EditModel, address: no paste", Array("abc".utf8).withUnsafeBytes { !a.insertPasted($0) }
+            && a.text.length == 32)
+
+    // A contact field (docs/PHASE4_DESIGN.md §6.2): an address or an invite
+    // code, so also "."; the only field a paste goes into.
+    let f = EditModel(maxBytes: 96, multiline: false, charset: .contact)
+    let contactMap = (UInt16(0)...UInt16(0xFFFF)).allSatisfy { u in
+        EditModel.contactUnit(u) == (u == 0x2E ? u : EditModel.addressUnit(u))
+    }
+    check("EditModel, contact: the address rule and \".\", over every UTF-16 unit", contactMap)
+    check("EditModel, contact: keys type a code, A–Z become a–z; æ, space, _ and a newline are refused",
+          typeUnits(f, "brev1.Ab-2") && unitsOf(f.text) == Array("brev1.ab-2".utf16)
+            && ["æ", " ", "_", "@"].allSatisfy { !typeUnits(f, $0) } && !f.insertNewline())
+    f.wipe()
+    func paste(_ m: EditModel, _ bytes: [UInt8]) -> Bool { bytes.withUnsafeBytes { m.insertPasted($0) } }
+    let code = "brev1.brev-secret-me.abcdefghijklmnopqrstuvwxyz2345.abcdefghijklmnopqrstuvwxyz"
+    check("EditModel, contact: a paste goes in at the caret as one insert, folded; spaces, tabs and line breaks left out",
+          paste(f, Array(" \t\(code.uppercased())\r\n".utf8)) && unitsOf(f.text) == Array(code.utf16)
+            && f.caret == code.utf16.count)
+    f.moveToStart()
+    check("EditModel, contact: a paste in the middle", paste(f, Array("x.".utf8)) && f.caret == 2
+            && unitsOf(f.text) == Array(("x." + code).utf16))
+    let pasted = unitsOf(f.text)
+    check("EditModel, contact: a paste with one refused byte (æ in UTF-8, a comma, a NUL, a control) changes nothing",
+          [Array("abcæ".utf8), Array("ab,c".utf8), [0x61, 0x00], [0x61, 0x1B]].allSatisfy { !paste(f, $0) }
+            && unitsOf(f.text) == pasted && f.caret == 2)
+    check("EditModel, contact: only whitespace, or nothing, is refused", !paste(f, Array(" \n".utf8)) && !paste(f, []))
+    f.wipe()
+    check("EditModel, contact: a paste past 96 bytes of text, or of more than 256 bytes, is refused whole",
+          !paste(f, Array(repeating: 0x61, count: 97)) && f.text.length == 0
+            && !paste(f, Array(repeating: 0x20, count: 256) + [0x61]) && f.text.length == 0
+            && paste(f, Array(repeating: 0x20, count: 255) + [0x61]) && unitsOf(f.text) == [0x61])
+    check("EditModel: a body takes no paste", Array("abc".utf8).withUnsafeBytes { !b.insertPasted($0) })
 
     // The UTF-8 count is Transcode's, also as surrogates pair up and split.
     let u = EditModel(maxBytes: 64, multiline: true)

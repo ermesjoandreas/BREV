@@ -24,8 +24,9 @@
 //   addresses and codes included, zeroes every content view's pixel buffers
 //   in place, locks Rust and shows the lock screen (design §8.4; D-0034;
 //   docs/PHASE3_DESIGN.md §6.4);
-// - the lock sequence on the address page wipes the typed address and
-//   zeroes its pixels (docs/PHASE3_DESIGN.md §6.5);
+// - the lock sequence on the address page wipes the text typed at its
+//   invite step and zeroes its pixels (docs/PHASE3_DESIGN.md §6.5,
+//   docs/PHASE4_DESIGN.md §6.1);
 // - a replaced line of the contact header has its pixels zeroed, and a
 //   lock ends a compose sheet without reporting a close, so AppDelegate
 //   reads nothing again while Brev locks (WP5 review);
@@ -400,17 +401,20 @@ for u in "brev-address".utf16 {
     guard let (k, f) = keyFor[u], let cg = CGEvent(keyboardEventSource: nil, virtualKey: k, keyDown: true) else { continue }
     cg.flags = f
     cg.setIntegerValueField(.eventSourceUnixProcessID, value: 0)
-    NSEvent(cgEvent: cg).map(page.field.keyDown)
+    NSEvent(cgEvent: cg).map(page.inviteField.keyDown)
 }
-page.field.updateLayer()
-let fieldPool = page.field.pool
-check("control: the address typed on the address page is pixels in the field's buffers",
-      page.field.model.text.length == 12 && fieldPool.contains(where: hasPixels))
+// The page opens at its invite step (docs/PHASE4_DESIGN.md §6.1), whose
+// field takes the typed text.
+let typedField = page.inviteField
+typedField.updateLayer()
+let fieldPool = typedField.pool
+check("control: the text typed on the address page's invite step is pixels in the field's buffers",
+      typedField.model.text.length == 12 && fieldPool.contains(where: hasPixels))
 lock.lock(.manual)
 check("lock: the address page's field is wiped, its pixels zero, Rust locked",
-      page.field.model.text.length == 0 && (0..<page.field.model.text.maxUnits).allSatisfy { page.field.model.text.units[$0] == 0 }
+      typedField.model.text.length == 0 && (0..<typedField.model.text.maxUnits).allSatisfy { typedField.model.text.units[$0] == 0 }
           && !fieldPool.contains(where: hasPixels) && session.brev.isLocked() && lockScreens == 2,
-      "length \(page.field.model.text.length), lock screens \(lockScreens)")
+      "length \(typedField.model.text.length), lock screens \(lockScreens)")
 
 // MARK: - A new header line, and the lock sequence with a compose sheet open
 

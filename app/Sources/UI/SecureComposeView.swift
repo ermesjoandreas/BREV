@@ -26,11 +26,12 @@
 // one line that grows sideways, and either scrolls to keep the caret in
 // sight. An address field (docs/PHASE3_DESIGN.md §6.2, §6.5) is the same
 // view with EditModel's address charset: a typed address is contact data,
-// so it is handled like content.
+// so it is handled like content. ContactField (docs/PHASE4_DESIGN.md §6.2)
+// is the one subclass: the same field, which also takes ⌘V.
 
 import AppKit
 
-final class SecureComposeView: ContentView, NSTextInputTraits {
+class SecureComposeView: ContentView, NSTextInputTraits {
     /// Space between the field's edge and its text.
     static let inset = NSSize(width: 6, height: 4)
     /// The body's lines are never broken narrower than this (see
@@ -205,6 +206,15 @@ final class SecureComposeView: ContentView, NSTextInputTraits {
         case .documentEnd: move(model.moveToEnd)
         case .text, .ignore: break
         }
+    }
+
+    /// Bytes pasted into a contact field (ContactField's ⌘V): EditModel's
+    /// paste rule, laid out like a typed key; a refusal beeps. Nothing in a
+    /// read-only field. The caller wipes `bytes`.
+    func insertPasted(_ bytes: UnsafeRawBufferPointer) {
+        guard isEditable else { return }
+        keys.reset()
+        if model.insertPasted(bytes) { edited() } else { NSSound.beep() }
     }
 
     /// One key's text at the caret. Home, End, the page keys and the

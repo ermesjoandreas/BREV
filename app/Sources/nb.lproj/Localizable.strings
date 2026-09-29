@@ -2,8 +2,8 @@
   Localizable.strings — Brev, Norwegian bokmål (nb), UTF-8.
 
   Every user-visible string in the app lives here (CLAUDE.md §3.2), read
-  through App/L10n.swift. The texts are those of docs/PHASE2_DESIGN.md §5.6
-  and docs/PHASE3_DESIGN.md §6.6.
+  through App/L10n.swift. The texts are those of docs/PHASE2_DESIGN.md §5.6,
+  docs/PHASE3_DESIGN.md §6.6 and docs/PHASE4_DESIGN.md §6.3.
   None of these strings may ever be derived from message content (§1.5),
   and none takes an address, a name or an identity code (PHASE3 §6.4).
 */
@@ -67,9 +67,13 @@
 "address.error.invalid" = "Adressen kan bare ha a–z, 0–9 og bindestrek, og må begynne med en bokstav.";
 "address.error.failed" = "Adressen ble ikke registrert. Prøv igjen.";
 
+/* The address page's first step (docs/PHASE4_DESIGN.md §6.1): a new identity needs an invite code to register. The code is pasted with ⌘V (or typed) and drawn only in the protected layer; «Invitert av:» stands beside the inviter's address and code, which are drawn there too. */
+"address.invite.title" = "Lim inn invitasjonen";
+"address.invite.body" = "Du trenger en invitasjonskode fra en som bruker Brev. Lim den inn med ⌘V.";
+"address.invite.next" = "Fortsett";
+
 /* The mail window. %@ is a date from DateFormatter (nb): metadata, never content. */
 "mail.new" = "Nytt brev";
-"mail.addcontact" = "Legg til kontakt";
 "mail.lock" = "Lås";
 "mail.nothreads" = "Ingen brev ennå";
 "mail.sent" = "Sendt %@";
@@ -101,19 +105,44 @@
 "environment.pasteboard" = "sperre mot utklippstavlen av";
 "environment.noreport" = "Brev sjekket ikke vernet sitt først";
 
-/* Adding a contact by address (docs/PHASE3_DESIGN.md §6.2, §6.5). */
-"contact.title" = "Legg til kontakt";
-"contact.field" = "Adresse:";
-"contact.add" = "Legg til";
-"contact.cancel" = "Avbryt";
+/* Kontakter (docs/PHASE4_DESIGN.md §6.1, §6.2): the button on the mail window and the sheet it opens. The own address, an invite code, an inviter's address and code, and the field are drawn only in the protected layer; Kopier adressen min and Kopier koden put the address or the code on the pasteboard, which Brev empties again after 60 seconds and when it quits. A code is made with one click, without Touch ID. */
+"contacts.title" = "Kontakter";
+"contacts.me" = "Din adresse:";
+"contacts.copyme" = "Kopier adressen min";
+"contacts.field" = "Adresse eller invitasjonskode:";
+"contacts.add" = "Legg til";
+"contacts.close" = "Lukk";
+"invite.make" = "Lag invitasjon";
+"invite.copy" = "Kopier koden";
+"invite.note" = "Koden kan brukes én gang og gjelder i 7 dager. Send den til én person.";
+"invite.from" = "Invitert av:";
+"invite.accept" = "Godta invitasjonen";
+"invite.root" = "Invitasjon fra Brev-tjenesten.";
+"invite.error.invalid" = "Invitasjonskoden er ukjent, brukt eller utløpt.";
+"invite.error.mismatch" = "Invitasjonskoden stemmer ikke med nøkkelen tjenesten ga. Ingenting ble lagret.";
+"invite.error.limit" = "Du kan ikke lage flere invitasjoner nå. Prøv igjen i morgen.";
+"invite.error.failed" = "Noe gikk galt med invitasjonen. Prøv igjen.";
+/* After Legg til with an address: the contact was asked, and can be written to once it accepts. */
+"request.sent" = "Forespørsel sendt. Du kan skrive når den er godtatt.";
+"request.error.limit" = "Du har sendt for mange forespørsler i dag.";
 "contact.error.notfound" = "Fant ingen med denne adressen.";
 "contact.error.duplicate" = "Denne adressen er allerede en kontakt.";
 "contact.error.self" = "Dette er din egen adresse.";
 "contact.error.failed" = "Kontakten ble ikke lagt til. Prøv igjen.";
 
-/* The contact header (docs/PHASE3_DESIGN.md §6.3, §6.5): fixed labels beside the addresses and identity codes, which are drawn in the protected layer. */
+/* Contact requests (docs/PHASE4_DESIGN.md §6.1): a section of the contacts pane, and, for the selected request, the header's block with Godta and Avslå: one click each, no Touch ID. A request carries no text: only the asker's address and code, drawn in the protected layer. */
+"requests.title" = "Forespørsler";
+"request.body" = "Vil skrive til deg. Godtar du, kan dere skrive til hverandre.";
+"request.accept" = "Godta";
+"request.decline" = "Avslå";
+
+/* The contact header (docs/PHASE3_DESIGN.md §6.3, §6.5): fixed labels beside the addresses and identity codes, which are drawn in the protected layer. Phase 4 (docs/PHASE4_DESIGN.md §5.2, §6.1, owner answer 6): the contact's state, and Blokker, one click that stops letters both ways. */
 "header.me" = "Du:";
 "header.code" = "Sikkerhetskode:";
+"contact.waiting" = "Venter på svar";
+"contact.verified" = "Bekreftet med invitasjon";
+"contact.blocked" = "Blokkert";
+"contact.block" = "Blokker";
 "contact.changed" = "Sikkerhetskoden til denne kontakten er endret. Brev blir ikke sendt før du godtar den nye koden.";
 "contact.newcode" = "Ny kode:";
 "contact.accept" = "Godta ny kode";
@@ -135,6 +164,10 @@
 /* The Arkiv (File) menu. Key equivalent: ⌘N. */
 "menu.file.title" = "Arkiv";
 "menu.file.new" = "Nytt brev";
+
+/* Only in a build with P1's variant (b) (BREV_PASTE_MENU; docs/PHASE4_DESIGN.md §6.2): the Rediger menu, whose one item pastes into the address or invite code field. Key equivalent: ⌘V. */
+"menu.edit.title" = "Rediger";
+"menu.edit.paste" = "Lim inn";
 
 /* Title of the main window. Always the app name; never message content or a sender name. */
 "window.main.title" = "Brev";

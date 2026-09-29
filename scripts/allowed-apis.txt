@@ -18,3 +18,5 @@
 
 app/Sources/UI/OpaqueView.swift | the signature of the Services override that returns nil, so content views offer nothing to Services (CLAUDE.md §1.4; design §7.1); no pasteboard is touched | override func validRequestor(forSendType sendType: NSPasteboard.PasteboardType?,
 app/Sources/UI/OpaqueView.swift | the second line of the same Services override (returns nil) | returnType: NSPasteboard.PasteboardType?) -> Any? { nil }
+app/Sources/UI/ContactPasteboard.swift | the pasteboard the contact screen copies an address or invite code to and ⌘V reads from: the general one (docs/PHASE4_DESIGN.md §6.2; CLAUDE.md §5 Phase 4 allows copy and paste of addresses and codes there only); test.sh's pasteboard greps keep its callers to ContactField, ContactSheet and the quit hook | static var board = NSPasteboard.general
+app/Sources/UI/ContactPasteboard.swift | the concealed and transient markers of nspasteboard.org set beside the plain text, so clipboard managers neither show nor keep it (design §6.2) | .map(NSPasteboard.PasteboardType.init(rawValue:))

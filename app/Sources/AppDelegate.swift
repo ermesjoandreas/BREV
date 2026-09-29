@@ -15,7 +15,8 @@
 // one Touch ID prompt per Send and per Registrer, each inside
 // LockController's signature bookkeeping (docs/PHASE3_DESIGN.md §3.2, §3.5;
 // the U4 switch in LockState). A reset needs ConfirmSheet. Quitting locks
-// first. Nothing here
+// first, then empties the pasteboard of an address or code Brev copied, if
+// nothing was copied since. Nothing here
 // persists anything: no state restoration, no frame autosave, no user
 // defaults. Logs are content-free: the `ping()` reply, lock and routing
 // events, and error names and codes (§6).
@@ -85,9 +86,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         route()
     }
 
-    /// Quitting locks first (§8.3).
+    /// Quitting locks first (§8.3), and empties the pasteboard if it still
+    /// holds the address or code Brev copied (docs/PHASE4_DESIGN.md §6.2,
+    /// the owner's rule: after 60 s and at quit, not at a lock).
     func applicationWillTerminate(_ notification: Notification) {
         lock.lock(.terminate)
+        ContactPasteboard.clearOwn()
     }
 
     /// Secure coding for any restorable state. Brev restores nothing (every
