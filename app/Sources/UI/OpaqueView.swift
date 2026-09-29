@@ -96,7 +96,7 @@ class ContentView: OpaqueView {
     }()
     /// F4's line height: 15 pt text on a 22 pt line.
     static let bodyLineHeight: CGFloat = 22
-    /// Metadata (dates, «Mottatt»/«Sendt», a letter's class) and nothing else.
+    /// Metadata (dates, «Mottatt»/«Sendt», a letter's mark) and nothing else.
     static let metaFont = NSFont.systemFont(ofSize: 11) as CTFont
 
     /// Buffers per view: one shown, one queued, one being drawn.

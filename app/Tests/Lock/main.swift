@@ -55,8 +55,8 @@
 //   sample with sudo running, through LockController's `observeNow`, has
 //   Rust lock at once and runs the lock sequence with the notice for the
 //   lock screen; the received letter on the mail screen carries its badge
-//   in the reading header («Skrevet i Brev · klasse C»: a software key,
-//   which the test archive sends in, allow-software-keys), the letter pane
+//   in the reading header («Skrevet i Brev»: a software key, which the
+//   test archive allows, allow-software-keys), the letter pane
 //   offers accessibility nothing and the reading header only the badge's
 //   fixed title, and the badge's detail
 //   ends with «Appen er ikke bekreftet av Apple». Rust gets a fixed clean
@@ -256,7 +256,9 @@ func contact(_ s: Session, _ address: String) throws -> Data {
 func send(_ s: Session, _ identity: SecKey, to contact: Data, subject: String, body: String) throws {
     let st = text(subject), bt = text(body)
     defer { st.wipe(); bt.wipe() }
-    try s.composeStarted(design: EnvironmentProbe.design(), admin: nil,
+    // A test user is no admin; an unread fact (nil) fails the requirements,
+    // which the test archive keeps but for the key.
+    try s.composeStarted(design: EnvironmentProbe.design(), admin: false,
                          keyOrigin: EnvironmentProbe.origin(of: identity))
     try s.prepareSend(contact: contact, sample: clean)
     let token = try s.signRequest(contact: contact, subject: st, body: bt, sample: clean)
@@ -413,14 +415,14 @@ check("Hand's sample of no window sets neither window setting",
 // The badge (docs/AUTHORSHIP.md §6): the newest thread is the peer's answer.
 let pane = all(LetterStackView.self, in: mail.view).first
 let badge = mail.readingHeader.badge
-let verifiedC = L10n.badge(verified: true, classCode: 3)
-check("the received letter carries its badge in the reading header, verified in class C (a software key)",
-      badge?.title == verifiedC && badge?.isHidden == false && mail.proofs.count == 1
-          && mail.proofs[0]?.verified == true && mail.proofs[0]?.class == 3,
+let verified = L10n.badge(verified: true)
+check("the received letter carries its badge in the reading header, verified (a software key, allowed here)",
+      badge?.title == verified && badge?.isHidden == false && mail.proofs.count == 1
+          && mail.proofs[0]?.verified == true,
       "\(String(describing: badge?.title))")
 let headerButtons = all(NSButton.self, in: mail.readingHeader).filter { !$0.isHidden }.map(\.title)
 check("accessibility sees nothing of the letter pane, and of the reading header only the badge's fixed text",
-      (pane?.accessibilityChildren() ?? []).isEmpty && headerButtons == [verifiedC]
+      (pane?.accessibilityChildren() ?? []).isEmpty && headerButtons == [verified]
           && all(ContentView.self, in: mail.readingHeader).allSatisfy { !$0.isAccessibilityElement() })
 let detail = mail.proofs.first.flatMap { $0 }.map(ProofSheet.lines) ?? []
 check("the badge's detail lists what the sender's app reported, and ends with «Appen er ikke bekreftet av Apple»",

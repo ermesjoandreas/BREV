@@ -7,8 +7,8 @@
 // protected layer. «Fra:» (a received letter) or «Til:» (a sent one) is a
 // fixed label; the date is metadata, drawn by a MetaView in its own
 // protected layer as the letter's meta lines always were. For a received
-// letter the badge follows: «Skrevet i Brev · klasse A» or «Ikke
-// verifisert», fixed text from L10n on a HumanButton whose press (a
+// letter the badge follows: «Skrevet i Brev» or «Ikke verifisert», fixed
+// text from L10n on a HumanButton whose press (a
 // human's only) asks for the detail (`onBadge`, ProofSheet). A new letter
 // and `clear()` (a new selection, the lock sequence) wipe the copies and
 // zero the pixels. No tooltip, no popover.

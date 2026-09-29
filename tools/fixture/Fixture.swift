@@ -163,15 +163,17 @@ final class User {
         return found.id
     }
 
-    /// Where the identity key lives: software, so the test archive
-    /// (allow-software-keys) sends in class C.
+    /// Where the identity key lives: software, which the test archive
+    /// (allow-software-keys) allows.
     var keyOrigin: KeyOrigin { EnvironmentProbe.origin(of: identity) }
 
     /// One letter in the app's steps (docs/AUTHORSHIP.md §3), all on this
     /// thread, with a clean sample; wipes the texts.
     func send(to contact: Data, subject: SecretText, body: SecretText) throws {
         defer { subject.wipe(); body.wipe() }
-        try session.composeStarted(design: EnvironmentProbe.design(), admin: nil, keyOrigin: keyOrigin)
+        // A test user is no admin; an unread fact (nil) fails the
+        // requirements, which the test archive keeps but for the key.
+        try session.composeStarted(design: EnvironmentProbe.design(), admin: false, keyOrigin: keyOrigin)
         try session.prepareSend(contact: contact, sample: cleanSample)
         let token = try session.signRequest(contact: contact, subject: subject, body: body, sample: cleanSample)
         let envelope = try session.attachTokenSignature(try Enclave.sign(digest: token, key: identity))

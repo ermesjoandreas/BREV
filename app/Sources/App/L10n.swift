@@ -5,8 +5,8 @@
 // text. None is ever built from content, and none takes an address, a
 // name or an identity code (docs/PHASE3_DESIGN.md §6.4, §6.6); the only
 // arguments are a date (metadata), Hand's fixed names of checks and facts
-// (from Rust, each shown as its text from this file), a class letter and
-// the counts of a letter's proof (docs/AUTHORSHIP.md §6).
+// (from Rust, each shown as its text from this file) and the counts of a
+// letter's proof (docs/AUTHORSHIP.md §6).
 
 import Foundation
 
@@ -81,8 +81,6 @@ enum L10n {
     static let listEmptyContact = tr("list.empty.contact")
     static let listReceived = tr("list.received")
     static let listSent = tr("list.sent")
-    /// «Klasse <A, B or C>»: a received letter's chip in the list.
-    static func chipClass(_ letter: String) -> String { String(format: tr("chip.class"), letter) }
     static let readingNone = tr("reading.none")
     static let readingFrom = tr("reading.from")
     static let readingTo = tr("reading.to")
@@ -175,12 +173,8 @@ enum L10n {
 
     // MARK: - A letter's proof (docs/AUTHORSHIP.md §6)
 
-    /// «Skrevet i Brev · klasse A» (B, C) for a verified letter, «Ikke
-    /// verifisert» otherwise.
-    static func badge(verified: Bool, classCode: UInt8?) -> String {
-        guard verified, let code = classCode, (1...3).contains(code) else { return tr("badge.unverified") }
-        return String(format: tr("badge.verified"), ["A", "B", "C"][Int(code) - 1])
-    }
+    /// «Skrevet i Brev» for a verified letter, «Ikke verifisert» otherwise.
+    static func badge(verified: Bool) -> String { tr(verified ? "badge.verified" : "badge.unverified") }
 
     /// The text of a failed check (`"token"`, `"signature"`, `"content"`,
     /// `"iat"`, `"app-attest"`), or nil for a name that is not a check.
@@ -188,9 +182,9 @@ enum L10n {
         ["token", "signature", "content", "iat", "app-attest"].contains(name) ? tr("proof.check.\(name)") : nil
     }
 
-    /// «Klassen stemmer ikke med målingene: <facts>».
-    static func proofClass(_ facts: [String]) -> String {
-        String(format: tr("proof.check.class"), facts.map(fact).joined(separator: ", "))
+    /// «Kravene er ikke oppfylt: <facts>».
+    static func proofRequirements(_ facts: [String]) -> String {
+        String(format: tr("proof.check.requirements"), facts.map(fact).joined(separator: ", "))
     }
 
     static func proofKey(_ value: String) -> String { String(format: tr("proof.key"), value) }

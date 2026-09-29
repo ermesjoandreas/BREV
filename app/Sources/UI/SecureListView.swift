@@ -12,9 +12,10 @@
 //   scroll view.
 // - messages (56 pt): line 1 (a name, or a subject) in semibold with a date
 //   at the end, line 2 (a subject, or «Mottatt»/«Sendt») with a received
-//   letter's class chip at the end; a hairline between rows. The list is the
-//   document view of an NSScrollView and at least as tall as it.
-// Symbols, dates, «Mottatt»/«Sendt», the dot and the chips are fixed
+//   letter's mark at the end (a seal, or the chip «Ikke verifisert»); a
+//   hairline between rows. The list is the document view of an
+//   NSScrollView and at least as tall as it.
+// Symbols, dates, «Mottatt»/«Sendt», the dot and the marks are fixed
 // strings and metadata, drawn in this view's protected layer; the texts are
 // content. The list owns the rows' SecretTexts: setting new rows or
 // `clear()` wipes the old ones. Selection is of rows, never of text: a click
@@ -32,11 +33,15 @@ final class SecureListView: ContentView {
         case messages
     }
 
-    /// A received letter's class («Klasse C») or «Ikke verifisert»
-    /// (`warning`): fixed text, never content.
-    struct Chip {
-        let text: String
-        let warning: Bool
+    /// A received letter's mark (docs/AUTHORSHIP.md §6): fixed, never
+    /// content.
+    enum Mark {
+        /// Every check passed: a small seal, meaning «Skrevet i Brev»
+        /// (L10n.badge). The list has no accessibility element, so the
+        /// reading header's badge is where that text is read.
+        case verified
+        /// A check failed: the orange chip «Ikke verifisert».
+        case unverified
     }
 
     struct Row {
@@ -48,8 +53,8 @@ final class SecureListView: ContentView {
         var meta: String? = nil
         /// Messages: line 2 when it has no subject («Mottatt»/«Sendt»).
         var note: String? = nil
-        /// Messages: a received letter's chip.
-        var chip: Chip? = nil
+        /// Messages: a received letter's mark.
+        var mark: Mark? = nil
         /// Sidebar: a contact whose key changed (the orange dot).
         var flag = false
         /// Sidebar: a blocked contact (its name dimmed).
@@ -283,20 +288,28 @@ final class SecureListView: ContentView {
         bold.drawLine(row.text, TextLayout.firstLine(row.text), in: ctx, x: x, baseline: line1)
         fade(clip1, end: end1, in: ctx)
         ctx.restoreGState()
-        // Line 2: the subject or the direction, and the chip at the end.
+        // Line 2: the subject or the direction, and the mark at the end.
         var end2 = right
-        if let chip = row.chip {
-            let w = Self.metaWidth(chip.text) + 12
+        switch row.mark {
+        case .verified:
+            let side: CGFloat = 15
+            drawSymbol("checkmark.seal", in: ctx, rect: CGRect(x: right - side, y: line2 - 12, width: side, height: side),
+                       color: onAccent ? .alternateSelectedControlTextColor : .secondaryLabelColor)
+            end2 = right - side - 8
+        case .unverified:
+            let text = L10n.badge(verified: false)
+            let w = Self.metaWidth(text) + 12
             let box = CGRect(x: right - w, y: line2 - 11, width: w, height: 15)
-            let tint: NSColor = onAccent ? .alternateSelectedControlTextColor
-                : chip.warning ? .systemOrange : .secondaryLabelColor
-            ctx.setStrokeColor(color(onAccent ? tint : chip.warning ? .systemOrange : .separatorColor))
+            let tint: NSColor = onAccent ? .alternateSelectedControlTextColor : .systemOrange
+            ctx.setStrokeColor(color(tint))
             ctx.setLineWidth(1)
             ctx.addPath(CGPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), cornerWidth: 4, cornerHeight: 4,
                                transform: nil))
             ctx.strokePath()
-            drawMeta(chip.text, in: ctx, x: box.minX + 6, baseline: line2, color: color(tint))
+            drawMeta(text, in: ctx, x: box.minX + 6, baseline: line2, color: color(tint))
             end2 = box.minX - 8
+        case nil:
+            break
         }
         if let text2 = row.text2 {
             let clip2 = CGRect(x: x, y: r.midY - 4, width: max(end2 - x, 0), height: r.height / 2 + 4)

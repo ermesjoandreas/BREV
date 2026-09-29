@@ -9,8 +9,8 @@
 // letters shows each after a hairline and a header ("Sendt …" or
 // "Mottatt …" and a date: metadata, drawn by an OpaqueView) above a
 // SecureTextView with the body. A received letter's header has its badge at
-// the right (docs/AUTHORSHIP.md §6): «Skrevet i Brev · klasse A» or «Ikke
-// verifisert», fixed text from L10n, never content, on a HumanButton whose
+// the right (docs/AUTHORSHIP.md §6): «Skrevet i Brev» or «Ikke verifisert»,
+// fixed text from L10n, never content, on a HumanButton whose
 // press (a human's only) asks for the detail (`onBadge`). The badges are
 // the only thing in the pane that accessibility sees: their text. Frames
 // come from each body's layout height at the scroll view's width. `clear()`

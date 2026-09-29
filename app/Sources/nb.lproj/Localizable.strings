@@ -95,7 +95,6 @@
 "list.empty.contact" = "Ingen brev med denne kontakten";
 "list.received" = "Mottatt";
 "list.sent" = "Sendt";
-"chip.class" = "Klasse %@";
 
 /* The reading pane: no letter open, and the label before the other party's name (drawn in the protected layer). */
 "reading.none" = "Ingen brev valgt";
@@ -117,11 +116,11 @@
 "compose.ratelimited" = "Du har sendt for mange brev i dag. Brevet ble ikke sendt.";
 "compose.retry" = "Prøv igjen";
 "net.error" = "Fikk ikke kontakt med Brev-tjenesten. Prøv igjen.";
-/* A letter Rust refused because the letter's measured facts are below class A (docs/AUTHORSHIP.md §3.3, §4.1): one line per fact. The first %@ is one of the fact.* texts below, the second the fact's name in the token. compose.environment.none: no compose session was measuring. */
+/* A letter Rust refused because the letter's measured facts do not meet the requirements (docs/AUTHORSHIP.md §3.3, §4.1): one line per fact. The first %@ is one of the fact.* texts below, the second the fact's name in the token. compose.environment.none: no compose session was measuring. */
 "compose.environment" = "Kan ikke sende: %1$@ (%2$@).";
 "compose.environment.none" = "Kan ikke sende: målingen av Macen var ikke startet. Lukk brevet og prøv igjen.";
 
-/* The facts of a letter's authorship token (docs/AUTHORSHIP.md §2.2), as they keep a letter below class A: for compose.environment and proof.check.class. */
+/* The facts of a letter's authorship token (docs/AUTHORSHIP.md §2.2), as they fail a requirement: for compose.environment and proof.check.requirements. */
 "fact.key" = "nøkkelen er ikke i maskinvare";
 "fact.sip" = "SIP er slått av eller kunne ikke leses";
 "fact.sudo" = "sudo kjørte eller kunne ikke sjekkes";
@@ -136,17 +135,17 @@
 "fact.secure-input" = "sikker inntasting var av";
 "fact.pasteboard-off" = "sperren mot utklippstavlen var av";
 
-/* A received letter's badge (docs/AUTHORSHIP.md §6, D-0107 item 4): %@ is the class letter A, B or C. A sent letter has none. */
-"badge.verified" = "Skrevet i Brev · klasse %@";
+/* A received letter's badge (docs/AUTHORSHIP.md §6, D-0115): every check passed, or not. badge.verified is also the fixed meaning of the seal in the message list. A sent letter has none. */
+"badge.verified" = "Skrevet i Brev";
 "badge.unverified" = "Ikke verifisert";
 
-/* The badge's detail sheet: each failed check, then (verified only) what the sender's app reported, then always proof.attest. %@ in proof.check.class is a list of fact.* texts, in the others a value below or a number. */
+/* The badge's detail sheet: each failed check, then (verified only) what the sender's app reported, then always proof.attest. %@ in proof.check.requirements is a list of fact.* texts, in the others a value below or a number. */
 "proof.check.token" = "Beviset kan ikke leses";
 "proof.check.signature" = "Signaturen stemmer ikke";
 "proof.check.content" = "Innholdet er endret etter signering";
 "proof.check.iat" = "Tidspunktet stemmer ikke";
 "proof.check.app-attest" = "Ukjent Apple-bekreftelse";
-"proof.check.class" = "Klassen stemmer ikke med målingene: %@";
+"proof.check.requirements" = "Kravene er ikke oppfylt: %@";
 "proof.key" = "Nøkkel i maskinvare med Touch ID: %@ (oppgitt av avsenderens app)";
 "proof.windows" = "Andre vinduer synlige: %@";
 "proof.agents" = "Kjente AI-programmer i gang: %@";

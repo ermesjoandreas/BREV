@@ -837,7 +837,7 @@ func composeAfterHold(_ sheet: ComposeSheet) {
         check("compose: the typed marker is in memory (positive control)", h.u16 > 0, "\(h)")
     }
     // What ⌘↩ hands Rust (EnvironmentProbe), in a real window: a software
-    // key, so class C, which the test archive sends in; the sheet's sample
+    // key, which the test archive allows; the sheet's sample
     // and the design facts as this run set them up.
     let sample = EnvironmentProbe.sample(for: sheet), design = EnvironmentProbe.design()
     check("compose: Hand's sample and design: a software key; capture excluded unless --capturable, "

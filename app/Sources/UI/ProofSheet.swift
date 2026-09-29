@@ -7,7 +7,7 @@
 // captured, OpaqueView.swift). It shows only fixed texts from
 // Localizable.strings with Rust's fixed names and counts in them, never
 // content: the badge as its title, each failed check in plain Norwegian
-// (the class check with the facts that do not support the claimed class),
+// (the requirements check with the facts that miss one),
 // then, only for a verified letter, what the sender's app reported (key in
 // hardware with Touch ID, other windows, known AI programs, admin, blocked
 // input, time spent writing, SIP, sudo; «ukjent» for a fact it could not
@@ -42,19 +42,21 @@ final class ProofSheet: HardenedWindow {
     static func lines(_ proof: Proof) -> [String] {
         var out = proof.failed.compactMap(L10n.proofCheck)
         let facts = proof.failed.filter { L10n.proofCheck($0) == nil }
-        if !facts.isEmpty { out.append(L10n.proofClass(facts)) }
+        if !facts.isEmpty { out.append(L10n.proofRequirements(facts)) }
         if proof.verified { out += reported(proof) }
         if !proof.attested { out.append(L10n.proofAttest) }
         return out
     }
 
-    /// What the sender's app reported, for a verified letter.
+    /// What the sender's app reported, for a verified letter. Its key is in
+    /// hardware: a verified letter met that requirement (only a test
+    /// archive skips it).
     private static func reported(_ p: Proof) -> [String] {
         let unknown = L10n.proofUnknown
         func count(_ n: UInt32?) -> String { n.map { "\($0)" } ?? unknown }
         func yesNo(_ b: Bool?) -> String { b.map { $0 ? L10n.proofYes : L10n.proofNo } ?? unknown }
         return [
-            L10n.proofKey(p.class.map { $0 <= 2 ? L10n.proofYes : L10n.proofNo } ?? unknown),
+            L10n.proofKey(L10n.proofYes),
             L10n.proofWindows(count(p.windows)),
             L10n.proofAgents(count(p.agents)),
             L10n.proofAdmin(yesNo(p.admin)),
@@ -81,7 +83,7 @@ final class ProofSheet: HardenedWindow {
         icon.image = NSImage(systemSymbolName: proof.verified ? "checkmark.seal" : "exclamationmark.triangle",
                              accessibilityDescription: nil)?.withSymbolConfiguration(config)
         icon.contentTintColor = proof.verified ? .secondaryLabelColor : .systemOrange
-        let heading = InterfaceText(L10n.badge(verified: proof.verified, classCode: proof.class), style: .heading,
+        let heading = InterfaceText(L10n.badge(verified: proof.verified), style: .heading,
                                     width: Self.width - 28, alignment: .left)
         let title = NSStackView(views: [icon, heading])
         title.orientation = .horizontal

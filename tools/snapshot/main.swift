@@ -349,7 +349,7 @@ do {
     ingrid.session.brev.lock()
     let newOla = try replaceIdentity(olaAddress)
     newOla.session.brev.lock()
-    try host.session.composeStarted(design: EnvironmentProbe.design(), admin: nil, keyOrigin: host.keyOrigin)
+    try host.session.composeStarted(design: EnvironmentProbe.design(), admin: false, keyOrigin: host.keyOrigin)
     do {
         try host.session.prepareSend(contact: olaAtHost, sample: cleanSample)
         check("fixture: Ola's changed key is found", false)
@@ -768,15 +768,15 @@ sheetScene("contacts-invite", control: L10n.inviteNote) {
 sheetScene("confirm-reset", control: L10n.resetConfirmTitle) { ConfirmSheet.make(.reset) }
 sheetScene("confirm-key", control: L10n.acceptConfirmTitle) { ConfirmSheet.make(.acceptKey) }
 sheetScene("proof-verified", control: L10n.proofAttest) {
-    ProofSheet.make(Proof(verified: true, class: 1, failed: [], attested: false, admin: false, agents: 0,
-                          windows: 0, blockedInput: 0, seconds: 420, sip: true, sudo: 0))
+    ProofSheet.make(Proof(verified: true, failed: [], attested: false, admin: false, agents: 0, windows: 0,
+                          blockedInput: 0, seconds: 420, sip: true, sudo: 0))
 }
 sheetScene("proof-unverified", control: L10n.proofCheck("signature")) {
-    ProofSheet.make(Proof(verified: false, class: nil, failed: ["signature"], attested: false, admin: nil,
-                          agents: nil, windows: nil, blockedInput: nil, seconds: nil, sip: nil, sudo: nil))
+    ProofSheet.make(Proof(verified: false, failed: ["signature"], attested: false, admin: nil, agents: nil,
+                          windows: nil, blockedInput: nil, seconds: nil, sip: nil, sudo: nil))
 }
 
-// View level: every row kind and chip, selected and not, focused and not.
+// View level: every row kind and mark, selected and not, focused and not.
 sheetScene("list-rows", control: nil) {
     let w = HardenedWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 300), styleMask: [.titled],
                            backing: .buffered, defer: false)
@@ -792,13 +792,12 @@ sheetScene("list-rows", control: nil) {
         box.addSubview(list)
         list.setRows([
             SecureListView.Row(text: fake([kariAddress]), text2: fake([subjects[0]]), meta: "12:04",
-                               chip: SecureListView.Chip(text: L10n.chipClass("A"), warning: false)),
+                               mark: .verified),
             SecureListView.Row(text: fake([olaAddress]), text2: fake([subjects[3]]), meta: "tirsdag",
-                               chip: SecureListView.Chip(text: L10n.badge(verified: false, classCode: nil),
-                                                         warning: true)),
+                               mark: .unverified),
             SecureListView.Row(text: fake([subjects[2]]), meta: "12.09.2026", note: L10n.listSent),
             SecureListView.Row(text: fake([subjects[1]]), meta: "11.09.2026", note: L10n.listReceived,
-                               chip: SecureListView.Chip(text: L10n.chipClass("B"), warning: false)),
+                               mark: .verified),
         ], selected: i == 0 ? 0 : 1)
         list.frame = box.bounds
     }

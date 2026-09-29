@@ -21,8 +21,8 @@
 // shown, the buttons disabled and the fields read-only meanwhile: on main a
 // sample of the Mac and of this sheet (EnvironmentProbe), then
 // `prepareSend` with it on `Session.net` (no content; a changed key shows
-// compose.keychanged and keeps the letter; facts below class A show one
-// compose.environment line per fact; a recipient that has not approved the
+// compose.keychanged and keeps the letter; facts that miss a requirement
+// show one compose.environment line per fact; a recipient that has not approved the
 // user, or one the user blocked, shows compose.notapproved before any
 // prompt), then on main `signRequest` with a new sample (the content, no
 // I/O; Rust freezes the facts and returns the token's digest), the one
@@ -96,7 +96,7 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
     private let rateLimited = InterfaceText(L10n.composeRateLimited, width: messageWidth, alignment: .left)
     private let netFailure = InterfaceText(L10n.netError, width: messageWidth, alignment: .left)
     private let sending = InterfaceText(L10n.composeSending, width: messageWidth, alignment: .left)
-    /// compose.environment with the facts short of class A: made for each
+    /// compose.environment with the requirements not met: made for each
     /// refusal, in the place of the texts above.
     private var environmentFailure: InterfaceText?
     /// A small orange triangle before an error (not before «Sender …»).
@@ -398,7 +398,7 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         }
     }
 
-    /// compose.environment, one line per fact short of class A, in the
+    /// compose.environment, one line per requirement not met, in the
     /// place of the other texts.
     private func environmentText(_ facts: [String]) -> InterfaceText {
         environmentFailure?.removeFromSuperview()

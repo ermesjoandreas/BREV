@@ -555,7 +555,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     }
 
     /// A contact's threads, newest first: the subject, «Mottatt»/«Sendt»,
-    /// the date and a received letter's chip.
+    /// the date and a received letter's mark.
     private func readThreads(of contact: Data, _ session: Session) -> ([Listed], [SecureListView.Row]) {
         let threads: [ThreadItem]
         do {
@@ -571,14 +571,14 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
             listed.append(Listed(id: t.id, contact: contact, createdAt: t.createdAt, subject: t.subject, outgoing: out))
             rows.append(SecureListView.Row(text: t.subject, meta: listDate(t.createdAt),
                                            note: out ? L10n.listSent : L10n.listReceived,
-                                           chip: incoming.map { Self.chip(Self.proof($0, session)) }))
+                                           mark: incoming.map { Self.mark(Self.proof($0, session)) }))
         }
         return (listed, rows)
     }
 
     /// Innboks (threads with a received letter) or Sendt (with a sent one)
     /// across every contact, newest first: the other party's name and the
-    /// subject, the date, and in Innboks the chip. Rust decrypts every
+    /// subject, the date, and in Innboks the mark. Rust decrypts every
     /// subject for each contact; the ones not listed are wiped at once.
     private func readMailbox(sent: Bool, _ session: Session) -> ([Listed], [SecureListView.Row]) {
         var found: [(Listed, SecureListView.Row)] = []
@@ -596,10 +596,10 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
                     t.subject.wipe()
                     continue
                 }
-                let chip = sent ? nil : incoming.map { Self.chip(Self.proof($0, session)) }
+                let mark = sent ? nil : incoming.map { Self.mark(Self.proof($0, session)) }
                 found.append((Listed(id: t.id, contact: c.id, createdAt: t.createdAt, subject: t.subject, outgoing: sent),
                               SecureListView.Row(text: c.name.copy(), text2: t.subject, meta: listDate(t.createdAt),
-                                                 chip: chip)))
+                                                 mark: mark)))
             }
         }
         found.sort { $0.0.createdAt > $1.0.createdAt }
@@ -613,11 +613,8 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         return (messages.first { !$0.outgoing }?.id, messages.contains { $0.outgoing })
     }
 
-    private static func chip(_ proof: Proof) -> SecureListView.Chip {
-        guard proof.verified, let code = proof.class, (1...3).contains(code) else {
-            return SecureListView.Chip(text: L10n.badge(verified: false, classCode: nil), warning: true)
-        }
-        return SecureListView.Chip(text: L10n.chipClass(["A", "B", "C"][Int(code) - 1]), warning: false)
+    private static func mark(_ proof: Proof) -> SecureListView.Mark {
+        proof.verified ? .verified : .unverified
     }
 
     /// The list's empty state for the selection: none for a request.
@@ -672,8 +669,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
                 read.append(proof)
                 shown.append(LetterStackView.Letter(header: m.outgoing ? L10n.mailSent(when) : L10n.mailReceived(when),
                                                     body: try session.body(message: m.id),
-                                                    badge: proof.map { L10n.badge(verified: $0.verified,
-                                                                                  classCode: $0.class) }))
+                                                    badge: proof.map { L10n.badge(verified: $0.verified) }))
             }
         } catch {
             Self.log.error("letters failed: \(Self.name(error), privacy: .public)")
@@ -687,7 +683,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         let first = read.first ?? nil
         readingHeader.show(subject: thread.subject.copy(), name: name, outgoing: first == nil,
                            date: date(thread.createdAt),
-                           badge: first.map { (L10n.badge(verified: $0.verified, classCode: $0.class), $0.verified) })
+                           badge: first.map { (L10n.badge(verified: $0.verified), $0.verified) })
         noLetter.isHidden = true
     }
 
@@ -699,8 +695,8 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         } catch {
             log.error("proof failed: \(name(error), privacy: .public)")
         }
-        return Proof(verified: false, class: nil, failed: ["token"], attested: false, admin: nil, agents: nil,
-                     windows: nil, blockedInput: nil, seconds: nil, sip: nil, sudo: nil)
+        return Proof(verified: false, failed: ["token"], attested: false, admin: nil, agents: nil, windows: nil,
+                     blockedInput: nil, seconds: nil, sip: nil, sudo: nil)
     }
 
     /// A human pressed the badge of the letter at `index`: its detail, in a

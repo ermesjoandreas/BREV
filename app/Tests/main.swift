@@ -199,8 +199,14 @@ let privateFolder: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
 let cleanSample = Sample(secureInput: true, sharingNone: true, preventsCapture: true, csrConfig: 0,
                          processes: ["launchd", "harness"], windows: [])
 
-/// What this CLI process is by design: no content views, no BrevApplication.
-let harnessDesign = Design(axOpaque: false, pasteboardOff: false, inputFilter: false)
+/// Brev's design, stated for the letters this CLI sends in the app's place
+/// (it has no content views and no BrevApplication of its own): the test
+/// archive skips only the hardware-key requirement (D-0115), so the others
+/// must hold.
+let harnessDesign = Design(axOpaque: true, pasteboardOff: true, inputFilter: true)
+/// A test user is no admin; a fact it reads (nil) would fail the
+/// requirements.
+let harnessAdmin: Bool? = false
 
 /// A fresh directory (mode 0700) in TMPDIR for one run's stores, removed
 /// afterwards.
@@ -305,8 +311,8 @@ final class User {
         return Seen(id: c.id, waiting: c.waiting, verified: c.verified, blocked: c.blocked)
     }
 
-    /// Where the identity key lives, as the key says: software. Class C,
-    /// which the test archive (allow-software-keys) sends in.
+    /// Where the identity key lives, as the key says: software, which the
+    /// test archive (allow-software-keys) allows.
     var keyOrigin: KeyOrigin {
         Enclave.isInSecureEnclave(identity) ? .secureEnclave : .software
     }
@@ -316,7 +322,7 @@ final class User {
     /// envelope's digest, its signature, submit. Returns the thread id. The
     /// caller wipes the texts.
     func send(to contact: Data, subject: SecretText, body: SecretText) throws -> Data {
-        try session.composeStarted(design: harnessDesign, admin: nil, keyOrigin: keyOrigin)
+        try session.composeStarted(design: harnessDesign, admin: harnessAdmin, keyOrigin: keyOrigin)
         try session.prepareSend(contact: contact, sample: cleanSample)
         let token = try session.signRequest(contact: contact, subject: subject, body: body, sample: cleanSample)
         let envelope = try session.attachTokenSignature(try Enclave.sign(digest: token, key: identity))
@@ -1572,7 +1578,7 @@ func caseNetwork() {
         check("without a compose session, a send is refused with no fact named (Environment)",
               throwsError(.Environment(failed: [])) { try a.session.prepareSend(contact: aSeesB, sample: cleanSample) })
         do {
-            try a.session.composeStarted(design: harnessDesign, admin: nil, keyOrigin: a.keyOrigin)
+            try a.session.composeStarted(design: harnessDesign, admin: harnessAdmin, keyOrigin: a.keyOrigin)
             try a.session.prepareSend(contact: aSeesB, sample: cleanSample)
             let token = try a.session.signRequest(contact: aSeesB, subject: draft, body: draftBody, sample: cleanSample)
             let tokenDER = try Enclave.sign(digest: token, key: a.identity)
@@ -1611,11 +1617,11 @@ func caseNetwork() {
         let inB = received.flatMap { try? b.session.messages(thread: $0.id).first }
         let proof = inB.flatMap { try? b.session.letterProof(message: $0.id) }
         let own = thread.flatMap { try? a.session.messages(thread: $0).first }
-        check("B's proof of A's letter: verified, class C (a software key), not attested, nothing failed, "
-                + "the counts of the clean sample; A's own copy has no proof",
-              proof?.verified == true && proof?.class == 3 && proof?.attested == false && proof?.failed == []
+        check("B's proof of A's letter: verified (a software key, which the test archive allows), not attested, "
+                + "nothing failed, the counts of the clean sample; A's own copy has no proof",
+              proof?.verified == true && proof?.attested == false && proof?.failed == []
                   && proof?.windows == 0 && proof?.agents == 0 && proof?.sudo == 0 && proof?.sip == true
-                  && proof?.admin == nil && proof?.blockedInput == 0
+                  && proof?.admin == false && proof?.blockedInput == 0
                   && own.map { (try? a.session.letterProof(message: $0.id)) == .some(nil) } == true,
               "\(String(describing: proof))")
         received?.subject.wipe()
