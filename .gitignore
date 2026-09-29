@@ -50,3 +50,6 @@ xcuserdata/
 *.db
 .env
 .env.*
+
+# The offscreen snapshot tool writes its PNGs here (tools/snapshot, docs/UI_REDESIGN.md §5)
+tools/snapshots/out/
