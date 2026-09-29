@@ -141,7 +141,18 @@ Radene uten menneske (V1, V2, V45, V50, V53, V66, V69, og halvparten av V3 og V2
 
 ## Hand-test (ca. 15 min)
 
-Brevene har nå et bevis på hvordan de ble skrevet (D-0111). Bruk Brev og Brev B fra Runde 1, bygd på nytt fra denne grenen. Radene er V82 til V84 i `docs/VERIFY.md`. Noter pass eller feil for hver.
+Brevene har nå et bevis på hvordan de ble skrevet (D-0111). Radene er V82 til V84 i `docs/VERIFY.md`. Noter pass eller feil for hver.
+
+Brevformatet er nytt (versjon 2, lager v6, relé-fil v3). Lagrene og reléet fra Runde 1 kan ikke åpnes. Testen starter derfor blankt:
+
+0. **Klargjør (10 min).**
+   - Bygg: `scripts/build.sh && scripts/build.sh --instance b && (cd core && cargo build --release -p brev-relay)`
+   - Terminal: lim inn blokken under «Setup» i `docs/VERIFY.md`.
+   - Nytt relé: `[ -e "$RD" ] && mv "$RD" "$R/relay-v2-$(date +%s)"`, så `scripts/relay.sh --trace > "$R/relay.log"` i et eget vindu.
+   - Én rot-invitasjon: `"$RELAY" invite --db "$RDB" | pbcopy`
+   - `open "$APP"`: «Filene til Brev er skadet» → «Slett alt og start på nytt» → «Slett alt». Onboarding, Touch ID, ⌘V invitasjonen, adresse `brev-secret-me`, «Registrer».
+   - `open "$APPB"`: det samme, men stopp på «Lim inn invitasjonen».
+   - I Brev: «Kontakter» → «Lag invitasjon» → «Kopier koden». I Brev B: ⌘V, «Fortsett», adresse `brev-secret-peer`, «Registrer».
 
 1. **Ett brev, én Touch ID (V84).** I Brev: nytt brev til Brev B, skriv noe, «Send». Forventet: nøyaktig én dialog, «… sende brevet», ingen passordknapp. Brevet kommer frem hos Brev B.
    - Et nytt brev, «Send», og «Avbryt» i dialogen. Forventet: tilbake til utkastet, ingenting sendt, ingen ny dialog.
