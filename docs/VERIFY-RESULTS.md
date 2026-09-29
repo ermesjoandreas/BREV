@@ -7,6 +7,25 @@ WP12's re-run of V1, V2, V3 (`sdef`), V21, V45, V50 and V69 at `fb6f140`.
 The run of the whole checklist with a human is still to come; this file
 does not replace it.
 
+## Owner run, round 1 (2026-09-29, `1d368cb`)
+
+Environment: ProductName:		macOS; ProductVersion:		26.2; BuildVersion:		25C56; Xcode 26.2; Build version 17C52; 1d368cb. Brev and Brev B built with `scripts/build.sh` and `--instance b`; relay started with `scripts/relay.sh --trace` on a fresh folder; four root invites made with `brev-relay invite`. The owner did the Touch ID and screen steps; Claude read the relay trace, `relay.db` and the unified log.
+
+| Row | Result | What was seen |
+|---|---|---|
+| V27 | pass | Onboarding og opplåsing: én Touch ID-dialog, navnet «Brev», ingen passordknapp. |
+| U4 | info | Touch ID-panelet tar fokus ved opplåsing (logg: "resign active during Touch ID (unlock)"); Brev låser seg ikke, opplåsing lykkes. Ved signering (registrering): ingen slik linje. |
+| V72 | pass | ⌘V av invitasjonskoden: ingen varsel fra macOS om utklippstavlen (variant a beholdes). |
+| V55 | pass | Registrering av brev-secret-me: én dialog, ingen passordknapp; relay: /v1/invites/open 200, /v1/register 201. |
+| V71 | pass | Invitasjon Brev -> Brev B: «Lag invitasjon» uten Touch ID, kopiert, limt inn i Brev B (invite checked root=false), Brev B registrert (brev-secret-peer); relay: /v1/invites 201, /v1/invites/open 200, /v1/register 201, /v1/events/answer 204; links=2 (begge veier godkjent). V77 (feil fingeravtrykk) ikke kjørt. |
+| V56 | pass | Send: én Touch ID-dialog per brev, ingen passordknapp (eierens observasjon); relay: 2 x /v1/envelopes 202. |
+| V57 | pass | Brev -> Brev B og Brev B -> Brev kom fram (sync arrived=1 i begge); eieren ser brevene i innboksen. |
+| V58 | pass | relay.db: 0 treff på BREV-SECRET-BODY (UTF-8 og UTF-16) mens et brev ventet; kontroll: adressen brev-secret-peer funnet 2 ganger. |
+| V59 | pass | Etter at begge har synket: 0 brev venter i relay.db (slettet etter levering). |
+| V81 | pass | Blokker i Brev B: ett klikk, ingen Touch ID; relay /v1/block 204; Brev sin Send gir NotApproved uten Touch ID-dialog, ingen ny /v1/envelopes (fortsatt 2). Eieren bekrefter at Brev B heller ikke kan skrive. |
+
+Not run in round 1: V77 (tampered invite fingerprint), V60 (key change, part of Phase 3's definition of done), and every round-2 row in `docs/USER_SESSION.md`.
+
 ## Phase 3 branch after the vault split (`60d4e1b`)
 
 ### The run

@@ -4115,3 +4115,25 @@ WP5 and their reviews record.
   `padcheck.swift` passes; `bash -n scripts/build.sh` passes; the
   `cargo deny check` output is as quoted. `scripts/test.sh` was not run
   (Mac on low battery); it runs padcheck only through the type-check.
+
+### D-0104 — Owner run, round 1: real Touch ID, two instances, letters both ways, Blokker
+
+- **Date:** 2026-09-29
+- **Decision:** Record the first human run on the newest code (`1d368cb`)
+  and what it settles.
+  1. **U4 settled (open decision 2 in USER_SESSION.md):** the Touch ID
+     panel makes Brev resign active during the unlock's ECIES unwrap; the
+     in-flight exception keeps Brev from locking, and the unlock completes.
+     The signing prompt (registration) did not resign Brev active. The
+     rule stays as built; `LockState.signPanelTakesActivation` stays false.
+  2. **P1 / V72 settled:** ⌘V of an invite code raised no macOS
+     pasteboard alert, so the primary paste variant (a) stays and the
+     fallback (b), with its missing human-input gate, is not needed.
+- **Verified:** docs/VERIFY-RESULTS.md, "Owner run, round 1": V27, V55,
+  V56, V57, V58, V59, V71, V72, V81 pass. With the relay trace and
+  `relay.db` read by Claude: both registrations 201, two envelopes 202,
+  0 plaintext marker hits in UTF-8 or UTF-16 with the address control found,
+  0 envelopes waiting after both syncs, `/v1/block` 204 and the blocked
+  send refused as NotApproved with no Touch ID. Still open for Phase 3's
+  definition of done: V60 (key change); for Phase 4's: V77 and the relay's
+  rate-limit and delivery rows are machine-tested only.
