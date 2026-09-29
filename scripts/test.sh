@@ -350,13 +350,17 @@ fi
 # copying CFString constructor (the NoCopy one does not match) and the other
 # logging calls. URLSession and NSURLConnection (docs/PHASE3_DESIGN.md §5.5):
 # the relay is reached only through brev-mail's client, so Swift never opens
-# a second network path, which App Transport Security would govern.
+# a second network path, which App Transport Security would govern. From
+# NSTableView on (docs/UI_REDESIGN.md §6.3): AppKit views that hold or show
+# text of their own, popovers and sharing over content, and tooltips.
 echo "==> forbidden APIs in app/Sources"
 FORBIDDEN=(NSPasteboard NSTextView NSTextField NSTextInputClient .characters 'String(decoding' 'NSString('
            'NSAttributedString(' CTTypesetter CTFramesetter NSAlert 'print(' servicesMenu
            'String(utf16CodeUnits' 'String(data' 'String(bytes' 'String(cString' 'String(validating'
            'String(utf8String' 'String(unsafeUninitializedCapacity' NSMutableString NSMutableAttributedString
-           'CFStringCreateWithCharacters(' 'NSLog(' 'debugPrint(' 'dump(' 'os_log(' URLSession NSURLConnection)
+           'CFStringCreateWithCharacters(' 'NSLog(' 'debugPrint(' 'dump(' 'os_log(' URLSession NSURLConnection
+           NSTableView NSOutlineView NSCollectionView NSBrowser NSTokenField NSComboBox NSPopover NSSearchField
+           NSSharingService toolTip)
 GREP_ARGS=()
 for p in "${FORBIDDEN[@]}"; do GREP_ARGS+=(-e "$p"); done
 # "path<TAB>trimmed line" for every hit and for every allow-list entry
@@ -376,6 +380,31 @@ fi
 if [[ -n "$STALE" ]]; then
   echo "error: scripts/allowed-apis.txt lists lines that no longer exist (or an entry is malformed):" >&2
   echo "$STALE" >&2
+  exit 1
+fi
+
+# The UI redesign's greps (docs/UI_REDESIGN.md §6.3, review 6 and 8):
+# content is drawn only through the protected layer, so a content view's
+# drawContent( is called only by OpaqueView.swift (overrides and comments
+# are fine; the control: OpaqueView's own call is found); nothing is saved
+# about a window, a split view or a toolbar (autosave in any case, on a
+# code line, only as `autosavesConfiguration = false`, which is found); and
+# the offscreen tools name no call that shows a window or takes focus.
+echo "==> drawContent only from the protected layer; no autosave; offscreen tools never show a window"
+DRAW_CALLS="$(cd "$REPO_ROOT" && grep -rnE 'drawContent\(' app/Sources | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
+  | grep -v 'func drawContent(' || true)"
+if [[ -z "$DRAW_CALLS" ]] || grep -v '^app/Sources/UI/OpaqueView.swift:' <<<"$DRAW_CALLS"; then
+  echo "error: drawContent( must be called in app/Sources/UI/OpaqueView.swift and nowhere else (above: the other calls)" >&2
+  exit 1
+fi
+AUTOSAVE="$(cd "$REPO_ROOT" && grep -rniE 'autosave' app/Sources | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)"
+if [[ -z "$AUTOSAVE" ]] || grep -v 'autosavesConfiguration = false' <<<"$AUTOSAVE"; then
+  echo "error: the lines above save window, split view or toolbar state (only autosavesConfiguration = false is allowed; control: it must be found)" >&2
+  exit 1
+fi
+if (cd "$REPO_ROOT" && grep -rnE 'orderFront|makeKeyAndOrderFront|activate\(|runModal|beginSheet|\.present\(|setIsVisible\(|orderBack|orderWindow\(|\.order\(|unhide' \
+    tools/fixture tools/snapshot); then
+  echo "error: the lines above show a window or take focus in the offscreen tools (docs/UI_REDESIGN.md §5.2)" >&2
   exit 1
 fi
 
@@ -657,6 +686,30 @@ if [[ "$DARWIN" == yes ]]; then
   "$REPO_ROOT/tools/viewhost/build.sh" >/dev/null
 else
   echo "==> view host skipped: not macOS ($(uname -s))"
+fi
+
+# The offscreen snapshot tool (tools/snapshot, docs/UI_REDESIGN.md §5): the
+# real screens with fake data and software keys, drawn and never shown
+# (activation policy .prohibited, no window ordered in; it stops at once if
+# a window becomes key or visible). --check runs its checks without writing
+# a PNG: hardening, toolbar and split view settings, nothing under the
+# toolbar, content views protected and opaque, no AppKit text view, no
+# fake text in the accessibility tree, mailbox rows that accessibility
+# cannot select, no letter opened by itself (also after a sync), the lock
+# sequence's wipe, the frame kept across screens, secure input off after
+# the compose scenes, and GlyphFlush's time per content font.
+if [[ "$DARWIN" == yes ]]; then
+  echo "==> snapshot tool (tools/snapshot --check, offscreen)"
+  SNAPSHOT="$("$REPO_ROOT/tools/snapshot/build.sh")"
+  if ! out="$("$SNAPSHOT" --check 2>&1)"; then
+    echo "$out"
+    echo "error: the snapshot tool's checks failed" >&2
+    exit 1
+  fi
+  echo "    $(grep -c '^ok ' <<<"$out") checks passed"
+  grep -E '^ok   GlyphFlush .* ms' <<<"$out" | sed 's/^ok   /      /' || true
+else
+  echo "==> snapshot tool skipped: not macOS ($(uname -s))"
 fi
 
 # The verification tools of docs/VERIFY.md (tools/verify): type-checked so

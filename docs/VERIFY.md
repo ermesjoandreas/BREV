@@ -22,6 +22,18 @@ replaces `AddContactSheet`, adding a contact sends a request, and
 registering needs an invite. The other rows keep their text: Phase 3's WP6
 runs its rows on the Phase 3 build, and V71–V81 check the Phase 4 flows.
 
+The UI redesign (docs/UI_REDESIGN.md, DECISIONS.md D-0114)
+changes what the rows call the panes, not what they check. Read "the three
+panes" as the sidebar (the requests and contacts lists), the message list
+(was the thread list; one row per thread) and the reading pane (the reading
+header and the letter); "the contact header" as the ContactBar over the
+message list (one contact's address and code; the own address and code are
+on the Kontakter sheet now, which «Legg til kontakt» in the sidebar opens);
+"Nytt brev" and "Lås" as the toolbar's items (the menu keeps ⌘N and ⌘L).
+Brev no longer opens a letter by itself: select one first. The machine
+checks of the new layout run offscreen in `tools/snapshot --check`
+(scripts/test.sh); its PNGs (`--out`) show each screen in light and dark.
+
 Status: written in WP0, 2026-09-27, and revised after its review. WP4
 (2026-09-28) built the tools in `tools/verify/` and ran every row a machine
 can run without Touch ID; the results are in `docs/VERIFY-RESULTS.md`. Rows
@@ -230,10 +242,10 @@ rq() {  # rq SQL: one read-only query of the relay's file (Phase 4)
 | V7 | Legacy CG capture, and the paths `.none` does not stop | a marker letter open: `$T/capture-probe --legacy` (built for 14.0): `CGWindowListCreateImage`, `CGDisplayCreateImage`, `CGDisplayStream` and `AVCaptureScreenInput`; and one `CGDisplayStream` frame through `dlsym` from a binary built for 26.0 (`$T/capture-probe-26`, which `--legacy` runs). No letter in any: the last three show the window with empty panes (the protected layer, D-0034); control as V6 | A | per D-0052 (U1) |
 | V8 | Screen Sharing / ARD / AirPlay | a second Mac views, observes, mirrors: no letter visible | H | per D-0052 (U1) |
 | V9 | Every window excluded | `$T/windows`: `kCGWindowSharingState == 0` for all Brev windows, once with the compose sheet open and once with `ConfirmSheet` open (it only exists in an error state, so do it during V38); control: the sheet is listed as its own window. On macOS 26.2 every regular app owns four off-screen menu-bar-sized windows with sharing state 1; the tool marks them and still counts them (see `docs/VERIFY-RESULTS.md`) | A (H opens) | – |
-| V10 | Accessibility Inspector | the contacts list, the thread list, the letter, the compose fields and the recipient show no text | H | per D-0052 (U3) |
+| V10 | Accessibility Inspector | the contacts and requests lists, the message list, the ContactBar's address and code, the reading header's subject and name, the letter, the compose fields and the recipient show no text; Innboks and Sendt show only as static text with no action | H | per D-0052 (U3) |
 | V11 | AX dump | `$T/axdump Brev`: all attributes and parameterized attributes of every element; marker absent; control: title "Brev" present | A (H grants AX) | per D-0052 (U3) |
 | V12 | GUI scripting | System Events `entire contents of window 1`: marker absent; control: the button titles are listed | A | per D-0052 (U3) |
-| V13 | AX press refused | `$T/axdump Brev --press` on *Send* (compose sheet open, marker typed) and *Lås opp med Touch ID*, and during V38 on *Slett alt og start på nytt* and `ConfirmSheet`'s *Slett alt*: the files in `$D` are unchanged (a send rewrites `brev.db`, an unlock rewrites `biometry.state`, a reset deletes files), no Touch ID prompt appears, and the `AXError` axdump prints is recorded. Menu items: only harmless actions; control: pressing *Lås Brev* through AX locks | A + H looks | per D-0052 (U3) |
+| V13 | AX press refused | `$T/axdump Brev --press` on *Send* (compose sheet open, marker typed) and *Lås opp med Touch ID*, and during V38 on *Slett alt og start på nytt* and `ConfirmSheet`'s *Slett alt*: the files in `$D` are unchanged (a send rewrites `brev.db`, an unlock rewrites `biometry.state`, a reset deletes files), no Touch ID prompt appears, and the `AXError` axdump prints is recorded. Menu items and the mail toolbar's two items (*Nytt brev*, which opens an empty compose sheet as ⌘N does, and *Lås*, which locks): only harmless actions; control: pressing *Lås Brev* through AX locks | A + H looks | per D-0052 (U3) |
 | V14 | ⌘C, ⌘X, ⌘A, ⌘V | `printf PB-CONTROL \| pbcopy` first; in the letter and compose views nothing happens and ⌘V inserts nothing; `pbpaste` still prints `PB-CONTROL`. Phase 4: the same in the contacts list and the requests section. ⌘V pastes only in `ContactField` (`ContactSheet` and the address page), where it inserts `pb-control` (the field folds A–Z; the control that the pasteboard held the text); ⌘C, ⌘X and ⌘A in `ContactField` copy nothing, so `pbpaste` still prints `PB-CONTROL` | H + A | P1 (WP5) |
 | V15 | Menus | only Brev and Arkiv next to the Apple menu, so no Edit menu with Copy or Paste; right-click in content shows no menu. Phase 4, only if P1 takes variant (b): also «Rediger», with only «Lim inn», enabled only while `ContactField` has focus; no Kopier, Klipp ut or Merk alt in any menu; right-click in `ContactField` shows no menu either | H | P1 (WP5) |
 | V16 | Drag | dragging in a letter, onto TextEdit and the Finder, moves nothing out | H | – |

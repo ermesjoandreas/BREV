@@ -23,12 +23,14 @@ final class RootViewController: NSViewController {
         view = BlankContentView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
     }
 
-    /// Replaces the current screen with `next`, at the root's size.
+    /// Replaces the current screen with `next`, at the root's size. Only
+    /// the mail screen has a toolbar (docs/UI_REDESIGN.md §2.1).
     func show(_ next: NSViewController) {
         if let old = child {
             old.view.removeFromSuperview()
             old.removeFromParent()
         }
+        (view.window as? MainWindow)?.setToolbar((next as? MailViewController)?.toolbar)
         addChild(next)
         next.view.frame = view.bounds
         next.view.autoresizingMask = [.width, .height]
@@ -65,34 +67,11 @@ final class NoticeViewController: NSViewController {
         nil
     }
 
+    /// The page style (docs/UI_REDESIGN.md §2.9): a warning symbol over
+    /// the text.
     override func loadView() {
-        view = NoticeView(text: text)
-    }
-}
-
-private final class NoticeView: NSView {
-    private let text: String
-
-    init(text: String) {
-        self.text = text
-        super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let style = NSMutableParagraphStyle()
-        style.alignment = .center
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 15),
-                                                    .foregroundColor: NSColor.labelColor,
-                                                    .paragraphStyle: style]
-        let width = min(bounds.width - 48, 480)
-        let size = text.boundingRect(with: NSSize(width: width, height: bounds.height),
-                                     options: .usesLineFragmentOrigin, attributes: attrs).size
-        let rect = NSRect(x: (bounds.width - width) / 2, y: (bounds.height - ceil(size.height)) / 2,
-                          width: width, height: ceil(size.height))
-        text.draw(with: rect, options: .usesLineFragmentOrigin, attributes: attrs)
+        let page = PageView()
+        page.show([InterfaceText(text, width: PageView.columnWidth)], symbol: "exclamationmark.triangle")
+        view = page
     }
 }

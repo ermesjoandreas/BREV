@@ -21,6 +21,13 @@ final class ProofSheet: HardenedWindow {
 
     /// Shows the detail of `proof` on `parent`.
     static func present(on parent: NSWindow, _ proof: Proof) {
+        parent.beginSheet(make(proof))
+        Hardening.assertAllWindows()
+    }
+
+    /// The sheet, hardened, not shown: `present` shows it; the snapshot
+    /// tool draws it offscreen.
+    static func make(_ proof: Proof) -> ProofSheet {
         let sheet = ProofSheet(contentRect: NSRect(x: 0, y: 0, width: 440, height: 200),
                                styleMask: [.titled], backing: .buffered, defer: false)
         Hardening.apply(sheet)
@@ -28,8 +35,7 @@ final class ProofSheet: HardenedWindow {
         let content = sheet.makeContent(proof)
         sheet.contentView = content
         sheet.setContentSize(content.fittingSize)
-        parent.beginSheet(sheet)
-        Hardening.assertAllWindows()
+        return sheet
     }
 
     /// The detail's lines, in order (docs/AUTHORSHIP.md §6).
@@ -64,19 +70,41 @@ final class ProofSheet: HardenedWindow {
         seconds < 60 ? L10n.proofUnderAMinute : L10n.proofMinutes((seconds + 30) / 60)
     }
 
+    /// The badge's symbol and text as the title, the lines 8 pt apart,
+    /// proof.attest last in small secondary text, Lukk bottom right
+    /// (docs/UI_REDESIGN.md §2.8).
     private func makeContent(_ proof: Proof) -> NSView {
         let close = HumanButton(title: L10n.proofClose, target: self, action: #selector(closePressed(_:)))
         close.keyEquivalent = "\u{1b}"
-        let title = InterfaceText(L10n.badge(verified: proof.verified, classCode: proof.class), style: .heading,
-                                  width: Self.width, alignment: .left)
-        let body = Self.lines(proof).map { InterfaceText($0, width: Self.width, alignment: .left) }
-        let stack = NSStackView(views: [title] + body + [close])
+        let icon = NSImageView()
+        let config = NSImage.SymbolConfiguration(pointSize: 17, weight: .regular)
+        icon.image = NSImage(systemSymbolName: proof.verified ? "checkmark.seal" : "exclamationmark.triangle",
+                             accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        icon.contentTintColor = proof.verified ? .secondaryLabelColor : .systemOrange
+        let heading = InterfaceText(L10n.badge(verified: proof.verified, classCode: proof.class), style: .heading,
+                                    width: Self.width - 28, alignment: .left)
+        let title = NSStackView(views: [icon, heading])
+        title.orientation = .horizontal
+        title.alignment = .centerY
+        title.spacing = 8
+        let lines = Self.lines(proof)
+        let body = lines.map { line -> InterfaceText in
+            line == L10n.proofAttest
+                ? InterfaceText(line, style: .caption, width: Self.width, alignment: .left)
+                : InterfaceText(line, width: Self.width, alignment: .left)
+        }
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let bottom = NSStackView(views: [spacer, close])
+        bottom.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
+        let stack = NSStackView(views: [title] + body + [bottom])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
         stack.setCustomSpacing(16, after: title)
         if let last = body.last { stack.setCustomSpacing(20, after: last) }
-        stack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 20, right: 24)
+        if body.count > 1 { stack.setCustomSpacing(12, after: body[body.count - 2]) }
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
         return stack
     }
 

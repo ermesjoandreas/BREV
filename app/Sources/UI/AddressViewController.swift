@@ -66,13 +66,13 @@ final class AddressViewController: NSViewController, ContentHolder {
     private(set) var nextButton: HumanButton?
     private(set) var registerButton: HumanButton?
     private let inviteTitle = InterfaceText(L10n.addressInviteTitle, style: .title, width: PageView.columnWidth)
-    private let inviteBody = InterfaceText(L10n.addressInviteBody, width: PageView.columnWidth)
+    private let inviteBody = InterfaceText(L10n.addressInviteBody, style: .secondary, width: PageView.columnWidth)
     private let addressTitle = InterfaceText(L10n.addressTitle, style: .title, width: PageView.columnWidth)
-    private let addressBody = InterfaceText(L10n.addressBody, width: PageView.columnWidth)
-    private let root = InterfaceText(L10n.inviteRoot, width: PageView.columnWidth)
+    private let addressBody = InterfaceText(L10n.addressBody, style: .secondary, width: PageView.columnWidth)
+    private let root = InterfaceText(L10n.inviteRoot, style: .secondary, width: PageView.columnWidth)
     private var inviter: NSStackView?
-    private var inviteScroll: NSScrollView?
-    private var addressScroll: NSScrollView?
+    private var inviteScroll: NSView?
+    private var addressScroll: NSView?
     private let taken = AddressViewController.message(L10n.addressErrorTaken)
     private let invalid = AddressViewController.message(L10n.addressErrorInvalid)
     private let inviteInvalid = AddressViewController.message(L10n.inviteErrorInvalid)
@@ -119,19 +119,28 @@ final class AddressViewController: NSViewController, ContentHolder {
         InterfaceText(text, width: PageView.columnWidth)
     }
 
-    private static func scroll(_ document: NSView) -> NSScrollView {
+    /// A field's scroll view in a rounded 1 pt border (as on the Kontakter
+    /// sheet; docs/UI_REDESIGN.md §2.9).
+    private static func scroll(_ document: NSView) -> NSView {
         let scroll = NSScrollView()
-        scroll.borderType = .bezelBorder
-        scroll.drawsBackground = true
-        scroll.backgroundColor = .textBackgroundColor
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
         scroll.verticalScrollElasticity = .none
         scroll.horizontalScrollElasticity = .none
+        scroll.automaticallyAdjustsContentInsets = false
         scroll.documentView = document
+        let border = FieldBorder()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        border.addSubview(scroll)
         NSLayoutConstraint.activate([
-            scroll.widthAnchor.constraint(equalToConstant: Self.fieldWidth),
-            scroll.heightAnchor.constraint(equalToConstant: 28),
+            border.widthAnchor.constraint(equalToConstant: Self.fieldWidth),
+            border.heightAnchor.constraint(equalToConstant: 30),
+            scroll.topAnchor.constraint(equalTo: border.topAnchor, constant: 1),
+            scroll.bottomAnchor.constraint(equalTo: border.bottomAnchor, constant: -1),
+            scroll.leadingAnchor.constraint(equalTo: border.leadingAnchor, constant: 2),
+            scroll.trailingAnchor.constraint(equalTo: border.trailingAnchor, constant: -2),
         ])
-        return scroll
+        return border
     }
 
     override func loadView() {
@@ -142,10 +151,11 @@ final class AddressViewController: NSViewController, ContentHolder {
         self.addressScroll = addressScroll
         inviterView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            inviterView.widthAnchor.constraint(equalToConstant: ContactHeaderView.codeWidth),
+            inviterView.widthAnchor.constraint(equalToConstant: ContactBar.codeWidth),
             inviterView.heightAnchor.constraint(equalToConstant: 2 * ContactTextView.rowHeight),
         ])
-        let inviter = NSStackView(views: [InterfaceText(L10n.inviteFrom, width: 90, alignment: .right), inviterView])
+        let inviter = NSStackView(views: [InterfaceText(L10n.inviteFrom, style: .secondary, width: 90, alignment: .right),
+                                          inviterView])
         inviter.orientation = .horizontal
         inviter.alignment = .top
         inviter.spacing = 8
@@ -154,14 +164,19 @@ final class AddressViewController: NSViewController, ContentHolder {
         let button = PageView.button(L10n.addressRegister, target: self, action: #selector(registerPressed(_:)))
         nextButton = next
         registerButton = button
-        let stack = NSStackView(views: [inviteTitle, addressTitle, inviteBody, inviteScroll, inviter, root,
+        let icon = PageView.symbol("at")
+        let stack = NSStackView(views: [icon, inviteTitle, addressTitle, inviteBody, inviteScroll, inviter, root,
                                         addressBody, addressScroll] + messages + [next, button])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 14
+        stack.spacing = 12
         stack.detachesHiddenViews = true
-        stack.setCustomSpacing(24, after: inviteTitle)
-        stack.setCustomSpacing(24, after: addressTitle)
+        stack.setCustomSpacing(16, after: icon)
+        stack.setCustomSpacing(16, after: inviteTitle)
+        stack.setCustomSpacing(16, after: addressTitle)
+        for m in messages { stack.setCustomSpacing(24, after: m) }
+        stack.setCustomSpacing(24, after: addressScroll)
+        stack.setCustomSpacing(24, after: inviteScroll)
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         NSLayoutConstraint.activate([

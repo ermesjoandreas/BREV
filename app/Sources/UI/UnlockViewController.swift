@@ -77,8 +77,8 @@ final class UnlockViewController: NSViewController {
     func showDamagedStores() {
         unlock = nil
         page.show([InterfaceText(L10n.unlockTitle, style: .title, width: PageView.columnWidth),
-                   InterfaceText(L10n.unlockErrorDamaged, width: PageView.columnWidth),
-                   resetButton()])
+                   InterfaceText(L10n.unlockErrorDamaged, style: .secondary, width: PageView.columnWidth),
+                   resetButton()], symbol: "exclamationmark.triangle")
     }
 
     private func layout(message: String?, reset: Bool) {
@@ -88,19 +88,22 @@ final class UnlockViewController: NSViewController {
             views = [InterfaceText(L10n.unlockTitle, style: .title, width: PageView.columnWidth)]
         case .firstUnlock:
             views = [InterfaceText(L10n.onboardingFirstTitle, style: .title, width: PageView.columnWidth),
-                     InterfaceText(L10n.onboardingFirstBody, width: PageView.columnWidth)]
+                     InterfaceText(L10n.onboardingFirstBody, style: .secondary, width: PageView.columnWidth)]
         }
-        if let message { views.append(InterfaceText(message, width: PageView.columnWidth)) }
-        let unlock = PageView.button(L10n.unlockButton, target: self, action: #selector(unlockPressed(_:)))
+        if let message { views.append(InterfaceText(message, style: .secondary, width: PageView.columnWidth)) }
+        let unlock = PageView.button(L10n.unlockButton, target: self, action: #selector(unlockPressed(_:)),
+                                     symbol: "touchid")
         unlock.keyEquivalent = "\r"
         self.unlock = unlock
         views.append(unlock)
         if reset { views.append(resetButton()) }
-        page.show(views)
+        page.show(views, symbol: mode == .lockScreen ? "lock" : "touchid")
     }
 
+    /// Small and quiet under the unlock button, so the reset is never the
+    /// loud option.
     private func resetButton() -> HumanButton {
-        let reset = PageView.button(L10n.resetButton, target: self, action: #selector(resetPressed(_:)))
+        let reset = PageView.secondary(L10n.resetButton, target: self, action: #selector(resetPressed(_:)))
         reset.hasDestructiveAction = true
         return reset
     }

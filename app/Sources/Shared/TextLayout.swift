@@ -30,12 +30,15 @@ final class TextLayout {
     private let attrs: CFDictionary
     private(set) var lines: [LineRef] = []
 
-    init(font: CTFont) {
+    /// Lines of `font`, `lineHeight` apart (by default the font's own line
+    /// height and 2 pt). GlyphFlush learns the font here.
+    init(font: CTFont, lineHeight: CGFloat? = nil) {
         self.font = font
-        lineHeight = ceil(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font)) + 2
+        self.lineHeight = lineHeight
+            ?? ceil(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font)) + 2
         attrs = [kCTFontAttributeName: font,
                  kCTForegroundColorFromContextAttributeName: kCFBooleanTrue!] as CFDictionary
-        if GlyphFlush.attrs == nil { GlyphFlush.attrs = attrs }   // one content font app-wide
+        GlyphFlush.register(font, attrs)
     }
 
     var height: CGFloat { CGFloat(lines.count) * lineHeight }
@@ -87,9 +90,11 @@ final class TextLayout {
     /// Draws `range` of `lines` into a context whose y grows downward (a
     /// flipped view), with the first line's top at `top`.
     func draw(_ text: SecretText, lines range: Range<Int>, in ctx: CGContext, x: CGFloat, top: CGFloat) {
-        let descent = CTFontGetDescent(font)
+        let ascent = CTFontGetAscent(font), descent = CTFontGetDescent(font)
+        // Each line's glyphs centred on its line height.
+        let offset = floor((lineHeight - ascent - descent) / 2) + ascent
         for i in range where i >= 0 && i < lines.count {
-            drawLine(text, lines[i], in: ctx, x: x, baseline: top + CGFloat(i + 1) * lineHeight - descent - 1)
+            drawLine(text, lines[i], in: ctx, x: x, baseline: top + CGFloat(i) * lineHeight + offset)
         }
     }
 
@@ -157,16 +162,27 @@ final class TextLayout {
 
 /// Replaces what Core Text keeps alive after drawing content. Core Text
 /// reuses glyph and run storage by line length, so `flush` lays out and
-/// draws filler text of every length 1...448 into a 1x1 context. Main thread
-/// only; called once in the lock sequence and when a letter view is torn
-/// down (docs/PHASE2_DESIGN.md §6.4, §8.4).
+/// draws filler text of every length 1...448 into a 1x1 context, in every
+/// content font a TextLayout was made with (docs/UI_REDESIGN.md §4.2: four
+/// in the app). Main thread only; called once in the lock sequence and when
+/// a letter view is torn down (docs/PHASE2_DESIGN.md §6.4, §8.4).
 enum GlyphFlush {
-    /// The content font's attributes, set by the first TextLayout.
-    static var attrs: CFDictionary?
+    /// Each content font seen, with its attributes, in the order seen.
+    private(set) static var fonts: [(font: CTFont, attrs: CFDictionary)] = []
+
+    /// Called by every TextLayout: a font not seen before is flushed from now on.
+    static func register(_ font: CTFont, _ attrs: CFDictionary) {
+        guard !fonts.contains(where: { CFEqual($0.font, font) }) else { return }
+        fonts.append((font, attrs))
+    }
 
     static func flush() {
-        guard let attrs,
-              let ctx = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 0,
+        for f in fonts { flush(f.attrs) }
+    }
+
+    /// One font's sweep (the snapshot tool times each).
+    static func flush(_ attrs: CFDictionary) {
+        guard let ctx = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)
         else { return }
         let filler = UnsafeMutablePointer<UInt16>.allocate(capacity: TextLayout.maxLineUnits)

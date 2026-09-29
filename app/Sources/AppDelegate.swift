@@ -275,14 +275,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         page.start()
     }
 
-    /// The unlocked screen: contacts, threads and letters, and the sync
-    /// timer (docs/PHASE2_DESIGN.md §7.2). Nytt brev opens the compose sheet
+    /// The unlocked screen: the sidebar, the message list and the reading
+    /// pane, and the sync timer (docs/PHASE2_DESIGN.md §7.2;
+    /// docs/UI_REDESIGN.md §2). Nytt brev opens the compose sheet
     /// on the main window (§7.3), with the identity key's origin (its own
     /// kSecAttrTokenID, read from the key, which is found without a
     /// prompt), which signs through SignService with the reason
-    /// send.reason; after a send the mail screen selects the new thread,
-    /// and after Avbryt or Escape it reads the contacts again (the sheet may
-    /// have found a changed key). A lock reports nothing.
+    /// send.reason; after a send the mail screen reads its list again (the
+    /// new letter is not opened), and after Avbryt or Escape it reads the
+    /// contacts again, keeping the selection (the sheet may have found a
+    /// changed key). A lock reports nothing.
     private func showMailScreen() {
         guard let session else { return }
         let mail = MailViewController(session: session)
@@ -293,7 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let origin = EnvironmentProbe.origin(of: self.keyStore.identityKeyWithoutPrompt())
             ComposeSheet.present(on: window, to: contact, session: session, keyOrigin: origin,
                                  signer: self.letterSigner()) { thread in
-                if let thread { mail?.showSent(thread: thread, contact: id) } else { mail?.reloadContacts(selecting: id) }
+                if let thread { mail?.showSent(thread: thread, contact: id) } else { mail?.reloadContacts(selecting: nil) }
             }
         }
         present(mail)
@@ -388,7 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.root.show(screen)
             return
         }
-        let window = MainWindow(contentSize: NSSize(width: 900, height: 600))
+        let window = MainWindow(contentSize: NSSize(width: 1080, height: 680))
         window.root.show(screen)
         window.center()
         mainWindow = window

@@ -5,45 +5,90 @@
 // Localizable.strings, never content. They are drawn here instead of with
 // an AppKit text field (the forbidden-API check in scripts/test.sh keeps
 // those out of app/Sources), and are readable by VoiceOver because they are
-// not content. Never pass anything to this view that did not come from L10n.
+// not content. Never pass anything to this view that did not come from L10n
+// (or a date or a count). The styles are those of docs/UI_REDESIGN.md §3.1;
+// a text can be rewrapped to a new width (`setWidth`), for a column that
+// changes width.
 
 import AppKit
 
 final class InterfaceText: NSView {
     enum Style {
-        /// A screen's title.
+        /// A screen's title: 22 semibold.
         case title
-        /// A sheet's title.
+        /// A sheet's title: 15 semibold.
         case heading
+        /// 13 regular, the label colour.
         case body
+        /// 13 regular, secondary: a page's text, a form's label.
+        case secondary
+        /// 11 regular, secondary: a state or a note.
+        case caption
+        /// 11 semibold, secondary: a sidebar or form section's title.
+        case section
+        /// 15 semibold, secondary: an empty list's line.
+        case empty
+        /// 13 regular, tertiary: the empty reading pane.
+        case placeholder
 
         var font: NSFont {
             switch self {
             case .title: return NSFont.systemFont(ofSize: 22, weight: .semibold)
-            case .heading: return NSFont.systemFont(ofSize: 15, weight: .semibold)
-            case .body: return NSFont.systemFont(ofSize: 13)
+            case .heading, .empty: return NSFont.systemFont(ofSize: 15, weight: .semibold)
+            case .body, .secondary, .placeholder: return NSFont.systemFont(ofSize: 13)
+            case .caption: return NSFont.systemFont(ofSize: 11)
+            case .section: return NSFont.systemFont(ofSize: 11, weight: .semibold)
+            }
+        }
+
+        var color: NSColor {
+            switch self {
+            case .title, .heading, .body: return .labelColor
+            case .secondary, .caption, .section, .empty: return .secondaryLabelColor
+            case .placeholder: return .tertiaryLabelColor
             }
         }
     }
 
     private let text: String
-    private let attributes: [NSAttributedString.Key: Any]
-    private let size: NSSize
+    private var attributes: [NSAttributedString.Key: Any]
+    private var size: NSSize
 
-    /// `text` wrapped to `width` points.
-    init(_ text: String, style: Style = .body, width: CGFloat, alignment: NSTextAlignment = .center) {
+    /// `text` wrapped to `width` points, in `style`'s font and colour (or
+    /// `color`).
+    init(_ text: String, style: Style = .body, width: CGFloat, alignment: NSTextAlignment = .center,
+         color: NSColor? = nil) {
         self.text = text
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = alignment
-        attributes = [.font: style.font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph]
-        let height = text.boundingRect(with: NSSize(width: width, height: .greatestFiniteMagnitude),
-                                       options: .usesLineFragmentOrigin, attributes: attributes).height
-        size = NSSize(width: width, height: ceil(height))
-        super.init(frame: NSRect(origin: .zero, size: size))
+        attributes = [.font: style.font, .foregroundColor: color ?? style.color, .paragraphStyle: paragraph]
+        size = .zero
+        super.init(frame: .zero)
+        setWidth(width)
     }
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    /// Wraps the text to `width` points from now on.
+    func setWidth(_ width: CGFloat) {
+        let w = max(width, 1)
+        guard w != size.width else { return }
+        let height = text.boundingRect(with: NSSize(width: w, height: .greatestFiniteMagnitude),
+                                       options: .usesLineFragmentOrigin, attributes: attributes).height
+        size = NSSize(width: w, height: ceil(height))
+        setFrameSize(size)
+        invalidateIntrinsicContentSize()
+        needsDisplay = true
+    }
+
+    /// Draws in `font` from now on (a sheet's bold 13 pt title).
+    func setFont(_ font: NSFont) {
+        attributes[.font] = font
+        let w = size.width
+        size.width = -1
+        setWidth(w)
     }
 
     override var isFlipped: Bool { true }

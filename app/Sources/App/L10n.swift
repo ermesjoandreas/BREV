@@ -71,9 +71,21 @@ enum L10n {
     static let addressInviteBody = tr("address.invite.body")
     static let addressInviteNext = tr("address.invite.next")
 
-    static let mailNew = tr("mail.new")
-    static let mailLock = tr("mail.lock")
-    static let mailNoThreads = tr("mail.nothreads")
+    static let mailboxInbox = tr("mailbox.inbox")
+    static let mailboxSent = tr("mailbox.sent")
+    static let sidebarAdd = tr("sidebar.add")
+    static let toolbarNew = tr("toolbar.new")
+    static let toolbarLock = tr("toolbar.lock")
+    static let listEmptyInbox = tr("list.empty.inbox")
+    static let listEmptySent = tr("list.empty.sent")
+    static let listEmptyContact = tr("list.empty.contact")
+    static let listReceived = tr("list.received")
+    static let listSent = tr("list.sent")
+    /// «Klasse <A, B or C>»: a received letter's chip in the list.
+    static func chipClass(_ letter: String) -> String { String(format: tr("chip.class"), letter) }
+    static let readingNone = tr("reading.none")
+    static let readingFrom = tr("reading.from")
+    static let readingTo = tr("reading.to")
     /// "Sendt <date>".
     static func mailSent(_ date: String) -> String { String(format: tr("mail.sent"), date) }
     /// "Mottatt <date>".
@@ -100,7 +112,11 @@ enum L10n {
     static let netError = tr("net.error")
 
     static let contactsTitle = tr("contacts.title")
-    static let contactsMe = tr("contacts.me")
+    static let contactsSectionMe = tr("contacts.section.me")
+    static let contactsSectionInvite = tr("contacts.section.invite")
+    static let contactsSectionAdd = tr("contacts.section.add")
+    static let contactsAddress = tr("contacts.address")
+    static let contactsCode = tr("contacts.code")
     static let contactsCopyMe = tr("contacts.copyme")
     static let contactsField = tr("contacts.field")
     static let contactsAdd = tr("contacts.add")
@@ -127,8 +143,6 @@ enum L10n {
     static let requestAccept = tr("request.accept")
     static let requestDecline = tr("request.decline")
 
-    static let headerMe = tr("header.me")
-    static let headerCode = tr("header.code")
     static let contactWaiting = tr("contact.waiting")
     static let contactVerified = tr("contact.verified")
     static let contactBlocked = tr("contact.blocked")

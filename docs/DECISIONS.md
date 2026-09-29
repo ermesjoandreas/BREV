@@ -4502,3 +4502,107 @@ WP5 and their reviews record.
   misread as "B is almost as good". The owner prefers hard rules (lock,
   refuse) to grades (D-0109).
 - **Verified:** decision only.
+
+### D-0114 — a calm, Mail-like window; Innboks read only on a click
+
+- **Date:** 2026-09-29
+- **Decision (Q1 of docs/UI_REDESIGN.md, a §1.10 matter):** Brev starts on
+  the first contact, as before, and never opens a letter on its own.
+  Innboks and Sendt are read only when a human clicks them, because each
+  read makes Rust decrypt every subject once per contact, and Swift keeps
+  every subject and a copy of every name while the mailbox is open. A sync
+  keeps the selected letter by thread id; if that thread is gone, the
+  reading pane is cleared and no other row is selected. Chosen by the
+  implementing agent from the two options the review gave (the owner was
+  not asked: the owner does not test this by hand); the owner can still ask
+  for a core call `all_threads()`.
+- **Reasoning:** CLAUDE.md §1.10 (plaintext no longer than needed). Starting
+  on Innboks would decrypt every subject at each unlock and each sync with
+  new letters, with nobody asking to see them.
+- **Built (2026-09-29, branch `claude/ui-redesign`):** docs/UI_REDESIGN.md
+  with its review applied: a Mail-like window (sidebar, message list,
+  reading pane, unified toolbar), a Mail-like compose sheet, a grouped
+  Kontakter sheet with the own code, alert-like ConfirmSheet, ProofSheet with
+  its symbol, calmer pages, four content fonts (New York 15 for bodies) with
+  GlyphFlush per font, and `tools/snapshot`, which draws every screen
+  offscreen in light and dark and runs its checks in scripts/test.sh.
+- **Settled here (the spec left them open):**
+  1. No `.fullSizeContentView` (review 1 allowed dropping it); the snapshot
+     tool checks every ContentView lies inside `contentLayoutRect`.
+  2. The sidebar is a plain split view item with a flat tinted background,
+     not `sidebarWithViewController:`: on macOS 26 that is a floating glass
+     material that blurs what is behind it (no capture probe covers content
+     on it), and cacheDisplay cannot draw it. The toolbar's items are
+     unbordered for the same reason (their glass bezel drew as blank discs
+     offscreen).
+  3. The toolbar items target the mail screen directly (not the responder
+     chain), so they work whatever has focus; Lås calls the same `onLock`
+     the old Lås button did. MainWindow puts the frame back after adding or
+     removing the toolbar, and clears the subtitle with it.
+  4. In a mailbox, the whole ContactBar moves above the reading header for a
+     key-changed or blocked contact (review 5); the reading header does not
+     scroll with the letter.
+  5. After a send the list is read again with the open letter kept by
+     thread id; the sent letter is not opened (no auto-open).
+  6. Send gets the accent bezel, not a Return key equivalent (Return is a
+     new line in the body; ⌘↩ sends).
+  7. A one-letter thread shows its badge in the reading header; an older
+     multi-letter thread keeps a meta line and badge per letter.
+  8. List dates: today the time, this week the weekday, else dd.MM.yyyy
+     (nb_NO). A contact's rows say «Mottatt»/«Sendt» under the subject.
+  9. SecureListView's and MailboxListView's mouseDown/keyDown also drop a
+     synthetic event themselves (BrevApplication already does).
+  10. Test hooks: ComposeSheet's and ContactSheet's `init`, ContactSheet's
+      `made`, `SecureComposeView.relayout()`, `MailViewController.openThread`
+      and `syncOnce()` are internal for the snapshot tool; nothing in them
+      adds input, text or a way to show a window.
+  11. Unused strings removed: `mail.new`, `mail.lock`, `mail.nothreads`,
+      `header.me`, `header.code`, `contacts.me`.
+  12. The snapshot tool cannot count `body(message:)` calls (Session is
+      final), so it checks that no letter is open after start and after a
+      sync. Secure input after a compose scene must be off in Brev and as it
+      was before the run session-wide (another app may hold it). GlyphFlush
+      is timed per font there (about 25 ms each, budget 50); the harness
+      case is not repeated per font.
+- **Pinned expectations changed (the property still holds):** the lock
+  probe opens the letter with a human's ↓ (no auto-open) and finds the
+  badge in the reading header (still a HumanButton with the fixed title,
+  the only AX text there); the bar has one address row (the own address
+  moved to the sheet); ViewHost follows the same and skips its
+  scrolled-pools check for a one-letter thread (the pane holds only the
+  body now).
+- **Review round 2 (2026-09-29):**
+  1. Security: a mailbox is read only while `mailboxChosen` (a human chose
+     it). Brev falling back to Innboks by itself reads nothing, and a reload
+     (a contact that arrives by sync, a declined request) keeps a mailbox
+     only if a human chose it, else selects the first contact. The snapshot
+     tool checks it with a contact and a letter arriving for a new user
+     (control: the check fails with the old refresh).
+  2. Test coverage back: the snapshot tool checks that closing ContactSheet
+     wipes the own address and code and zeroes their pixels, that a sent
+     letter opens without a badge, and the scrolled-pools release on the
+     sidebar's two lists (ViewHost's own check skips a one-letter thread).
+     ViewHost lists `ownCode` too. test.sh's offscreen grep also catches
+     `setIsVisible(`, `orderBack`, `orderWindow(`, `.order(` and `unhide`;
+     an abort stops the relay and removes the temp stores.
+  3. SelfScan scans one glyph needle per content font laid out (F4, then
+     F1–F3, summed) and logs `fonts=` and a notice when none was, since
+     VERIFY puts the marker in subjects (SF) too.
+  4. The toolbar's Nytt brev and Lås stay plain toolbar items (harmless,
+     like their menu items); VERIFY V13 lists them.
+  5. Design: the sidebar has its own grey, the split view thin separator
+     dividers; the title is the mailbox's name (subtitle empty); a tracking
+     separator puts Nytt brev over the reading pane; a cut list text fades
+     out; the badge is secondary and lines up with «Fra:»; one empty state
+     (no «Ingen brev valgt» over an empty list, no «Ingen kontakter ennå»);
+     ContactSheet collapses rows with nothing in them; Send, Godta and Godta
+     ny kode get the accent bezel (Send also ⌘↩ as a key equivalent, a
+     human's key only); «Slett alt» has a red title and no Return; the
+     compose body lines up with «Til:»/«Emne:»; the contact bar lines up
+     with the rows. The accent bezel shows only in a key window, which the
+     snapshot tool never makes (it aborts if a window becomes key, §5.2), so
+     it checks the button settings instead of the pixels.
+- **Not verified:** nothing here was run on screen or with Touch ID (the
+  owner does not test this by hand). VERIFY's GUI rows (capture, AX
+  Inspector, V57) still apply to the new layout; see the note at the top of
+  docs/VERIFY.md.

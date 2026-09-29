@@ -3,7 +3,9 @@
 // Upholds CLAUDE.md §1.2, §1.3, §1.10 and §3.2 (docs/PHASE2_DESIGN.md §6.4,
 // §7.2). The body is a SecretText that this view owns: `clear()` wipes it,
 // and LetterStackView clears every letter on a new selection, a reload and
-// lock. It is laid out by TextLayout (CTLine only, at most 448 units per
+// lock. It is drawn in New York 15 on 22 pt lines (ContentView.fontF4,
+// docs/UI_REDESIGN.md §2.5), 24 pt from the pane's edges, in a column at
+// most 680 pt wide. It is laid out by TextLayout (CTLine only, at most 448 units per
 // line) when the width changes, and only the lines that meet the rect being
 // drawn are made into CTLines. There is no selection, no caret and no mouse
 // handling, so nothing can be selected, copied or dragged out. The view is
@@ -13,13 +15,15 @@ import AppKit
 
 final class SecureTextView: ContentView {
     /// Left and right margin of the text.
-    static let inset: CGFloat = 16
+    static let inset: CGFloat = 24
+    /// The widest the text column gets: a readable measure.
+    static let maxTextWidth: CGFloat = 680
     /// Lines are never broken narrower than this; a narrower view clips
     /// them. Narrower, each line holds a few units and costs a CTLine over
     /// up to 448 (at 1 pt, seconds for a long letter on every width change).
     static let minTextWidth: CGFloat = 200
 
-    private let layout = TextLayout(font: ContentView.contentFont)
+    private let layout = TextLayout(font: ContentView.fontF4, lineHeight: ContentView.bodyLineHeight)
     private var text: SecretText?
     /// The width the lines were broken for; -1 when there are none.
     private var laidOutWidth: CGFloat = -1
@@ -35,7 +39,7 @@ final class SecureTextView: ContentView {
     func height(forWidth width: CGFloat) -> CGFloat {
         guard let text else { return 0 }
         if width != laidOutWidth {
-            layout.layout(text, width: max(width - 2 * Self.inset, Self.minTextWidth))
+            layout.layout(text, width: min(max(width - 2 * Self.inset, Self.minTextWidth), Self.maxTextWidth))
             laidOutWidth = width
             needsDisplay = true
         }

@@ -8,17 +8,20 @@
 // labels, buttons and messages are interface text. The own address, an
 // invite code, an inviter's address and code (ContactTextViews) and the
 // field (a ContactField) are contact data, drawn only in the protected
-// layer. Rows, top to bottom:
-// 1. «Din adresse:», the own address, and Kopier adressen min, which puts
+// layer. A grouped form, like System Settings (docs/UI_REDESIGN.md §2.7):
+// three titled groups on rounded panels, then the result line and Lukk.
+// 1. «Deg»: «Adresse», the own address, and Kopier adressen min, which puts
 //    the address's bytes on the pasteboard (ContactPasteboard: plain text
 //    marked concealed and transient, emptied after 60 s and at quit if
-//    still Brev's).
-// 2. Lag invitasjon, one click and no Touch ID (owner answer 7):
+//    still Brev's); «Sikkerhetskode» and the own code (a UTF-16 copy the
+//    sheet owns), so a contact can compare it (it left the mail window).
+// 2. «Inviter noen»: Lag invitasjon, one click and no Touch ID (owner answer 7):
 //    `createInvite` on `Session.net`; the code shows on two lines (up to the
 //    inviter's address, then the fingerprint and the secret), and Kopier
 //    koden puts its bytes on the pasteboard. The sheet owns the code (a
 //    SecretBytes) until the next code, a close or a lock. invite.note below.
-// 3. «Adresse eller invitasjonskode:», the field (typed, or ⌘V) and Legg til
+// 3. «Legg til kontakt»: «Adresse eller invitasjonskode:», the field (typed,
+//    or ⌘V, in a rounded border) and Legg til
 //    (or Return or ⌘↩ in the field). Text that starts with "brev1." is an
 //    invite code: `openInvite` checks it against the relay's answer, the
 //    field is wiped, and «Invitert av:» shows the inviter's address and code
@@ -29,6 +32,9 @@
 //    is wiped and request.sent shows, or, if the contact already takes the
 //    user's letters, the sheet closes with it.
 // 4. One fixed text: the outcome or the error, or none.
+// Rows with nothing to show collapse (the code and Kopier koden until a code
+// exists, «Invitert av:» until an invite is opened), and the sheet fits its
+// content again.
 // Every button is a HumanButton. While a call is on its way the field is
 // read-only and the buttons are off. Lukk (or Escape) closes the sheet, and
 // so does a lock. However it closes, the field, the own address, the code
@@ -46,13 +52,17 @@ import os
 
 final class ContactSheet: HardenedWindow, ContentHolder {
     private static let log = Logger(subsystem: "no.brev.app", category: "contact")
-    private static let width: CGFloat = 600
+    private static let width: CGFloat = 520
     private static let margin: CGFloat = 20
-    private static let codeWidth = ContactHeaderView.codeWidth
+    /// The width inside a group's panel.
+    private static let groupInner: CGFloat = width - 2 * margin - 24
+    private static let codeWidth = ContactBar.codeWidth
 
     let field = ContactField()
     /// Row 0: the own address.
     let ownAddress = ContactTextView(rows: 1)
+    /// Row 0: the own identity code.
+    let ownCode = ContactTextView(rows: 1)
     /// Rows 0 and 1: an invite code made here.
     let codeView = ContactTextView(rows: 2)
     /// Row 0: an opened invite's inviter's address; row 1: its code.
@@ -63,7 +73,10 @@ final class ContactSheet: HardenedWindow, ContentHolder {
     private(set) var addButton: HumanButton?
     private(set) var acceptInviteButton: HumanButton?
     private var closeButton: HumanButton?
-    private let inviterLabel = InterfaceText(L10n.inviteFrom, width: 90, alignment: .left)
+    /// «Invitert av:», the inviter and Godta invitasjonen: collapsed until
+    /// an invite is opened.
+    private var inviterRow: NSStackView?
+    private let inviterLabel = InterfaceText(L10n.inviteFrom, style: .secondary, width: 90, alignment: .left)
 
     private let requestSent = ContactSheet.message(L10n.requestSent)
     private let notFound = ContactSheet.message(L10n.contactErrorNotFound)
@@ -112,7 +125,9 @@ final class ContactSheet: HardenedWindow, ContentHolder {
         return sheet
     }
 
-    private init(session: Session) {
+    /// Made by `present`; the snapshot tool makes one to draw it offscreen,
+    /// never shown.
+    init(session: Session) {
         self.session = session
         super.init(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 420), styleMask: [.titled],
                    backing: .buffered, defer: false)
@@ -130,7 +145,7 @@ final class ContactSheet: HardenedWindow, ContentHolder {
     }
 
     private static func message(_ text: String) -> InterfaceText {
-        InterfaceText(text, width: width - 2 * margin, alignment: .left)
+        InterfaceText(text, width: width - 2 * margin - 110, alignment: .left)
     }
 
     private static func sized(_ v: NSView, _ width: CGFloat, _ height: CGFloat) -> NSView {
@@ -148,8 +163,43 @@ final class ContactSheet: HardenedWindow, ContentHolder {
         return row
     }
 
+    /// A titled group: an 11 pt section title over a rounded panel.
+    private static func group(_ title: String, _ rows: [NSView]) -> NSStackView {
+        let panel = FormPanel()
+        let column = NSStackView(views: rows)
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 10
+        // A hidden row collapses (the code until one exists, the inviter).
+        column.detachesHiddenViews = true
+        column.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(column)
+        NSLayoutConstraint.activate([
+            column.topAnchor.constraint(equalTo: panel.topAnchor, constant: 12),
+            column.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12),
+            column.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
+            column.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
+            panel.widthAnchor.constraint(equalToConstant: width - 2 * margin),
+        ])
+        let section = NSStackView(views: [InterfaceText(title, style: .section, width: 300, alignment: .left), panel])
+        section.orientation = .vertical
+        section.alignment = .leading
+        section.spacing = 6
+        return section
+    }
+
+    /// A label over a value: «Adresse» over the own address, say.
+    private static func labelled(_ label: String, _ value: NSView, _ width: CGFloat, _ height: CGFloat) -> NSStackView {
+        let pair = NSStackView(views: [InterfaceText(label, style: .caption, width: width, alignment: .left),
+                                       sized(value, width, height)])
+        pair.orientation = .vertical
+        pair.alignment = .leading
+        pair.spacing = 2
+        return pair
+    }
+
     private func makeContent() -> NSView {
-        let inner = Self.width - 2 * Self.margin
+        let inner = Self.groupInner
         let line = ContactTextView.rowHeight
         let copyMe = HumanButton(title: L10n.contactsCopyMe, target: self, action: #selector(copyAddress(_:)))
         let make = HumanButton(title: L10n.inviteMake, target: self, action: #selector(makeInvite(_:)))
@@ -166,14 +216,23 @@ final class ContactSheet: HardenedWindow, ContentHolder {
         closeButton = close
 
         let scroll = NSScrollView()
-        scroll.borderType = .bezelBorder
-        scroll.drawsBackground = true
-        scroll.backgroundColor = .textBackgroundColor
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
         scroll.verticalScrollElasticity = .none
         scroll.horizontalScrollElasticity = .none
+        scroll.automaticallyAdjustsContentInsets = false
         scroll.documentView = field
+        let fieldBox = FieldBorder()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        fieldBox.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: fieldBox.topAnchor, constant: 1),
+            scroll.bottomAnchor.constraint(equalTo: fieldBox.bottomAnchor, constant: -1),
+            scroll.leadingAnchor.constraint(equalTo: fieldBox.leadingAnchor, constant: 2),
+            scroll.trailingAnchor.constraint(equalTo: fieldBox.trailingAnchor, constant: -2),
+        ])
 
-        // The messages share one place below the field.
+        // The messages share one place below the groups.
         let messageArea = NSView()
         for m in messages {
             m.translatesAutoresizingMaskIntoConstraints = false
@@ -181,37 +240,55 @@ final class ContactSheet: HardenedWindow, ContentHolder {
             NSLayoutConstraint.activate([m.topAnchor.constraint(equalTo: messageArea.topAnchor),
                                          m.leadingAnchor.constraint(equalTo: messageArea.leadingAnchor)])
         }
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [
-            InterfaceText(L10n.contactsTitle, style: .heading, width: inner, alignment: .left),
-            Self.row([InterfaceText(L10n.contactsMe, width: 90, alignment: .left), Self.sized(ownAddress, 260, line),
-                      copyMe]),
+        // A spacer before a trailing button, so it ends 12 pt from the panel
+        // edge, as the leading inset.
+        func trailing(_ views: [NSView]) -> NSStackView {
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            let row = Self.row(Array(views.dropLast()) + [spacer, views.last!])
+            row.widthAnchor.constraint(equalToConstant: inner).isActive = true
+            return row
+        }
+        let me = Self.group(L10n.contactsSectionMe, [
+            trailing([Self.labelled(L10n.contactsAddress, ownAddress, inner - 180, line), copyMe]),
+            Self.labelled(L10n.contactsCode, ownCode, inner, line),
+        ])
+        let invite = Self.group(L10n.contactsSectionInvite, [
             Self.row([make, copyCode]),
             Self.sized(codeView, inner, 2 * line),
-            InterfaceText(L10n.inviteNote, width: inner, alignment: .left),
-            InterfaceText(L10n.contactsField, width: inner, alignment: .left),
-            Self.row([Self.sized(scroll, inner - 110, 26), add]),
-            Self.row([inviterLabel, Self.sized(inviterView, Self.codeWidth, 2 * line), accept]),
-            Self.sized(messageArea, inner, 36),
-            Self.row([spacer, close]),
+            InterfaceText(L10n.inviteNote, style: .caption, width: inner, alignment: .left),
+        ])
+        let inviter = Self.row([inviterLabel, Self.sized(inviterView, Self.codeWidth, 2 * line), accept])
+        inviterRow = inviter
+        let addGroup = Self.group(L10n.contactsSectionAdd, [
+            InterfaceText(L10n.contactsField, style: .caption, width: inner, alignment: .left),
+            trailing([Self.sized(fieldBox, inner - 100, 28), add]),
+            inviter,
+        ])
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let bottom = Self.row([Self.sized(messageArea, Self.width - 2 * Self.margin - 110, 36), spacer, close])
+        let stack = NSStackView(views: [
+            InterfaceText(L10n.contactsTitle, style: .heading, width: Self.width - 2 * Self.margin, alignment: .left),
+            me, invite, addGroup, bottom,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
-        // Hidden views keep their place, so the sheet keeps its size.
+        stack.spacing = 16
+        // The messages' row keeps its place; the groups' rows collapse
+        // (group()), and `show` fits the sheet to them.
         stack.detachesHiddenViews = false
         stack.edgeInsets = NSEdgeInsets(top: Self.margin, left: Self.margin, bottom: Self.margin, right: Self.margin)
-        stack.setCustomSpacing(16, after: stack.arrangedSubviews[0])
-        stack.setCustomSpacing(16, after: stack.arrangedSubviews[4])
-        stack.arrangedSubviews.last?.widthAnchor.constraint(equalToConstant: inner).isActive = true
+        bottom.widthAnchor.constraint(equalToConstant: Self.width - 2 * Self.margin).isActive = true
         return stack
     }
 
-    /// The own address in row 1 (the view owns it; the code is wiped).
+    /// The own address and code in the first group (the view owns the
+    /// address and a UTF-16 copy of the code; the code's bytes are wiped).
     private func showOwnAddress() {
         do {
             if let me = try session?.me() {
+                ownCode.set(0, Self.text(me.code, 0..<me.code.count))
                 me.code.wipe()
                 ownAddress.set(0, me.address)
             }
@@ -221,17 +298,26 @@ final class ContactSheet: HardenedWindow, ContentHolder {
     }
 
     /// Shows `message` (or none), with the buttons and the field on unless
-    /// a call is under way. Kopier koden needs a code; Godta invitasjonen
-    /// and «Invitert av:» an opened invite.
+    /// a call is under way. The code and Kopier koden show only with a
+    /// code; «Invitert av:» and Godta invitasjonen only with an opened
+    /// invite. The sheet then fits its content.
     private func show(_ message: InterfaceText?, busy: Bool = false) {
         self.busy = busy
         for m in messages { m.isHidden = m !== message }
         field.isEditable = !busy
         for b in [copyAddressButton, makeInviteButton, addButton, closeButton] { b?.isEnabled = !busy }
+        copyCodeButton?.isHidden = code == nil
         copyCodeButton?.isEnabled = !busy && code != nil
+        codeView.isHidden = code == nil
+        inviterRow?.isHidden = !inviteOpened
         inviterLabel.isHidden = !inviteOpened
         acceptInviteButton?.isHidden = !inviteOpened
         acceptInviteButton?.isEnabled = !busy
+        if let content = contentView {
+            content.layoutSubtreeIfNeeded()
+            let size = content.fittingSize
+            if size != content.frame.size { setContentSize(size) }
+        }
     }
 
     // MARK: - Actions (HumanButton: only a human's press gets here; the view
@@ -264,7 +350,8 @@ final class ContactSheet: HardenedWindow, ContentHolder {
         }
     }
 
-    private func made(_ result: Result<SecretBytes, Error>) {
+    /// A code from Lag invitasjon (the snapshot tool hands it one directly).
+    func made(_ result: Result<SecretBytes, Error>) {
         switch result {
         case .success(let made):
             clearCode()
@@ -506,8 +593,35 @@ final class ContactSheet: HardenedWindow, ContentHolder {
         SecureInput.disable()
         field.wipe()
         ownAddress.clear()
+        ownCode.clear()
         clearCode()
         clearInviter()
         show(nil)
+    }
+}
+
+/// A form group's panel: controlBackgroundColor with a 1 pt separator
+/// border, rounded. Chrome.
+private final class FormPanel: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 8, yRadius: 8)
+        NSColor.controlBackgroundColor.setFill()
+        path.fill()
+        NSColor.separatorColor.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+}
+
+/// The rounded 1 pt border around an address or code field (the field
+/// itself is a ContentView and draws only its text). Chrome.
+final class FieldBorder: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        NSColor.textBackgroundColor.setFill()
+        path.fill()
+        NSColor.separatorColor.setStroke()
+        path.lineWidth = 1
+        path.stroke()
     }
 }
