@@ -2,7 +2,7 @@
 //! facts.
 
 use brev_proto::SIG_LEN;
-use brev_vault::{EnvironmentClass, KeyOrigin};
+use brev_vault::KeyOrigin;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
 
@@ -57,14 +57,13 @@ pub(crate) fn good_env() -> Env {
     }
 }
 
-/// Class-A claims for `letter` at [`IAT`], with a fixed nonce.
+/// Claims that meet every requirement, for `letter` at [`IAT`], with a fixed nonce.
 pub(crate) fn claims(letter: &[u8]) -> Claims {
     Claims {
         iat: IAT,
         nonce: [7; 16],
         env: good_env(),
         key: KeyOrigin::SecureEnclave,
-        class: EnvironmentClass::A,
         content: content_hash(letter),
         platform: MACOS,
         app_attest: None,

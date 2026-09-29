@@ -25,7 +25,8 @@ pub const AGENTS: [&str; 9] = [
 /// (0x08) and unrestricted dtrace (0x20). Any of them set is "SIP off".
 pub const SIP_GUARDS: u32 = 0x2F;
 
-/// A gap in the measuring longer than this many seconds gives class B.
+/// A gap in the measuring longer than this many seconds fails the
+/// requirements (`max-gap`).
 pub const MAX_GAP_SECONDS: u32 = 5;
 
 /// One on-screen window, as `CGWindowListCopyWindowInfo` lists it.
@@ -109,7 +110,7 @@ pub enum LockReason {
 }
 
 /// The lock rule for one sample: empty when Brev may stay unlocked. A read
-/// that failed is no reason to lock (it gives class B instead).
+/// that failed is no reason to lock (it fails the requirements instead).
 pub fn lock_reasons(s: &Sample) -> Vec<LockReason> {
     let mut out = Vec::new();
     if s.processes.as_deref().map(sudo_count).unwrap_or(0) > 0 {

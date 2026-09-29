@@ -1,18 +1,28 @@
-//! The class rule (docs/AUTHORSHIP.md §4.1), one function for the sender
-//! (which refuses to send below A) and the recipient (which checks the
-//! claimed class against the facts).
+//! The requirements (docs/AUTHORSHIP.md §4.1), one function for the sender
+//! (which refuses to send unless they all hold) and the recipient (which
+//! checks the facts in the token against them).
 //!
-//! The base is the vault's rule over the platform's defences
-//! ([`brev_vault::classify`]); Hand adds what it measured.
+//! The base is the vault's check of the platform's defences
+//! ([`brev_vault::failed_fields`]); Hand adds what it measured.
 
-use brev_vault::{failed_fields, EnvironmentClass, EnvironmentReport, KeyOrigin, ReportField};
+use brev_vault::{failed_fields, EnvironmentReport, KeyOrigin, ReportField};
 
 use crate::facts::{Env, MAX_GAP_SECONDS};
 
-/// The class of a letter written with a key in `key` under `env`, and the
-/// names of the facts that keep it from A (token key names, in token
-/// order, each once): empty exactly when the class is A.
-pub fn classify(key: KeyOrigin, env: &Env) -> (EnvironmentClass, Vec<&'static str>) {
+/// Which requirements apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rule {
+    /// Every requirement: Brev's app.
+    All,
+    /// Every requirement but the hardware key: test archives only
+    /// (brev-mail's `allow-software-keys`), whose keys are software keys.
+    AnyKey,
+}
+
+/// The names of the requirements a letter written with a key in `key`
+/// under `env` does not meet under `rule` (token key names, in token order,
+/// `"key"` first, each once): empty when it meets them all.
+pub fn unmet(key: KeyOrigin, env: &Env, rule: Rule) -> Vec<&'static str> {
     let report = EnvironmentReport {
         key_origin: key,
         // The identity key's access control asks for Touch ID on every
@@ -24,11 +34,10 @@ pub fn classify(key: KeyOrigin, env: &Env) -> (EnvironmentClass, Vec<&'static st
         accessibility_opaque: env.ax_opaque,
         pasteboard_disabled: env.pasteboard_off,
     };
-    let base = brev_vault::classify(&report);
-    let base_failed: Vec<&'static str> = failed_fields(&report).into_iter().map(name).collect();
-    if base == EnvironmentClass::C {
-        return (base, base_failed);
-    }
+    let base = failed_fields(&report)
+        .into_iter()
+        .filter(|&f| !(rule == Rule::AnyKey && f == ReportField::KeyOrigin))
+        .map(name);
     let failed: Vec<&'static str> = [
         ("sip", env.sip != Some(true)),
         ("sudo", env.sudo != Some(0)),
@@ -41,15 +50,9 @@ pub fn classify(key: KeyOrigin, env: &Env) -> (EnvironmentClass, Vec<&'static st
     .into_iter()
     .filter(|&(_, bad)| bad)
     .map(|(n, _)| n)
-    .chain(base_failed)
+    .chain(base)
     .collect();
-    let failed = in_token_order(failed);
-    let class = if failed.is_empty() {
-        EnvironmentClass::A
-    } else {
-        EnvironmentClass::B
-    };
-    (class, failed)
+    in_token_order(failed)
 }
 
 fn name(f: ReportField) -> &'static str {
@@ -65,6 +68,8 @@ fn name(f: ReportField) -> &'static str {
     }
 }
 
+/// `"key"` (not a fact) first, then the facts in [`crate::token::ENV_KEYS`]
+/// order.
 fn in_token_order(mut names: Vec<&'static str>) -> Vec<&'static str> {
     let rank = |n: &&str| crate::token::ENV_KEYS.iter().position(|k| k == n);
     names.sort_by_key(rank);
@@ -78,26 +83,26 @@ mod tests {
     use crate::test_keys::good_env;
 
     #[test]
-    fn a_clean_env_with_an_enclave_key_is_a() {
-        assert_eq!(
-            classify(KeyOrigin::SecureEnclave, &good_env()),
-            (EnvironmentClass::A, vec![])
-        );
-        assert_eq!(classify(KeyOrigin::Tpm, &good_env()).0, EnvironmentClass::A);
-    }
-
-    #[test]
-    fn a_software_or_unknown_key_is_c() {
-        for key in [KeyOrigin::Software, KeyOrigin::Unknown] {
-            assert_eq!(
-                classify(key, &good_env()),
-                (EnvironmentClass::C, vec!["key"])
-            );
+    fn a_clean_env_with_a_hardware_key_meets_them_all() {
+        for key in [KeyOrigin::SecureEnclave, KeyOrigin::Tpm] {
+            for rule in [Rule::All, Rule::AnyKey] {
+                assert_eq!(unmet(key, &good_env(), rule), Vec::<&str>::new());
+            }
         }
     }
 
     #[test]
-    fn each_rule_gives_b_and_names_its_fact() {
+    fn a_software_or_unknown_key_fails_key_unless_any_key() {
+        for key in [KeyOrigin::Software, KeyOrigin::Unknown] {
+            assert_eq!(unmet(key, &good_env(), Rule::All), vec!["key"]);
+            assert_eq!(unmet(key, &good_env(), Rule::AnyKey), Vec::<&str>::new());
+        }
+    }
+
+    /// Every requirement of §4.1 alone, under both rules and with either
+    /// key: `AnyKey` skips the key and nothing else.
+    #[test]
+    fn each_requirement_fails_alone_and_names_its_fact() {
         type Change = fn(&mut Env);
         let cases: [(&str, Change); 14] = [
             ("sip", |e| e.sip = Some(false)),
@@ -118,16 +123,28 @@ mod tests {
         for (fact, change) in cases {
             let mut env = good_env();
             change(&mut env);
+            for rule in [Rule::All, Rule::AnyKey] {
+                assert_eq!(
+                    unmet(KeyOrigin::SecureEnclave, &env, rule),
+                    vec![fact],
+                    "{fact}"
+                );
+            }
             assert_eq!(
-                classify(KeyOrigin::SecureEnclave, &env),
-                (EnvironmentClass::B, vec![fact]),
+                unmet(KeyOrigin::Software, &env, Rule::AnyKey),
+                vec![fact],
+                "{fact}"
+            );
+            assert_eq!(
+                unmet(KeyOrigin::Software, &env, Rule::All),
+                vec!["key", fact],
                 "{fact}"
             );
         }
     }
 
     #[test]
-    fn numbers_shown_only_never_lower_the_class() {
+    fn numbers_shown_only_never_fail() {
         let mut env = good_env();
         env.admin = Some(true);
         env.agents = Some(3);
@@ -135,10 +152,7 @@ mod tests {
         env.blocked_input = 40;
         env.seconds = 1;
         env.max_gap = MAX_GAP_SECONDS;
-        assert_eq!(
-            classify(KeyOrigin::SecureEnclave, &env).0,
-            EnvironmentClass::A
-        );
+        assert!(unmet(KeyOrigin::SecureEnclave, &env, Rule::All).is_empty());
     }
 
     #[test]
@@ -149,8 +163,8 @@ mod tests {
         env.capture_off = Some(false);
         env.sudo = Some(2);
         assert_eq!(
-            classify(KeyOrigin::SecureEnclave, &env).1,
-            vec!["sip", "sudo", "capture-off", "pasteboard-off"]
+            unmet(KeyOrigin::Unknown, &env, Rule::All),
+            vec!["key", "sip", "sudo", "capture-off", "pasteboard-off"]
         );
     }
 }

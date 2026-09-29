@@ -10,15 +10,15 @@
 //! has one encoding of its claims.
 
 use brev_proto::SIG_LEN;
-use brev_vault::{EnvironmentClass, KeyOrigin};
+use brev_vault::KeyOrigin;
 use ciborium::Value;
 use sha2::{Digest, Sha256};
 
-use crate::class::classify;
 use crate::facts::Env;
 
-/// `eat_profile` (a placeholder until the owner picks a domain).
-pub const PROFILE: &str = "tag:brev.no,2026:hand-v1";
+/// `eat_profile`. v2 has no `"class"` claim (docs/DECISIONS.md D-0115); a
+/// v1 token fails its form.
+pub const PROFILE: &str = "tag:ermesjoandreas.github.io,2026:hand-v2";
 /// Largest token.
 pub const MAX_TOKEN: usize = 2048;
 /// The protected header: `{1: -7}`, alg ES256, and nothing else.
@@ -33,13 +33,12 @@ const EAT_PROFILE: u64 = 265;
 
 /// The claim keys in encoding order; `"app-attest"` is the only optional
 /// one and comes last.
-pub const CLAIM_KEYS: [&str; 9] = [
+pub const CLAIM_KEYS: [&str; 8] = [
     "6",
     "10",
     "265",
     "env",
     "key",
-    "class",
     "content",
     "platform",
     "app-attest",
@@ -74,8 +73,6 @@ pub struct Claims {
     pub env: Env,
     /// Where the identity key lives.
     pub key: KeyOrigin,
-    /// The class the sender computed.
-    pub class: EnvironmentClass,
     /// [`content_hash`] of the letter.
     pub content: [u8; 32],
     /// [`MACOS`].
@@ -96,9 +93,9 @@ pub fn content_hash(letter: &[u8]) -> [u8; 32] {
 }
 
 impl Claims {
-    /// The sender's claims for `letter` at `iat`: a fresh nonce, the
-    /// content hash and the class of `key` and `env`. The caller decides
-    /// whether that class may be sent.
+    /// The sender's claims for `letter` at `iat`: a fresh nonce and the
+    /// content hash. The caller decides whether `key` and `env` meet the
+    /// requirements (a token is made only when they do).
     pub fn new(
         letter: &[u8],
         iat: u64,
@@ -108,7 +105,6 @@ impl Claims {
         Ok(Claims {
             iat,
             nonce: brev_vault::random()?,
-            class: classify(key, &env).0,
             env,
             key,
             content: content_hash(letter),
@@ -125,7 +121,6 @@ impl Claims {
             (int(EAT_PROFILE), text(PROFILE)),
             (text("env"), env_value(&self.env)),
             (text("key"), int(key_code(self.key))),
-            (text("class"), int(class_code(self.class))),
             (text("content"), Value::Bytes(self.content.to_vec())),
             (text("platform"), int(u64::from(self.platform))),
         ];
@@ -142,7 +137,7 @@ impl Claims {
         let Ok(Value::Map(entries)) = ciborium::from_reader::<Value, _>(payload) else {
             return Err("payload");
         };
-        if !(8..=9).contains(&entries.len()) {
+        if !(7..=8).contains(&entries.len()) {
             return Err("payload");
         }
         for (i, (k, _)) in entries.iter().enumerate() {
@@ -156,10 +151,9 @@ impl Claims {
             nonce: bytes(v(1), "eat_nonce")?,
             env: env_from(v(3))?,
             key: key_from(uint(v(4), "key")?).ok_or("key")?,
-            class: class_from(uint(v(5), "class")?).ok_or("class")?,
-            content: bytes(v(6), "content")?,
-            platform: u8::try_from(uint(v(7), "platform")?).map_err(|_| "platform")?,
-            app_attest: match entries.get(8) {
+            content: bytes(v(5), "content")?,
+            platform: u8::try_from(uint(v(6), "platform")?).map_err(|_| "platform")?,
+            app_attest: match entries.get(7) {
                 Some((_, Value::Bytes(a))) => Some(a.clone()),
                 Some(_) => return Err("app-attest"),
                 None => None,
@@ -387,20 +381,6 @@ fn key_from(code: u64) -> Option<KeyOrigin> {
     })
 }
 
-fn class_code(c: EnvironmentClass) -> u64 {
-    c.code().unsigned_abs()
-}
-
-fn class_from(code: u64) -> Option<EnvironmentClass> {
-    [
-        EnvironmentClass::A,
-        EnvironmentClass::B,
-        EnvironmentClass::C,
-    ]
-    .into_iter()
-    .find(|c| class_code(*c) == code)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,7 +482,7 @@ mod tests {
         assert_eq!(Claims::decode(&map(extra)), Err("payload"));
 
         let mut tagged = entries();
-        tagged[6].1 = Value::Tag(24, Box::new(tagged[6].1.clone()));
+        tagged[5].1 = Value::Tag(24, Box::new(tagged[5].1.clone()));
         assert_eq!(Claims::decode(&map(tagged)), Err("content"));
 
         let mut env_swapped = entries();
@@ -598,15 +578,70 @@ mod tests {
         e[4].1 = int(9);
         assert_eq!(Claims::decode(&enc(&Value::Map(e))), Err("key"));
         let mut e = entries();
-        e[5].1 = int(0);
-        assert_eq!(Claims::decode(&enc(&Value::Map(e))), Err("class"));
-        let mut e = entries();
-        e[7].1 = int(2);
+        e[6].1 = int(2);
         assert_eq!(Claims::decode(&enc(&Value::Map(e))), Err("platform"));
         let mut e = entries();
         e[2].1 = text("tag:other,2026:x");
         assert_eq!(Claims::decode(&enc(&Value::Map(e))), Err("eat_profile"));
     }
+
+    /// A v1 token (docs/DECISIONS.md D-0115): its `"class"` claim between
+    /// `"key"` and `"content"`, or its profile, fails the form.
+    #[test]
+    fn a_v1_token_fails_its_form() {
+        let mut with_class = entries();
+        with_class.insert(5, (text("class"), int(1)));
+        assert_eq!(
+            Claims::decode(&enc(&Value::Map(with_class.clone()))),
+            Err("content")
+        );
+        with_class.push((text("app-attest"), Value::Bytes(vec![1])));
+        assert_eq!(
+            Claims::decode(&enc(&Value::Map(with_class))),
+            Err("payload")
+        );
+        let mut v1 = entries();
+        v1[2].1 = text("tag:brev.no,2026:hand-v1");
+        assert_eq!(Claims::decode(&enc(&Value::Map(v1))), Err("eat_profile"));
+    }
+
+    /// A token made now, byte for byte: test key 5 (ECDSA with RFC 6979
+    /// nonces, so the signature is fixed too) over [`claims`] of
+    /// `b"letter"`. A later change to the encoding or the claims shows
+    /// here (docs/SDK_DESIGN.md §12 step 2).
+    #[test]
+    fn a_fixed_token_encodes_byte_for_byte() {
+        let key = TestKey::new(5);
+        let token = crate::test_keys::signed(&key, &claims(b"letter"));
+        let hex: String = token.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, FIXED_TOKEN);
+        let p = parse(&token).unwrap();
+        assert_eq!(p.claims, claims(b"letter"));
+        assert_eq!(assemble(&p.claims.encode(), &p.signature), token);
+        let v = crate::verify(
+            b"letter",
+            &token,
+            &key.public,
+            crate::test_keys::IAT,
+            crate::Rule::All,
+        );
+        assert!(v.passed());
+    }
+
+    const FIXED_TOKEN: &str = concat!(
+        "8443a10126a0590116a7061a6ab13b800a500707070707070707070707070707",
+        "070719010978297461673a65726d65736a6f616e64726561732e676974687562",
+        "2e696f2c323032363a68616e642d763263656e76ae63736970f5647375646f00",
+        "6561646d696ef5666167656e7473006670617374657300676d61782d67617002",
+        "677365636f6e6473183c6777696e646f7773006961782d6f7061717565f56b63",
+        "6170747572652d6f6666f56c696e7075742d66696c746572f56c736563757265",
+        "2d696e707574f56d626c6f636b65642d696e707574006e7061737465626f6172",
+        "642d6f6666f5636b65790167636f6e74656e745820e123d942342ce41b2272da",
+        "13c1b97e04a4a09a2bc1375157e4cc1d029c263f2c68706c6174666f726d0158",
+        "4041b5204a41a5255a20172433671ce9bd3e2009140bdf96ff8bbbc85c6a1444",
+        "f1a7d3db3bb95238a2a94a20adff37670c9253aa3085a6ec6beffa5de6a848b8",
+        "0f",
+    );
 
     #[test]
     fn token_and_envelope_signatures_do_not_cross() {

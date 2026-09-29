@@ -9,8 +9,8 @@
 //! unlock and the idle deadline with their [`Timer`] ([`Clock`]), the
 //! length-hiding padding ([`padding`]), decrypted values that wipe
 //! themselves ([`Plaintext`], [`Text`]), the stack scrubs, the zeroing
-//! global allocator (feature `zeroing-allocator`), and the environment class
-//! of a platform's report ([`classify`]).
+//! global allocator (feature `zeroing-allocator`), and the fields of a
+//! platform's environment report that fail ([`failed_fields`]).
 //!
 //! What a store holds is the caller's: the file name, `application_id`,
 //! schema and schema version come in a [`VaultConfig`], and the rows are
@@ -45,9 +45,7 @@ pub use crypto::{
 };
 pub use error::Error;
 pub use launch::launch_check;
-pub use platform::{
-    classify, failed_fields, EnvironmentClass, EnvironmentReport, KeyOrigin, Platform, ReportField,
-};
+pub use platform::{failed_fields, EnvironmentReport, KeyOrigin, ReportField};
 pub use store::{check_path, DekSlot, Vault, VaultConfig};
 pub use text::{Text, CHUNK};
 

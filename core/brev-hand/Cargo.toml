@@ -1,6 +1,6 @@
 [package]
 name = "brev-hand"
-description = "Brev Hand: the authorship token, the environment facts, the class rule and the lock rule (docs/AUTHORSHIP.md)"
+description = "Brev Hand: the authorship token, the environment facts, the requirements and the lock rule (docs/AUTHORSHIP.md)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,8 +12,8 @@ ciborium = { workspace = true }
 sha2 = { workspace = true }
 # P-256 verification, shared with the envelope (brev-proto::sig).
 brev-proto = { path = "../brev-proto" }
-# KeyOrigin, EnvironmentClass, the base class rule, the OS RNG and the stack
-# scrub. No allocator: brev-mail turns it on for the app's archive.
+# KeyOrigin, the platform's defences (failed_fields), the OS RNG and the
+# stack scrub. No allocator: brev-mail turns it on for the app's archive.
 brev-vault = { path = "../brev-vault", default-features = false }
 
 [dev-dependencies]
