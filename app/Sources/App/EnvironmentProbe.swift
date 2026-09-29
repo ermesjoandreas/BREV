@@ -11,9 +11,10 @@
 // from what Brev does: every content view opaque to accessibility, no Copy,
 // Cut or Paste that any responder would take, and the application class
 // that drops synthetic input. In a correct Brev all three are true; a bug
-// that breaks one lowers the letter's class. The identity key's origin is
-// its own kSecAttrTokenID. It is Brev's own word: until attestation, the
-// class catches bugs in Brev, not attackers (CLAUDE.md §2). Reads no
+// that breaks one fails a requirement, and the letter is not sent. The
+// identity key's origin is its own kSecAttrTokenID. It is Brev's own word:
+// until attestation, the requirements catch bugs in Brev, not attackers
+// (CLAUDE.md §2). Reads no
 // content. Main thread only.
 
 import AppKit

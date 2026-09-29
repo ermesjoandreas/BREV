@@ -1577,6 +1577,15 @@ func caseNetwork() {
         check("the identity key is a software key, and says so", a.keyOrigin == .software)
         check("without a compose session, a send is refused with no fact named (Environment)",
               throwsError(.Environment(failed: [])) { try a.session.prepareSend(contact: aSeesB, sample: cleanSample) })
+        // The one Swift case with a false fact (D-0115): the test archive
+        // skips only the key, so a design that leaves AX open is refused.
+        check("a compose session whose design is not AX-opaque is refused at send, naming that fact (Environment)",
+              throwsError(.Environment(failed: ["ax-opaque"])) {
+                  try a.session.composeStarted(design: Design(axOpaque: false, pasteboardOff: true, inputFilter: true),
+                                               admin: harnessAdmin, keyOrigin: a.keyOrigin)
+                  defer { try? a.session.composeClosed() }
+                  try a.session.prepareSend(contact: aSeesB, sample: cleanSample)
+              })
         do {
             try a.session.composeStarted(design: harnessDesign, admin: harnessAdmin, keyOrigin: a.keyOrigin)
             try a.session.prepareSend(contact: aSeesB, sample: cleanSample)
@@ -1621,7 +1630,7 @@ func caseNetwork() {
                 + "nothing failed, the counts of the clean sample; A's own copy has no proof",
               proof?.verified == true && proof?.attested == false && proof?.failed == []
                   && proof?.windows == 0 && proof?.agents == 0 && proof?.sudo == 0 && proof?.sip == true
-                  && proof?.admin == false && proof?.blockedInput == 0
+                  && proof?.admin == false && proof?.blockedInput == 0 && proof?.hardwareKey == false
                   && own.map { (try? a.session.letterProof(message: $0.id)) == .some(nil) } == true,
               "\(String(describing: proof))")
         received?.subject.wipe()

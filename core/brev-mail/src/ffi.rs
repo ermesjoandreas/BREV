@@ -38,10 +38,11 @@
 //! names, and it carries a token that the identity key signs with the same
 //! Touch ID as the envelope: `sign_request` gives the token's digest,
 //! `attach_token_signature` seals the letter with the token and gives the
-//! envelope's. The app has no call that sets a count or a result. The facts are still the app's own word: until attestation they
-//! catch bugs in the app, not attackers (CLAUDE.md §2). A received letter's
-//! token is checked and its result stored; [`Brev::letter_proof`] reads it
-//! for the badge.
+//! envelope's. The app has no call that sets a count or a result. The
+//! facts are still the app's own word: until attestation they catch bugs in
+//! the app, not attackers (CLAUDE.md §2). A received letter's token is
+//! checked and its result stored; [`Brev::letter_proof`] reads it for the
+//! badge.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -365,8 +366,12 @@ pub struct Proof {
     /// Apple's App Attest vouched for the app: always false on Mac
     /// (D-0108), «Appen er ikke bekreftet av Apple».
     pub attested: bool,
-    /// The sender's app reported: the user is an admin. Like every number
-    /// below, only when verified, and `None` for a fact it could not read.
+    /// The token says the sender's key is in hardware (a Secure Enclave or
+    /// a TPM), as the sender's app reported. Like every fact below, only
+    /// when verified, and `None` for an origin it could not name. False
+    /// only in a test archive, which accepts a software key.
+    pub hardware_key: Option<bool>,
+    /// The sender's app reported: the user is an admin.
     pub admin: Option<bool>,
     /// Known AI programs running.
     pub agents: Option<u32>,
@@ -389,11 +394,13 @@ impl From<&Verification> for Proof {
             .iter()
             .flat_map(|o| o.failed.iter().map(|&n| n.to_owned()))
             .collect();
-        let env = v.claims.as_ref().filter(|_| v.passed()).map(|c| c.env);
+        let claims = v.claims.as_ref().filter(|_| v.passed());
+        let env = claims.map(|c| c.env);
         Proof {
             verified: v.passed(),
             failed,
             attested: false,
+            hardware_key: claims.and_then(|c| hardware(c.key)),
             admin: env.and_then(|e| e.admin),
             agents: env.and_then(|e| e.agents),
             windows: env.and_then(|e| e.windows),
@@ -1360,10 +1367,10 @@ impl Brev {
     /// is used up either way). Then the compose session's facts are frozen
     /// with the sample, and they must meet the requirements (§3.3):
     /// `Environment` with the ones not met otherwise, also without a
-    /// compose session. No I/O. Keeps the letter's plaintext (a vault `Plaintext`,
-    /// which `cancel_send` and a lock wipe) and the claims, with the
-    /// sender's clock as `iat`, and returns the digest of the token the
-    /// identity key signs. Any failure forgets the letter.
+    /// compose session. No I/O. Keeps the letter's plaintext (a vault
+    /// `Plaintext`, which `cancel_send` and a lock wipe) and the claims,
+    /// with the sender's clock as `iat`, and returns the digest of the
+    /// token the identity key signs. Any failure forgets the letter.
     pub fn sign_request(
         &self,
         contact: Vec<u8>,
@@ -1942,6 +1949,17 @@ fn allowed(key: brev_vault::KeyOrigin, env: &Env) -> Result<(), BrevError> {
         Ok(())
     } else {
         Err(names(failed))
+    }
+}
+
+/// Whether a token's key origin is hardware (ProofSheet's key line); `None`
+/// when the sender's app could not name it.
+fn hardware(key: brev_vault::KeyOrigin) -> Option<bool> {
+    use brev_vault::KeyOrigin::{SecureEnclave, Software, Tpm, Unknown};
+    match key {
+        SecureEnclave | Tpm => Some(true),
+        Software => Some(false),
+        Unknown => None,
     }
 }
 

@@ -361,9 +361,9 @@ FfiConverterTypeRequestRow.write(item, into: &buf)
 # (three flags), the admin flag (Bool?) and the KeyOrigin. The input events
 # (syntheticDropped, pasteAccepted) carry nothing. Rust to app: observe's
 # list of LockCause; BrevError.Environment's list of fact names; and
-# letterProof's Proof? (verified, failed names, attested, and admin,
-# agents, windows, blockedInput, seconds, sip, sudo, each optional). Flags, fixed names, counts and process names only, no
-# content.
+# letterProof's Proof? (verified, failed names, attested, and hardwareKey,
+# admin, agents, windows, blockedInput, seconds, sip, sudo, each optional).
+# Flags, fixed names, counts and process names only, no content.
 FfiConverterTypeDesign_lower(design),
 FfiConverterOptionBool.lower(admin),
 FfiConverterTypeKeyOrigin_lower(keyOrigin),uniffiCallStatus
@@ -455,6 +455,8 @@ failed: FfiConverterSequenceString.read(from: &buf),
 FfiConverterSequenceString.write(value.failed, into: &buf)
 attested: FfiConverterBool.read(from: &buf),
 FfiConverterBool.write(value.attested, into: &buf)
+hardwareKey: FfiConverterOptionBool.read(from: &buf),
+FfiConverterOptionBool.write(value.hardwareKey, into: &buf)
 admin: FfiConverterOptionBool.read(from: &buf),
 FfiConverterOptionBool.write(value.admin, into: &buf)
 agents: FfiConverterOptionUInt32.read(from: &buf),

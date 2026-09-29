@@ -48,15 +48,15 @@ final class ProofSheet: HardenedWindow {
         return out
     }
 
-    /// What the sender's app reported, for a verified letter. Its key is in
-    /// hardware: a verified letter met that requirement (only a test
-    /// archive skips it).
+    /// What the sender's app reported, for a verified letter, as Rust read
+    /// it from the token (the key line too: «nei» only from a test
+    /// archive, which accepts a software key).
     private static func reported(_ p: Proof) -> [String] {
         let unknown = L10n.proofUnknown
         func count(_ n: UInt32?) -> String { n.map { "\($0)" } ?? unknown }
         func yesNo(_ b: Bool?) -> String { b.map { $0 ? L10n.proofYes : L10n.proofNo } ?? unknown }
         return [
-            L10n.proofKey(L10n.proofYes),
+            L10n.proofKey(yesNo(p.hardwareKey)),
             L10n.proofWindows(count(p.windows)),
             L10n.proofAgents(count(p.agents)),
             L10n.proofAdmin(yesNo(p.admin)),

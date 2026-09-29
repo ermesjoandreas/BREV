@@ -768,12 +768,12 @@ sheetScene("contacts-invite", control: L10n.inviteNote) {
 sheetScene("confirm-reset", control: L10n.resetConfirmTitle) { ConfirmSheet.make(.reset) }
 sheetScene("confirm-key", control: L10n.acceptConfirmTitle) { ConfirmSheet.make(.acceptKey) }
 sheetScene("proof-verified", control: L10n.proofAttest) {
-    ProofSheet.make(Proof(verified: true, failed: [], attested: false, admin: false, agents: 0, windows: 0,
-                          blockedInput: 0, seconds: 420, sip: true, sudo: 0))
+    ProofSheet.make(Proof(verified: true, failed: [], attested: false, hardwareKey: true, admin: false, agents: 0,
+                          windows: 0, blockedInput: 0, seconds: 420, sip: true, sudo: 0))
 }
 sheetScene("proof-unverified", control: L10n.proofCheck("signature")) {
-    ProofSheet.make(Proof(verified: false, failed: ["signature"], attested: false, admin: nil, agents: nil,
-                          windows: nil, blockedInput: nil, seconds: nil, sip: nil, sudo: nil))
+    ProofSheet.make(Proof(verified: false, failed: ["signature"], attested: false, hardwareKey: nil, admin: nil,
+                          agents: nil, windows: nil, blockedInput: nil, seconds: nil, sip: nil, sudo: nil))
 }
 
 // View level: every row kind and mark, selected and not, focused and not.

@@ -695,8 +695,8 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         } catch {
             log.error("proof failed: \(name(error), privacy: .public)")
         }
-        return Proof(verified: false, failed: ["token"], attested: false, admin: nil, agents: nil, windows: nil,
-                     blockedInput: nil, seconds: nil, sip: nil, sudo: nil)
+        return Proof(verified: false, failed: ["token"], attested: false, hardwareKey: nil, admin: nil, agents: nil,
+                     windows: nil, blockedInput: nil, seconds: nil, sip: nil, sudo: nil)
     }
 
     /// A human pressed the badge of the letter at `index`: its detail, in a

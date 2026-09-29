@@ -91,8 +91,8 @@ if grep -Eq "$TEST_HOOKS" <<<"$ARCHIVE_SYMS"; then
 fi
 # brev-mail's `allow-software-keys` (docs/VAULT_SPLIT_PLAN.md §6; D-0115)
 # skips the hardware-key requirement, so a letter with a software key and no
-# Touch ID goes out; it is for the test archive only. The feature compiles a marker into the archive,
-# and the app's must not have it. app/project.yml's build phase checks the
+# Touch ID goes out; it is for the test archive only. The feature compiles a
+# marker into the archive, and the app's must not have it. app/project.yml's build phase checks the
 # archive Xcode links the same way; scripts/test.sh checks that the test
 # archive has the marker.
 if grep -aq BREV-ALLOW-SOFTWARE-KEYS "$TARGET_DIR/release/libbrev_core.a"; then

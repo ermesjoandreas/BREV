@@ -1217,9 +1217,9 @@ impl Core {
     ///
     /// The token is checked (brev-hand's `verify`, with the pinned signing
     /// key that verified the envelope, the relay's `received_at`, Unix
-    /// seconds, and [`KEY_RULE`]) and its result is sealed beside the letter. A token that
-    /// fails does not refuse the letter: the letter is stored with its
-    /// failed result, and the app shows «Ikke verifisert».
+    /// seconds, and [`KEY_RULE`]) and its result is sealed beside the
+    /// letter. A token that fails does not refuse the letter: the letter is
+    /// stored with its failed result, and the app shows «Ikke verifisert».
     pub fn receive(&mut self, env: &Envelope, received_at: u64) -> Result<MessageId, Error> {
         let dek = self.dek()?;
         let now = now();
