@@ -302,9 +302,11 @@ brev-hand, used by the sender and by the verifier.
 
 **The requirements.** All of these must hold:
 
-- **Hardware key**: the author key is in hardware and asks for biometric
-  presence on every signature (`"key"` is a hardware origin; on Mac the
-  Secure Enclave with Touch ID).
+- **Hardware key**: `"key"` is 1 (Secure Enclave) or 2 (TPM), never 3
+  (software) or 4 (unknown), as in class A's rule (AUTHORSHIP §4.1). The
+  key must also ask for biometric presence on every signature; that is set
+  by the adapter's key flags and is not in the token (§11). On Mac: the
+  Secure Enclave with Touch ID.
 - **Every protection fact on**: `secure-input`, `capture-off`, `ax-opaque`,
   `pasteboard-off` and `input-filter` are true.
 - **No pastes**: `pastes` is 0.
@@ -386,12 +388,11 @@ Said plainly:
   each required fact.
 - **Linux cannot produce proofs.** It has no hardware key with presence.
   There is no Linux adapter (Q5 answer).
-- **iOS cannot produce proofs today.** Other apps there cannot tap keys or
-  list processes, but the facts still cannot be read, so they are `None`.
-  Whether a guarantee of the OS, proven by a verified App Attest, may stand
-  in for a read is for the owner to decide at the iOS step. It would be a
-  table in the core, not a lower tier, and the core would set the token's
-  `platform` from `cfg!(target_os)`, never from an adapter call.
+- **iOS cannot produce proofs.** Other apps there cannot tap keys or list
+  processes, but the facts still cannot be read, so they are `None`, and
+  `None` fails. That holds until iOS can read each required fact. The core
+  sets the token's `platform` from `cfg!(target_os)`, never from an adapter
+  call.
 
 ## 6. The secure UI kit
 
@@ -403,7 +404,7 @@ Said plainly:
   element or value, no context menu, no Services, no drag;
 - `SecureComposeView`: secure event input on focus, no pasteboard, no
   autocorrect, no spell check, no Writing Tools, no input context;
-- the application class that applies `InputFilter` to every event, and
+- the `NSApplication` subclass that applies `InputFilter` to every event, and
   `HumanButton` for every action that unlocks, signs or submits;
 - `HardenedWindow`: `sharingType = .none`, not in the Windows menu, applied
   to sheets and child windows;
@@ -426,7 +427,7 @@ file until Brev adopts the package (step 11), so a fix in one cannot
 silently miss the other.
 
 **What the host must set up** that the kit cannot: `NSPrincipalClass` set
-to the kit's application class; `LSEnvironment` `MallocScribble=1`;
+to the kit's `NSApplication` subclass; `LSEnvironment` `MallocScribble=1`;
 Hardened Runtime, App Sandbox, no `get-task-allow`, library validation;
 no AppleScript dictionary, Services, URL types or document types; its own
 keychain access group.
