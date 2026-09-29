@@ -44,6 +44,12 @@
 "unlock.cancel" = "Avbryt";
 "unlock.reason" = "låse opp brevene dine";
 
+/* Why Brev locked, or cannot be unlocked, when a sample of the Mac shows a running sudo or su, or SIP off (docs/AUTHORSHIP.md §4.3, D-0109): a line under the lock screen's title. */
+"lock.sudo" = "Brev låste seg fordi sudo kjører.";
+"lock.sip" = "Brev låste seg fordi SIP er slått av.";
+"unlock.refused.sudo" = "Brev kan ikke åpnes mens sudo kjører.";
+"unlock.refused.sip" = "Brev kan ikke åpnes mens SIP er slått av.";
+
 /* Unlock errors (docs/PHASE2_DESIGN.md §5.5). */
 "unlock.error.retry" = "Brev ble ikke låst opp. Prøv igjen.";
 "unlock.error.lockout" = "Touch ID er sperret etter for mange forsøk. Lås Macen, logg inn med passordet, og prøv igjen.";
@@ -94,16 +100,53 @@
 "compose.ratelimited" = "Du har sendt for mange brev i dag. Brevet ble ikke sendt.";
 "compose.retry" = "Prøv igjen";
 "net.error" = "Fikk ikke kontakt med Brev-tjenesten. Prøv igjen.";
-/* A letter Rust refused because Brev's report on its own defences was not complete (docs/VAULT_SPLIT_PLAN.md §6, owner answer Q6). %@ is a list of the environment.* texts below, joined by ", ". */
-"compose.environment" = "Brevet ble ikke sendt: %@.";
-"environment.keyorigin" = "nøkkelen er ikke i Secure Enclave";
-"environment.biometric" = "ikke låst opp med Touch ID";
-"environment.capture" = "opptaksvern av";
-"environment.secureinput" = "sikker inntasting av";
-"environment.synthetic" = "vern mot kunstig inndata av";
-"environment.accessibility" = "skjerming mot tilgjengelighetsverktøy av";
-"environment.pasteboard" = "sperre mot utklippstavlen av";
-"environment.noreport" = "Brev sjekket ikke vernet sitt først";
+/* A letter Rust refused because the letter's measured facts are below class A (docs/AUTHORSHIP.md §3.3, §4.1): one line per fact. The first %@ is one of the fact.* texts below, the second the fact's name in the token. compose.environment.none: no compose session was measuring. */
+"compose.environment" = "Kan ikke sende: %1$@ (%2$@).";
+"compose.environment.none" = "Kan ikke sende: målingen av Macen var ikke startet. Lukk brevet og prøv igjen.";
+
+/* The facts of a letter's authorship token (docs/AUTHORSHIP.md §2.2), as they keep a letter below class A: for compose.environment and proof.check.class. */
+"fact.key" = "nøkkelen er ikke i maskinvare";
+"fact.sip" = "SIP er slått av eller kunne ikke leses";
+"fact.sudo" = "sudo kjørte eller kunne ikke sjekkes";
+"fact.admin" = "administratorstatus kunne ikke leses";
+"fact.agents" = "programlisten kunne ikke leses";
+"fact.pastes" = "noe ble limt inn";
+"fact.max-gap" = "målingen hadde et hull";
+"fact.windows" = "vinduslisten kunne ikke leses";
+"fact.ax-opaque" = "skjermingen mot tilgjengelighetsverktøy var av";
+"fact.capture-off" = "opptaksvernet var av";
+"fact.input-filter" = "vernet mot kunstig inndata var av";
+"fact.secure-input" = "sikker inntasting var av";
+"fact.pasteboard-off" = "sperren mot utklippstavlen var av";
+
+/* A received letter's badge (docs/AUTHORSHIP.md §6, D-0107 item 4): %@ is the class letter A, B or C. A sent letter has none. */
+"badge.verified" = "Skrevet i Brev · klasse %@";
+"badge.unverified" = "Ikke verifisert";
+
+/* The badge's detail sheet: each failed check, then (verified only) what the sender's app reported, then always proof.attest. %@ in proof.check.class is a list of fact.* texts, in the others a value below or a number. */
+"proof.check.token" = "Beviset kan ikke leses";
+"proof.check.signature" = "Signaturen stemmer ikke";
+"proof.check.content" = "Innholdet er endret etter signering";
+"proof.check.iat" = "Tidspunktet stemmer ikke";
+"proof.check.app-attest" = "Ukjent Apple-bekreftelse";
+"proof.check.class" = "Klassen stemmer ikke med målingene: %@";
+"proof.key" = "Nøkkel i maskinvare med Touch ID: %@ (oppgitt av avsenderens app)";
+"proof.windows" = "Andre vinduer synlige: %@";
+"proof.agents" = "Kjente AI-programmer i gang: %@";
+"proof.admin" = "Admin: %@";
+"proof.blocked" = "Blokkerte forsøk på å skrive inn: %@";
+"proof.seconds" = "Skrivetid: %@";
+"proof.minutes" = "%@ min";
+"proof.minutes.under" = "under 1 min";
+"proof.sip" = "SIP: %@";
+"proof.sudo" = "sudo: %@";
+"proof.yes" = "ja";
+"proof.no" = "nei";
+"proof.on" = "på";
+"proof.off" = "av";
+"proof.unknown" = "ukjent";
+"proof.attest" = "Appen er ikke bekreftet av Apple (støttes ikke på Mac)";
+"proof.close" = "Lukk";
 
 /* Kontakter (docs/PHASE4_DESIGN.md §6.1, §6.2): the button on the mail window and the sheet it opens. The own address, an invite code, an inviter's address and code, and the field are drawn only in the protected layer; Kopier adressen min and Kopier koden put the address or the code on the pasteboard, which Brev empties again after 60 seconds and when it quits. A code is made with one click, without Touch ID. */
 "contacts.title" = "Kontakter";

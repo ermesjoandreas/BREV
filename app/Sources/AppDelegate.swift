@@ -14,7 +14,11 @@
 // the registration are signed with the identity key through SignService:
 // one Touch ID prompt per Send and per Registrer, each inside
 // LockController's signature bookkeeping (docs/PHASE3_DESIGN.md §3.2, §3.5;
-// the U4 switch in LockState). A reset needs ConfirmSheet. Quitting locks
+// the U4 switch in LockState); a letter's prompt covers its two signatures,
+// the authorship token's and the envelope's, under one LAContext that every
+// lock invalidates (docs/AUTHORSHIP.md §3.2). A reset needs ConfirmSheet.
+// After a lock that a sample of the Mac caused (sudo, SIP off), the lock
+// screen says why (LockController.lockNotice). Quitting locks
 // first, then empties the pasteboard of an address or code Brev copied, if
 // nothing was copied since. Nothing here
 // persists anything: no state restoration, no frame autosave, no user
@@ -82,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         lock.showLockScreen = { [weak self] in self?.showLockScreen() }
+        lock.cancelSignature = { [weak self] in self?.signer.cancel() }
         lock.start()
         route()
     }
@@ -160,11 +165,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Also points BrevApplication's accepted input at Rust's idle clock.
+    /// Also points BrevApplication's accepted input at Rust's idle clock,
+    /// and its dropped input at Rust's count of it (docs/AUTHORSHIP.md §2.2).
     private func adopt(_ opened: Session) {
         session = opened
         lock.session = opened
         BrevApplication.noteActivity = { [weak opened] in opened?.brev.noteActivity() }
+        BrevApplication.syntheticDropped = { [weak opened] in try? opened?.syntheticDropped() }
     }
 
     // MARK: - Onboarding (§5.3)
@@ -198,8 +205,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Unlock (§5.4)
 
-    private func makeUnlockScreen(_ mode: UnlockViewController.Mode) -> UnlockViewController {
-        let screen = UnlockViewController(mode: mode)
+    private func makeUnlockScreen(_ mode: UnlockViewController.Mode, notice: String? = nil) -> UnlockViewController {
+        let screen = UnlockViewController(mode: mode, notice: notice)
         screen.onUnlock = { [weak self, weak screen] in
             guard let self, let screen else { return }
             self.unlock(from: screen)
@@ -208,8 +215,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return screen
     }
 
+    /// The lock screen, with the last lock's notice (sudo, SIP off), if any.
     private func showLockScreen() {
-        present(makeUnlockScreen(.lockScreen))
+        present(makeUnlockScreen(.lockScreen, notice: lock.lockNotice))
     }
 
     /// A human asked to unlock on `screen`: one Touch ID prompt. Mail shows
@@ -225,7 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch result {
             case .success:
                 self.pendingWrapped = nil
-                if self.lock.endUnlock(started, succeeded: true, touchID: self.unlocker.unlockedWithTouchID) {
+                if self.lock.endUnlock(started, succeeded: true) {
                     Self.appLog.notice("unlocked")
                     self.showMail()
                 } else {
@@ -269,10 +277,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The unlocked screen: contacts, threads and letters, and the sync
     /// timer (docs/PHASE2_DESIGN.md §7.2). Nytt brev opens the compose sheet
-    /// on the main window (§7.3), which signs through SignService with the
-    /// reason send.reason; after a send the mail screen selects the new
-    /// thread, and after Avbryt or Escape it reads the contacts again (the
-    /// sheet may have found a changed key). A lock reports nothing.
+    /// on the main window (§7.3), with the identity key's origin (its own
+    /// kSecAttrTokenID, read from the key, which is found without a
+    /// prompt), which signs through SignService with the reason
+    /// send.reason; after a send the mail screen selects the new thread,
+    /// and after Avbryt or Escape it reads the contacts again (the sheet may
+    /// have found a changed key). A lock reports nothing.
     private func showMailScreen() {
         guard let session else { return }
         let mail = MailViewController(session: session)
@@ -280,9 +290,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mail.onNewLetter = { [weak self, weak mail] contact in
             guard let self, let window = self.mainWindow, let session = self.session else { return }
             let id = contact.id
-            ComposeSheet.present(on: window, to: contact, session: session, keys: { [weak self] in
-                self?.environmentKeys() ?? EnvironmentProbe.Keys(identityKey: .unknown, touchID: false)
-            }, signer: self.touchIDSigner(reason: L10n.sendReason)) { thread in
+            let origin = EnvironmentProbe.origin(of: self.keyStore.identityKeyWithoutPrompt())
+            ComposeSheet.present(on: window, to: contact, session: session, keyOrigin: origin,
+                                 signer: self.letterSigner()) { thread in
                 if let thread { mail?.showSent(thread: thread, contact: id) } else { mail?.reloadContacts(selecting: id) }
             }
         }
@@ -290,26 +300,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mail.start()
     }
 
-    /// What the keys did for this unlock, for a letter's environment report
-    /// (EnvironmentProbe): the identity key's origin, read from the key,
-    /// which is found without a prompt, and whether this unlock used Touch
-    /// ID.
-    private func environmentKeys() -> EnvironmentProbe.Keys {
-        EnvironmentProbe.Keys(identityKey: EnvironmentProbe.origin(of: keyStore.identityKeyWithoutPrompt()),
-                              touchID: lock.unlockUsedTouchID)
-    }
-
-    /// A signer for `reason` (send.reason or register.reason): the identity
-    /// key's one Touch ID prompt through SignService, inside LockController's
-    /// signature bookkeeping. A result after a lock, or (if the panel takes
+    /// A signer for `reason` (register.reason): the identity key's one Touch
+    /// ID prompt through SignService, inside LockController's signature
+    /// bookkeeping. A result after a lock, or (if the panel takes
     /// activation, LockState's U4 switch) with Brev no longer the active app,
     /// which locks, comes back as Locked.
-    private func touchIDSigner(reason: String) -> ComposeSheet.Signer {
+    private func touchIDSigner(reason: String) -> AddressViewController.Signer {
         { [weak self] digest, done in
             guard let self else { return }
             let started = self.lock.beginSign()
             self.signer.sign(digest: digest, reason: reason) { [weak self] result in
                 guard let self, self.lock.endSign(started) else { return done(.failure(BrevError.Locked)) }
+                done(result)
+            }
+        }
+    }
+
+    /// A letter's signer (docs/AUTHORSHIP.md §3.2): one Touch ID prompt
+    /// through SignService, with the reason send.reason, for the token and
+    /// the envelope, inside LockController's signature bookkeeping. The
+    /// prompt ends with the token's signature: then, on main, a lock since
+    /// it began (or, with LockState's U4 switch, Brev no longer the active
+    /// app) stops the letter before Rust seals it, and no envelope is
+    /// signed; the bookkeeping ends once, whichever step comes first.
+    private func letterSigner() -> ComposeSheet.Signer {
+        { [weak self] tokenDigest, attachToken, done in
+            guard let self else { return done(.failure(BrevError.Locked)) }
+            let started = self.lock.beginSign()
+            var ended: Bool?
+            let end = { [weak self] () -> Bool in
+                if let ended { return ended }
+                let ok = self?.lock.endSign(started) ?? false
+                ended = ok
+                return ok
+            }
+            self.signer.signLetter(tokenDigest: tokenDigest, reason: L10n.sendReason, attachToken: { tokenSignature in
+                guard end() else { throw BrevError.Locked }
+                return try attachToken(tokenSignature)
+            }) { result in
+                guard end() else { return done(.failure(BrevError.Locked)) }
                 done(result)
             }
         }
@@ -340,6 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session = nil
         lock.session = nil
         BrevApplication.noteActivity = nil
+        BrevApplication.syntheticDropped = nil
         pendingWrapped = nil
         do {
             try keyStore.deleteKnownNames()

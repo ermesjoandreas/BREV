@@ -14,7 +14,10 @@
 // never on the main thread, and take no content; the calls that take
 // content (`signRequest`, `registerRequest`) do no I/O. A registration
 // carries the attestor's attestation of its digest (NoAttestor: empty until
-// App Attest). No AppKit: compiled into the app and the CLI harness.
+// App Attest). Hand (docs/AUTHORSHIP.md §3; D-0110, D-0111): the app hands
+// Rust raw samples of the Mac (HandSampler) and the compose events, never a
+// count or a class, and a letter's token and envelope are signed under one
+// Touch ID. No AppKit: compiled into the app and the CLI harness.
 
 import Foundation
 
@@ -261,34 +264,75 @@ final class Session {
         try brev.acceptNewKey(contact: contact, newCode: code)
     }
 
-    // MARK: - A letter (docs/PHASE3_DESIGN.md §3.2)
+    // MARK: - Hand (docs/AUTHORSHIP.md §3.1, §4.3)
 
-    /// Before step 0, on main: Brev's report on its own defences
-    /// (EnvironmentProbe in the app). Rust sends only in environment class A
-    /// (docs/VAULT_SPLIT_PLAN.md §6). Flags only, no content.
-    func reportEnvironment(_ report: EnvironmentReport) throws {
-        try brev.reportEnvironment(report: report)
+    /// A sample of the Mac while unlocked (LockController, every 2 s). A
+    /// running `sudo` or `su`, or SIP off, locks everything in Rust at once,
+    /// and the causes come back; otherwise the list is empty and an open
+    /// compose session counts the sample. Flags, SIP bits, process names
+    /// and window owners only, no content.
+    func observe(_ sample: Sample) throws -> [LockCause] {
+        try brev.observe(sample: sample)
     }
 
-    /// Step 0, without content: checks the contact's key at the relay and
-    /// takes the send ticket (network: `Session.net`).
-    func prepareSend(contact: Data) throws {
-        try brev.prepareSend(contact: contact)
+    /// The compose sheet opened: Rust starts the letter's fact log with how
+    /// Brev is built (`design`), whether the user is an admin (read once;
+    /// nil if the read failed) and where the identity key lives.
+    func composeStarted(design: Design, admin: Bool?, keyOrigin: KeyOrigin) throws {
+        try brev.composeStarted(design: design, admin: admin, keyOrigin: keyOrigin)
     }
 
-    /// Step 1, on main: seals a letter that starts a thread with `contact`
-    /// and returns the digest the identity key signs. No I/O. The UTF-8
-    /// copies live in SecretBytes of 3 bytes per unit and are wiped when
-    /// this returns. The caller wipes `subject` and `body`.
-    func signRequest(contact: Data, subject: SecretText, body: SecretText) throws -> Data {
+    /// The compose sheet closed: Rust drops the fact log.
+    func composeClosed() throws {
+        try brev.composeClosed()
+    }
+
+    /// BrevApplication dropped a synthetic input event: counted in an open
+    /// compose session.
+    func syntheticDropped() throws {
+        try brev.syntheticDropped()
+    }
+
+    /// What a received letter's authorship token showed, as Rust stored it
+    /// (docs/AUTHORSHIP.md §6); nil for a letter the user sent. No content.
+    func letterProof(message: Data) throws -> Proof? {
+        try brev.letterProof(message: message)
+    }
+
+    // MARK: - A letter (docs/PHASE3_DESIGN.md §3.2; docs/AUTHORSHIP.md §3)
+
+    /// Step 0, without content: with a sample taken on main just before,
+    /// checks the compose session's class (an early exit), then the
+    /// contact's key at the relay, and takes the send ticket (network:
+    /// `Session.net`).
+    func prepareSend(contact: Data, sample: Sample) throws {
+        try brev.prepareSend(contact: contact, sample: sample)
+    }
+
+    /// Step 1, on main: with a sample taken just now, freezes the letter's
+    /// facts, and returns the digest of its authorship token, which the
+    /// identity key signs. Rust keeps the letter's plaintext until the
+    /// token signature comes (`attachTokenSignature`) or the letter is
+    /// forgotten. No I/O. The UTF-8 copies live in SecretBytes of 3 bytes
+    /// per unit and are wiped when this returns. The caller wipes `subject`
+    /// and `body`.
+    func signRequest(contact: Data, subject: SecretText, body: SecretText, sample: Sample) throws -> Data {
         try Self.withUTF8(subject) { sd, sl in
             try Self.withUTF8(body) { bd, bl in
-                try brev.signRequest(contact: contact, subject: sd, subjectLen: sl, body: bd, bodyLen: bl)
+                try brev.signRequest(contact: contact, subject: sd, subjectLen: sl, body: bd, bodyLen: bl,
+                                     sample: sample)
             }
         }
     }
 
-    /// Step 3: the DER signature over the digest.
+    /// Step 2: the DER signature over the token digest. Rust seals the
+    /// letter with its token, wipes its plaintext, and returns the
+    /// envelope's digest, which the same Touch ID signs next.
+    func attachTokenSignature(_ signature: Data) throws -> Data {
+        try brev.attachTokenSignature(signature: signature)
+    }
+
+    /// Step 3: the DER signature over the envelope digest.
     func attachSignature(_ signature: Data) throws {
         try brev.attachSignature(signature: signature)
     }
@@ -300,7 +344,8 @@ final class Session {
         try brev.submit()
     }
 
-    /// Forgets the ticket and the letter, signed or not.
+    /// Forgets the ticket and the letter: its plaintext while its token is
+    /// signed (wiped), and the sealed letter, signed or not.
     func cancelSend() {
         brev.cancelSend()
     }

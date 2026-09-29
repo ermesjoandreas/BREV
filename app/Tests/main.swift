@@ -28,8 +28,13 @@
 // built-in contacts: every letter goes through the relay between users made
 // here (software KEK and identity key; `Enclave.sign` signs the digests, as in
 // the app). Since Phase 4 a run's first user registers with the root invite
-// and brings in the others with its own invite codes. Output is content-free:
-// check names and hit counts only.
+// and brings in the others with its own invite codes. Since Hand
+// (docs/AUTHORSHIP.md; D-0111) a letter goes out with its authorship token:
+// a compose session, a fixed clean sample (so a sudo or SIP state of the Mac
+// running the tests cannot lock the harness's sessions; HandSampler's own
+// reads are checked in case 2), and two signatures; case 8 also reads the
+// recipient's proof and locks a session with a sudo sample. Output is
+// content-free: check names and hit counts only.
 
 import Carbon.HIToolbox
 import CoreGraphics
@@ -188,6 +193,15 @@ func freshAddress(_ who: String) -> String {
 /// The mode Rust requires of a store's folder.
 let privateFolder: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
 
+/// A sample of a Mac with nothing wrong (docs/AUTHORSHIP.md §3.1): fixed,
+/// so that the Mac running the tests (a sudo in a terminal, say) cannot lock
+/// the harness's sessions.
+let cleanSample = Sample(secureInput: true, sharingNone: true, preventsCapture: true, csrConfig: 0,
+                         processes: ["launchd", "harness"], windows: [])
+
+/// What this CLI process is by design: no content views, no BrevApplication.
+let harnessDesign = Design(axOpaque: false, pasteboardOff: false, inputFilter: false)
+
 /// A fresh directory (mode 0700) in TMPDIR for one run's stores, removed
 /// afterwards.
 func withStoreDir(_ body: (URL) -> Void) {
@@ -218,7 +232,7 @@ func unlock(_ session: Session, wrapped: Data, kek: SecKey) throws -> (sameAddre
                 throw CoreUnlockError(underlying: error)
             }
         }
-        try session.brev.confirmActive()
+        try session.brev.confirmActive(sample: cleanSample)
     } catch {
         session.brev.lock()
         throw error
@@ -291,25 +305,25 @@ final class User {
         return Seen(id: c.id, waiting: c.waiting, verified: c.verified, blocked: c.blocked)
     }
 
-    /// What this process can say of itself (docs/VAULT_SPLIT_PLAN.md §8):
-    /// its identity key's origin, as the key says, and no Touch ID, no
-    /// window, no secure input and no BrevApplication. Class C, which the
-    /// test archive (allow-software-keys) sends in.
-    var report: EnvironmentReport {
-        EnvironmentReport(keyOrigin: Enclave.isInSecureEnclave(identity) ? .secureEnclave : .software,
-                          biometricUsed: false, captureExcluded: false, secureInputActive: false,
-                          syntheticInputRejected: false, accessibilityOpaque: false, pasteboardDisabled: false)
+    /// Where the identity key lives, as the key says: software. Class C,
+    /// which the test archive (allow-software-keys) sends in.
+    var keyOrigin: KeyOrigin {
+        Enclave.isInSecureEnclave(identity) ? .secureEnclave : .software
     }
 
-    /// One letter in the app's steps (PHASE3 §3.2): the environment report,
-    /// prepare, seal, sign, attach, submit. Returns the thread id. The
+    /// One letter in the app's steps (PHASE3 §3.2, AUTHORSHIP §3): a
+    /// compose session, prepare, the token's digest, its signature, the
+    /// envelope's digest, its signature, submit. Returns the thread id. The
     /// caller wipes the texts.
     func send(to contact: Data, subject: SecretText, body: SecretText) throws -> Data {
-        try session.reportEnvironment(report)
-        try session.prepareSend(contact: contact)
-        let digest = try session.signRequest(contact: contact, subject: subject, body: body)
-        try session.attachSignature(try Enclave.sign(digest: digest, key: identity))
-        return try session.submit()
+        try session.composeStarted(design: harnessDesign, admin: nil, keyOrigin: keyOrigin)
+        try session.prepareSend(contact: contact, sample: cleanSample)
+        let token = try session.signRequest(contact: contact, subject: subject, body: body, sample: cleanSample)
+        let envelope = try session.attachTokenSignature(try Enclave.sign(digest: token, key: identity))
+        try session.attachSignature(try Enclave.sign(digest: envelope, key: identity))
+        let thread = try session.submit()
+        try session.composeClosed()
+        return thread
     }
 
     func lock() { session.brev.lock() }
@@ -735,6 +749,24 @@ func caseShell() {
     defaults.register(defaults: ["TSMEventTracing": false])
     check("LaunchGuard: the default TSMEventTracing (HIToolbox's key-event trace) makes a launch unsafe",
           tsm == .unsafe && LaunchGuard.verdict(environment: safe, defaults: defaults) == .safe)
+    // HandSampler (docs/AUTHORSHIP.md §3.1): its raw reads work in a
+    // process like Brev's, without a prompt. Nothing here reads a value that
+    // depends on this Mac (SIP's bits, whether a sudo runs), only that each
+    // read gives one.
+    let sample = HandSampler.sample(sharingNone: true, preventsCapture: false)
+    check("HandSampler: SIP's bits, every process name (this one's among them) and admin membership are read",
+          HandSampler.csrConfig() != nil && sample.csrConfig != nil
+              && sample.processes?.contains("harness") == true && sample.processes?.count ?? 0 > 10
+              && HandSampler.isAdmin() != nil,
+          "csr \(HandSampler.csrConfig() != nil), processes \(sample.processes?.count ?? -1), admin \(HandSampler.isAdmin() != nil)")
+    check("HandSampler: the window settings the caller read go into the sample as they are",
+          sample.sharingNone && !sample.preventsCapture)
+    if let windows = HandSampler.windows() {
+        check("HandSampler: the on-screen windows are read as owner pid and layer (\(windows.count))",
+              windows.allSatisfy { $0.ownerPid >= 0 })
+    } else {
+        print("skip HandSampler's window list: no window server session here")
+    }
     // Arguments reach the argument domain: a helper run started with two.
     let helper = Process()
     helper.executableURL = Bundle.main.executableURL
@@ -1536,18 +1568,26 @@ func caseNetwork() {
         // A letter given up after it was signed goes nowhere.
         let draft = secret("Utkast"), draftBody = secret("Et utkast som ikke sendes.")
         var cancelled = false
-        check("the identity key is a software key, and reports so", a.report.keyOrigin == .software)
+        check("the identity key is a software key, and says so", a.keyOrigin == .software)
+        check("without a compose session, a send is refused with no fact named (Environment)",
+              throwsError(.Environment(failed: [])) { try a.session.prepareSend(contact: aSeesB, sample: cleanSample) })
         do {
-            try a.session.reportEnvironment(a.report)
-            try a.session.prepareSend(contact: aSeesB)
-            let digest = try a.session.signRequest(contact: aSeesB, subject: draft, body: draftBody)
-            let der = try Enclave.sign(digest: digest, key: a.identity)
+            try a.session.composeStarted(design: harnessDesign, admin: nil, keyOrigin: a.keyOrigin)
+            try a.session.prepareSend(contact: aSeesB, sample: cleanSample)
+            let token = try a.session.signRequest(contact: aSeesB, subject: draft, body: draftBody, sample: cleanSample)
+            let tokenDER = try Enclave.sign(digest: token, key: a.identity)
+            let envelope = try a.session.attachTokenSignature(tokenDER)
+            let der = try Enclave.sign(digest: envelope, key: a.identity)
             a.session.cancelSend()
             cancelled = throwsError(.NotFound) { try a.session.attachSignature(der) }
-                && throwsError(.Malformed) { try a.session.signRequest(contact: aSeesB, subject: draft, body: draftBody) }
+                && throwsError(.NotFound) { try a.session.attachTokenSignature(tokenDER) }
+                && throwsError(.Malformed) {
+                    try a.session.signRequest(contact: aSeesB, subject: draft, body: draftBody, sample: cleanSample)
+                }
                 && throwsError(.NotFound) { try a.session.submit() }
+            try a.session.composeClosed()
         } catch {
-            check("a letter up to its signature", false, "\(error)")
+            check("a letter up to its signatures", false, "\(error)")
         }
         draft.wipe()
         draftBody.wipe()
@@ -1565,6 +1605,20 @@ func caseNetwork() {
         body.wipe()
         let back = try? a.session.sync().letters
         check("B's answer is sent and arrives at A", reply != nil && back == 1)
+        // docs/AUTHORSHIP.md §6: B's core checked A's token and kept the
+        // result; A's own copy has none.
+        let received = (try? b.session.threads(contact: bSeesA))?.first { $0.id == thread }
+        let inB = received.flatMap { try? b.session.messages(thread: $0.id).first }
+        let proof = inB.flatMap { try? b.session.letterProof(message: $0.id) }
+        let own = thread.flatMap { try? a.session.messages(thread: $0).first }
+        check("B's proof of A's letter: verified, class C (a software key), not attested, nothing failed, "
+                + "the counts of the clean sample; A's own copy has no proof",
+              proof?.verified == true && proof?.class == 3 && proof?.attested == false && proof?.failed == []
+                  && proof?.windows == 0 && proof?.agents == 0 && proof?.sudo == 0 && proof?.sip == true
+                  && proof?.admin == nil && proof?.blockedInput == 0
+                  && own.map { (try? a.session.letterProof(message: $0.id)) == .some(nil) } == true,
+              "\(String(describing: proof))")
+        received?.subject.wipe()
 
         let bThreads = try! b.session.threads(contact: bSeesA), aThreads = try! a.session.threads(contact: aSeesB)
         let bRows = bThreads.flatMap { try! b.session.messages(thread: $0.id) }
@@ -1587,6 +1641,13 @@ func caseNetwork() {
         (aThreads + bThreads).forEach { $0.subject.wipe() }
         GlyphFlush.flush()
         drawing.layout.reset()
+        // docs/AUTHORSHIP.md §4.3: a sample with a running sudo locks the
+        // session in Rust at once and names the cause.
+        let sudo = Sample(secureInput: true, sharingNone: true, preventsCapture: true, csrConfig: 0,
+                          processes: ["launchd", "sudo"], windows: [])
+        let causes = try? b.session.observe(sudo)
+        check("a sample with sudo running locks B's session and names the cause",
+              causes == [.sudo] && b.session.brev.isLocked())
         a.lock()
         b.lock()
         check("after lock: sync is Locked (no request)", throwsLocked { try a.session.sync() })

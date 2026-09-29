@@ -21,9 +21,11 @@ import Foundation
 
 /// Why Brev locked; the log line is `lock reason=<rawValue>`.
 /// `unlockExpired`: Rust refused to confirm an unlock, which came more than
-/// 2 s after `Brev.unlock` returned.
+/// 2 s after `Brev.unlock` returned. `environment`: a sample showed a
+/// running `sudo` or `su`, or SIP off (docs/AUTHORSHIP.md §4.3, D-0109);
+/// Rust had locked already, or refused to confirm the unlock.
 enum LockReason: String {
-    case resignActive, screenLocked, sleep, sessionResign, idle, manual, terminate, unlockExpired
+    case resignActive, screenLocked, sleep, sessionResign, idle, manual, terminate, unlockExpired, environment
 }
 
 final class LockState {

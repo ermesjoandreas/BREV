@@ -84,7 +84,7 @@ final class AddressViewController: NSViewController, ContentHolder {
         [taken, invalid, inviteInvalid, inviteMismatch, inviteFailed, netFailure, failure]
     }
     private weak var session: Session?
-    private let signer: ComposeSheet.Signer
+    private let signer: Signer
     private var step = Step.invite
     /// Which invite was checked: nil before, true for the operator's.
     private var rootInvite: Bool?
@@ -94,7 +94,12 @@ final class AddressViewController: NSViewController, ContentHolder {
     /// and the digest it signs (for the attestation). Not secret.
     private var kept: (signature: Data, digest: Data)?
 
-    init(session: Session, signer: @escaping ComposeSheet.Signer) {
+    /// Signs a 32-byte digest with the identity key and calls back on main
+    /// with the DER signature: SignService in the app (Touch ID), a software
+    /// key in the view host.
+    typealias Signer = (_ digest: Data, _ done: @escaping (Result<Data, Error>) -> Void) -> Void
+
+    init(session: Session, signer: @escaping Signer) {
         field = SecureComposeView(maxBytes: Int(limits().maxAddress), multiline: false, charset: .address)
         self.session = session
         self.signer = signer

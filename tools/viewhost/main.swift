@@ -31,7 +31,7 @@
 // tried (events with a source PID, ⌘C ⌘X ⌘A ⌘V ⌘Z, ⌃V, insertText, a click
 // made in code, an AX press, and with --post keys posted to this process),
 // and secure event input is checked → ready → (hold) → the environment
-// report (EnvironmentProbe) is checked → ⌘↩ sends through the relay → Ekko
+// sample and design (EnvironmentProbe) are checked → ⌘↩ sends through the relay → Ekko
 // fetches it → Escape discards a second letter → the lock
 // sequence discards a third → exit.
 // With --triggers: the real lock triggers (LockController.start) and the
@@ -270,6 +270,11 @@ func startRelay(in dir: URL) -> (Process, String)? {
     return nil
 }
 
+/// A sample of a Mac with nothing wrong, for the helper users' calls (the
+/// shown user's compose sheet samples this Mac, as Brev does).
+let cleanSample = Sample(secureInput: true, sharingNone: true, preventsCapture: true, csrConfig: 0,
+                         processes: ["launchd", "ViewHost"], windows: [])
+
 /// One user, unlocked: a store in its own folder under a DEK wrapped to a
 /// software KEK, and a software identity key that signs its digests
 /// through Enclave.sign (in Brev, SignService adds the keychain lookup and
@@ -298,7 +303,7 @@ final class User {
             try Enclave.unwrap(wrapped, with: kek) {
                 try session.brev.unlock(dek: $0, idleSecs: LockState.rustIdleSecs)
             }
-            try session.brev.confirmActive()
+            try session.brev.confirmActive(sample: cleanSample)
         } catch {
             session.brev.lock()
             throw error
@@ -335,31 +340,44 @@ final class User {
         return found.id
     }
 
-    /// What the keys did: a software identity key, no Touch ID.
-    var keys: EnvironmentProbe.Keys {
-        EnvironmentProbe.Keys(identityKey: EnvironmentProbe.origin(of: identity), touchID: false)
-    }
+    /// Where the identity key lives: software, so the test archive
+    /// (allow-software-keys) sends in class C.
+    var keyOrigin: KeyOrigin { EnvironmentProbe.origin(of: identity) }
 
-    /// One letter in the app's steps, all on this thread; wipes the texts.
-    /// The environment report says a software key and no Touch ID: the test
-    /// archive (allow-software-keys) sends in class C.
+    /// One letter in the app's steps (docs/AUTHORSHIP.md §3), all on this
+    /// thread, with a clean sample; wipes the texts.
     func send(to contact: Data, subject: SecretText, body: SecretText) throws {
         defer { subject.wipe(); body.wipe() }
-        try session.reportEnvironment(EnvironmentProbe.report(keys))
-        try session.prepareSend(contact: contact)
-        let digest = try session.signRequest(contact: contact, subject: subject, body: body)
-        try session.attachSignature(try Enclave.sign(digest: digest, key: identity))
+        try session.composeStarted(design: EnvironmentProbe.design(), admin: nil, keyOrigin: keyOrigin)
+        try session.prepareSend(contact: contact, sample: cleanSample)
+        let token = try session.signRequest(contact: contact, subject: subject, body: body, sample: cleanSample)
+        let envelope = try session.attachTokenSignature(try Enclave.sign(digest: token, key: identity))
+        try session.attachSignature(try Enclave.sign(digest: envelope, key: identity))
         _ = try session.submit()
+        try session.composeClosed()
     }
 
-    /// Signatures asked for through `sign`.
+    /// Prompts SignService would show: through `sign` and `signLetter`.
     private(set) var signatures = 0
 
-    /// The compose sheet's (and the address page's) signer: the software
-    /// key, answered on main as SignService answers.
+    /// The address page's signer: the software key, answered on main as
+    /// SignService answers.
     func sign(_ digest: Data, _ done: @escaping (Result<Data, Error>) -> Void) {
         signatures += 1
         let result = Result { try Enclave.sign(digest: digest, key: identity) }
+        DispatchQueue.main.async { done(result) }
+    }
+
+    /// The compose sheet's signer: the software key signs the token, Rust
+    /// seals the letter, the key signs the envelope; one "prompt", answered
+    /// on main as SignService answers.
+    func signLetter(_ tokenDigest: Data, _ attachToken: @escaping (Data) throws -> Data,
+                    _ done: @escaping (Result<Data, Error>) -> Void) {
+        signatures += 1
+        let result = Result { () throws -> Data in
+            let envelope = try attachToken(try Enclave.sign(digest: tokenDigest, key: identity))
+            return try Enclave.sign(digest: envelope, key: identity)
+        }
         DispatchQueue.main.async { done(result) }
     }
 }
@@ -856,7 +874,8 @@ weak var sentSheet: ComposeSheet?
 func wireCompose() {
     mail.onNewLetter = { contact in
         let id = contact.id
-        ComposeSheet.present(on: window, to: contact, session: session, keys: { me.keys }, signer: me.sign) { thread in
+        ComposeSheet.present(on: window, to: contact, session: session, keyOrigin: me.keyOrigin,
+                             signer: me.signLetter) { thread in
             composeEvents.append(thread == nil ? "closed" : "sent")
             if let thread { mail.showSent(thread: thread, contact: id) } else { mail.reloadContacts(selecting: id) }
         }
@@ -1022,18 +1041,17 @@ func composeAfterHold(_ sheet: ComposeSheet) {
         let h = SelfScan.scan()
         check("compose: the typed marker is in memory (positive control)", h.u16 > 0, "\(h)")
     }
-    // The report ⌘↩ makes (EnvironmentProbe), in a real window: a software
-    // key and no Touch ID, so class C, which the test archive sends in; the
-    // other checks as this run set them up.
-    let report = EnvironmentProbe.report(me.keys)
-    check("compose: the environment report: a software key, no Touch ID; capture excluded unless "
-            + "--capturable, --unprotected or --control; secure input as above; BrevApplication; opaque; "
-            + "no Copy, Cut or Paste",
-          report.keyOrigin == .software && !report.biometricUsed
-              && report.captureExcluded == !(capturable || unprotected || control)
-              && report.secureInputActive == wanted
-              && report.syntheticInputRejected && report.accessibilityOpaque && report.pasteboardDisabled,
-          "\(report)")
+    // What ⌘↩ hands Rust (EnvironmentProbe), in a real window: a software
+    // key, so class C, which the test archive sends in; the sheet's sample
+    // and the design facts as this run set them up.
+    let sample = EnvironmentProbe.sample(for: sheet), design = EnvironmentProbe.design()
+    check("compose: Hand's sample and design: a software key; capture excluded unless --capturable, "
+            + "--unprotected or --control; secure input as above; BrevApplication; opaque; no Copy, Cut or Paste",
+          me.keyOrigin == .software
+              && (sample.sharingNone && sample.preventsCapture) == !(capturable || unprotected || control)
+              && sample.secureInput == wanted
+              && design.inputFilter && design.axOpaque && design.pasteboardOff,
+          "\(sample.sharingNone) \(sample.preventsCapture) \(sample.secureInput) \(design)")
     let threads = lists[1].count
     let buffers = views.flatMap { $0.pool }
     deliver(hardwareKey(36, .maskCommand), to: sheet)
@@ -1490,7 +1508,7 @@ func contactSheetStage() {
     check("contact sheet: no responder from the field up answers " + editActions.joined(separator: " ")
             + " (P1's variant (a)), and the environment report's pasteboardDisabled holds (design §5.5)",
           editActions.allSatisfy { !chainAnswers(sheet, NSSelectorFromString($0)) }
-              && EnvironmentProbe.report(me.keys).pasteboardDisabled)
+              && EnvironmentProbe.design().pasteboardOff)
     let count = boardCount(), invites = relayTrace.count("/v1/invites")
     let refused = pressRefused(sheet.copyAddressButton) && pressRefused(sheet.makeInviteButton)
         && pressRefused(sheet.copyCodeButton)

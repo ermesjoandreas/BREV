@@ -1,42 +1,38 @@
-// EnvironmentProbe.swift — Brev's report on its own defences, for Rust's
-// environment class.
+// EnvironmentProbe.swift — what the app hands Rust about its own window and
+// build, for Hand's facts.
 //
-// Upholds CLAUDE.md §2 and §3.2 (docs/VAULT_SPLIT_PLAN.md §6, §8): Rust sends
-// a letter only in environment class A. ComposeSheet makes this report on
-// main right before `prepareSend`, from what Brev did: the identity key's
-// origin (its own kSecAttrTokenID), whether this unlock unwrapped the DEK
-// with Touch ID (UnlockService, for LockController's generation), and, at
-// that moment, every window excluded from capture with every content
-// view's layer preventing capture, secure event input on (Brev's own flag
-// and the system's), the application class that drops synthetic input,
-// every content view opaque to accessibility, and no Copy, Cut or Paste
-// that any responder would take. It is Brev's own word: until attestation,
-// the class catches bugs in Brev, not attackers (CLAUDE.md §2). Reads no
+// Upholds CLAUDE.md §2 and §3.2 and docs/AUTHORSHIP.md §2.2, §3.1
+// (docs/DECISIONS.md D-0111): a sample is HandSampler's raw reads of the
+// Mac plus two settings of the window being sampled: its `sharingType` is
+// `.none`, and every content view alive shows its pixels only through a
+// layer that prevents capture. While composing, LockController and the
+// compose sheet sample the compose sheet, otherwise the main window. The
+// design facts go to Rust once per compose session, read at that moment
+// from what Brev does: every content view opaque to accessibility, no Copy,
+// Cut or Paste that any responder would take, and the application class
+// that drops synthetic input. In a correct Brev all three are true; a bug
+// that breaks one lowers the letter's class. The identity key's origin is
+// its own kSecAttrTokenID. It is Brev's own word: until attestation, the
+// class catches bugs in Brev, not attackers (CLAUDE.md §2). Reads no
 // content. Main thread only.
 
 import AppKit
-import Carbon.HIToolbox
 
 enum EnvironmentProbe {
-    /// What the keys did for this unlock.
-    struct Keys {
-        /// Where the identity key lives (`origin(of:)`).
-        let identityKey: KeyOrigin
-        /// This unlock unwrapped the DEK with Touch ID.
-        let touchID: Bool
+    /// A sample now (HandSampler), with `window`'s settings: the compose
+    /// sheet while composing, else the main window; nil sets neither.
+    static func sample(for window: NSWindow?) -> Sample {
+        dispatchPrecondition(condition: .onQueue(.main))
+        return HandSampler.sample(sharingNone: window.map { $0.sharingType == NSWindow.SharingType.none } ?? false,
+                                  preventsCapture: ContentView.allPreventCapture)
     }
 
-    /// The report for a letter sent now.
-    static func report(_ keys: Keys) -> EnvironmentReport {
+    /// How Brev is built, as it stands now, for a compose session.
+    static func design() -> Design {
         dispatchPrecondition(condition: .onQueue(.main))
-        return EnvironmentReport(
-            keyOrigin: keys.identityKey,
-            biometricUsed: keys.touchID,
-            captureExcluded: NSApp.windows.allSatisfy { $0.sharingType == .none } && ContentView.allPreventCapture,
-            secureInputActive: SecureInput.isOn && IsSecureEventInputEnabled(),
-            syntheticInputRejected: NSApp is BrevApplication,
-            accessibilityOpaque: ContentView.allOpaque,
-            pasteboardDisabled: editActions.allSatisfy { NSApp.target(forAction: $0) == nil })
+        return Design(axOpaque: ContentView.allOpaque,
+                      pasteboardOff: editActions.allSatisfy { NSApp.target(forAction: $0) == nil },
+                      inputFilter: NSApp is BrevApplication)
     }
 
     /// The Secure Enclave if `key` says it lives there, software if not,

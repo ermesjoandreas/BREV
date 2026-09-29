@@ -10,7 +10,8 @@
 // Rust's idle clock at most once a second (`noteActivity`), and marks the
 // time spent dispatching it (`inHumanDispatch`), which HumanButton uses to
 // refuse actions that do not come from a human event. Dropped events reach
-// neither clock.
+// neither clock; each one is told to Rust (`syntheticDropped`), which counts
+// it in an open compose session (docs/AUTHORSHIP.md §2.2 "blocked-input").
 
 import AppKit
 import os
@@ -49,6 +50,9 @@ final class BrevApplication: NSApplication {
     /// Tells Rust a human is there (`Brev.noteActivity`); set by
     /// AppDelegate while it holds a session.
     static var noteActivity: (() -> Void)?
+    /// Tells Rust an input event was dropped (`Brev.syntheticDropped`); set
+    /// by AppDelegate while it holds a session.
+    static var syntheticDropped: (() -> Void)?
     /// CLOCK_MONOTONIC nanoseconds of the last `noteActivity` call.
     private static var lastNoted: UInt64 = 0
 
@@ -94,5 +98,6 @@ final class BrevApplication: NSApplication {
     private static func drop(_ event: NSEvent) {
         let pid = InputFilter.sourcePID(event.cgEvent)
         log.notice("dropped synthetic \(event.type.rawValue, privacy: .public) pid=\(pid, privacy: .public)")
+        syntheticDropped?()
     }
 }

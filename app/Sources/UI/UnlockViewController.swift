@@ -9,6 +9,9 @@
 // failures, after any failure of the first unlock, and when the stores do
 // not open; it only opens ConfirmSheet (AppDelegate). The unlock button
 // stays next to it, so a wrong guess about the fingers never forces a reset.
+// After a lock that a sample of the Mac caused (a running sudo, SIP off;
+// docs/AUTHORSHIP.md §4.3), the screen says why under its title, until a
+// failure replaces the line.
 
 import AppKit
 
@@ -26,11 +29,14 @@ final class UnlockViewController: NSViewController {
     var onReset: () -> Void = {}
 
     private let mode: Mode
+    /// Why Brev locked, when a sample caused it (LockController.lockNotice).
+    private let notice: String?
     private let page = PageView()
     private var unlock: HumanButton?
 
-    init(mode: Mode) {
+    init(mode: Mode, notice: String? = nil) {
         self.mode = mode
+        self.notice = notice
         super.init(nibName: nil, bundle: nil)
         showReady()
     }
@@ -43,9 +49,9 @@ final class UnlockViewController: NSViewController {
         view = page
     }
 
-    /// The screen with its unlock button and no error.
+    /// The screen with its unlock button, no error, and the lock's notice.
     func showReady() {
-        layout(message: nil, reset: false)
+        layout(message: notice, reset: false)
     }
 
     /// The Touch ID prompt is up: every button is disabled until it ends,

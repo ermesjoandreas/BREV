@@ -11,7 +11,10 @@
 // asker's address, then the contacts; both SecureListViews, one row
 // selected in either; a contact's name is its address), the contact's
 // threads, newest first (SecureListView), and the selected thread's
-// letters, oldest first (LetterStackView). `start()` reads the own address,
+// letters, oldest first (LetterStackView), each received one with its badge
+// (`letterProof`, docs/AUTHORSHIP.md §6), whose press opens ProofSheet (one
+// sheet at a time; a proof that cannot be read shows as «Ikke verifisert»
+// with «Beviset kan ikke leses»). `start()` reads the own address,
 // the requests (none before the first sync) and the contacts and selects
 // the first contact, then its newest thread, then that thread's letters.
 // Nytt brev is off for a contact whose key changed or that is blocked, and
@@ -72,6 +75,9 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     private var requests: [RequestItem] = []
     /// The selected contact's threads, newest first, as the list shows them.
     private var threads: [ThreadItem] = []
+    /// The proofs of the letters shown, in their order: nil for a sent
+    /// letter. Content-free.
+    private(set) var proofs: [Proof?] = []
     private var syncTimer: Timer?
     /// True while a `sync()` is on `Session.net`.
     private var syncing = false
@@ -179,6 +185,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         requestList.onSelect = { [weak self] _ in self?.requestSelected() }
         contactList.onSelect = { [weak self] _ in self?.contactSelected() }
         threadList.onSelect = { [weak self] _ in self?.showLetters(scrolledTo: .zero) }
+        letters.onBadge = { [weak self] i in self?.showProof(i) }
         requestList.nextKeyView = contactList
         contactList.nextKeyView = threadList
         threadList.nextKeyView = requestList
@@ -410,22 +417,49 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     /// and scrolls the letter pane to `origin`: .zero shows the first letter.
     private func showLetters(scrolledTo origin: NSPoint) {
         letters.clear()
+        proofs = []
         defer { noLetters.isHidden = !letters.isEmpty }
         guard let i = threadList.selected, threads.indices.contains(i), let session else { return }
         var shown: [LetterStackView.Letter] = []
+        var read: [Proof?] = []
         do {
             for m in try session.messages(thread: threads[i].id) {
                 let when = date(m.createdAt)
+                let proof = m.outgoing ? nil : Self.proof(m.id, session)
+                read.append(proof)
                 shown.append(LetterStackView.Letter(header: m.outgoing ? L10n.mailSent(when) : L10n.mailReceived(when),
-                                                    body: try session.body(message: m.id)))
+                                                    body: try session.body(message: m.id),
+                                                    badge: proof.map { L10n.badge(verified: $0.verified,
+                                                                                  classCode: $0.class) }))
             }
         } catch {
             Self.log.error("letters failed: \(Self.name(error), privacy: .public)")
             shown.forEach { $0.body.wipe() }
             return
         }
+        proofs = read
         letters.show(shown)
         letters.scroll(origin)
+    }
+
+    /// A received letter's proof; one that cannot be read is not verified,
+    /// with the token as the failed check.
+    private static func proof(_ message: Data, _ session: Session) -> Proof {
+        do {
+            if let proof = try session.letterProof(message: message) { return proof }
+        } catch {
+            log.error("proof failed: \(name(error), privacy: .public)")
+        }
+        return Proof(verified: false, class: nil, failed: ["token"], attested: false, admin: nil, agents: nil,
+                     windows: nil, blockedInput: nil, seconds: nil, sip: nil, sudo: nil)
+    }
+
+    /// A human pressed the badge of the letter at `index`: its detail, in a
+    /// sheet on this window (one sheet at a time).
+    func showProof(_ index: Int) {
+        guard !composing, let window = view.window, proofs.indices.contains(index), let proof = proofs[index]
+        else { return }
+        ProofSheet.present(on: window, proof)
     }
 
     /// A letter to `contact` started `thread`: if that contact is still
@@ -527,6 +561,7 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         contactList.clear()
         threadList.clear()
         letters.clear()
+        proofs = []
         contacts = []
         threads = []
         noLetters.isHidden = false

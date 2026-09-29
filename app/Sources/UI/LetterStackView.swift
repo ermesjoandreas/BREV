@@ -4,10 +4,15 @@
 // The flipped document view of the letter pane's NSScrollView; scrolling is
 // the stock scroll view's. Each letter is a header ("Sendt …" or
 // "Mottatt …" and a date: metadata, drawn by an OpaqueView) above a
-// SecureTextView with the body. Frames come from each body's layout height
-// at the scroll view's width. `clear()` wipes every body, removes the views
-// and runs GlyphFlush, which is the letter view's teardown (§6.4); a new
-// thread, a reload and the lock sequence all go through it.
+// SecureTextView with the body. A received letter's header has its badge at
+// the right (docs/AUTHORSHIP.md §6): «Skrevet i Brev · klasse A» or «Ikke
+// verifisert», fixed text from L10n, never content, on a HumanButton whose
+// press (a human's only) asks for the detail (`onBadge`). The badges are
+// the only thing in the pane that accessibility sees: their text. Frames
+// come from each body's layout height at the scroll view's width. `clear()`
+// wipes every body, removes the views and runs GlyphFlush, which is the
+// letter view's teardown (§6.4); a new thread, a reload and the lock
+// sequence all go through it.
 
 import AppKit
 
@@ -17,26 +22,43 @@ final class LetterStackView: OpaqueView {
         let header: String
         /// The body, owned and wiped by the view from `show` on.
         let body: SecretText
+        /// A received letter's badge (L10n.badge); nil for a sent letter.
+        var badge: String? = nil
     }
 
     static let top: CGFloat = 12
     static let headerHeight: CGFloat = 24
     static let gap: CGFloat = 20
 
-    private var letters: [(header: LetterHeaderView, body: SecureTextView)] = []
+    /// A human pressed the badge of the letter at this index.
+    var onBadge: (Int) -> Void = { _ in }
+
+    private var letters: [(header: LetterHeaderView, body: SecureTextView, badge: HumanButton?)] = []
 
     var isEmpty: Bool { letters.isEmpty }
+
+    /// The badges shown, in letter order (nil for a sent letter).
+    var badges: [HumanButton?] { letters.map(\.badge) }
 
     /// Replaces the letters shown (the old bodies are wiped first).
     func show(_ new: [Letter]) {
         clear()
-        for l in new {
+        for (i, l) in new.enumerated() {
             let header = LetterHeaderView(l.header)
             let body = SecureTextView()
             body.show(l.body)
             addSubview(header)
             addSubview(body)
-            letters.append((header, body))
+            let badge = l.badge.map { title -> HumanButton in
+                let b = HumanButton(title: title, target: self, action: #selector(badgePressed(_:)))
+                b.bezelStyle = .inline
+                b.controlSize = .small
+                b.tag = i
+                b.sizeToFit()
+                addSubview(b)
+                return b
+            }
+            letters.append((header, body, badge))
         }
         relayout()
     }
@@ -49,10 +71,21 @@ final class LetterStackView: OpaqueView {
             l.body.clear()
             l.header.removeFromSuperview()
             l.body.removeFromSuperview()
+            l.badge?.removeFromSuperview()
         }
         letters = []
         relayout()
         GlyphFlush.flush()
+    }
+
+    /// Accessibility sees the badges' text and nothing else of the pane.
+    override func accessibilityChildren() -> [Any]? {
+        letters.compactMap(\.badge)
+    }
+
+    /// A badge's action (HumanButton: only a human's press gets here).
+    @objc private func badgePressed(_ sender: NSButton) {
+        onBadge(sender.tag)
     }
 
     override func resize(withOldSuperviewSize oldSize: NSSize) {
@@ -67,6 +100,11 @@ final class LetterStackView: OpaqueView {
         var y = Self.top
         for l in letters {
             l.header.frame = NSRect(x: 0, y: y, width: width, height: Self.headerHeight)
+            if let badge = l.badge {
+                let size = badge.frame.size
+                badge.frame = NSRect(x: max(0, width - SecureTextView.inset - size.width),
+                                     y: y + (Self.headerHeight - size.height) / 2, width: size.width, height: size.height)
+            }
             y += Self.headerHeight
             let h = ceil(l.body.height(forWidth: width))
             l.body.frame = NSRect(x: 0, y: y, width: width, height: h)

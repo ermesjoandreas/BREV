@@ -9,18 +9,27 @@
 // (its address) that the sheet owns, drawn by RecipientView; the subject and
 // the body are SecureComposeViews. Every one of them is a ContentView, so it
 // draws through the protected layer.
-// Send (a HumanButton, or ⌘↩ in a field) sends in the three steps of
-// PHASE3 §3.2, with "Sender …" shown, the buttons disabled and the fields
-// read-only meanwhile: on main Brev's report on its own defences
-// (EnvironmentProbe; docs/VAULT_SPLIT_PLAN.md §6, §8), then `prepareSend` on
-// `Session.net` (no content; a changed key shows compose.keychanged and keeps
-// the letter; a report below Rust's environment class A shows
-// compose.environment, which names the checks that failed; a recipient that
-// has not approved the user, or one the user blocked, shows
-// compose.notapproved before any prompt), then on main `signRequest` (the
-// content, no I/O), the one Touch ID prompt through the signer
-// (SignService; Avbryt there returns to editing), `attachSignature`, and
-// `submit` on `Session.net`, which closes the sheet. When the relay refuses
+// Hand (docs/AUTHORSHIP.md §3.1; D-0111): when the sheet opens, Rust starts
+// the letter's fact log (`composeStarted`: how Brev is built, whether the
+// user is an admin, where the identity key lives), and every way the sheet
+// closes ends it (`composeClosed`). Send (a HumanButton, or ⌘↩ in a field)
+// sends in the steps of PHASE3 §3.2 and AUTHORSHIP §3.2, with "Sender …"
+// shown, the buttons disabled and the fields read-only meanwhile: on main a
+// sample of the Mac and of this sheet (EnvironmentProbe), then
+// `prepareSend` with it on `Session.net` (no content; a changed key shows
+// compose.keychanged and keeps the letter; facts below class A show one
+// compose.environment line per fact; a recipient that has not approved the
+// user, or one the user blocked, shows compose.notapproved before any
+// prompt), then on main `signRequest` with a new sample (the content, no
+// I/O; Rust freezes the facts and returns the token's digest), the one
+// Touch ID prompt through the signer (SignService; Avbryt there returns to
+// editing), which signs the token, hands it to Rust
+// (`attachTokenSignature`, which seals the letter and returns the
+// envelope's digest) and signs that under the same prompt,
+// `attachSignature`, and `submit` on `Session.net`, which closes the sheet.
+// A failure after `signRequest` makes Rust forget the letter (`cancelSend`),
+// but for the relay's `Network`, which keeps the signed letter for Prøv
+// igjen. When the relay refuses
 // the signed letter, as not approved or over the daily limit,
 // compose.notapproved or compose.ratelimited shows and the draft stays
 // (docs/PHASE4_DESIGN.md §6.1). When the relay
@@ -41,10 +50,14 @@ import AppKit
 import os
 
 final class ComposeSheet: HardenedWindow, ContentHolder {
-    /// Signs a 32-byte digest with the identity key and calls back on main
-    /// with the DER signature: SignService in the app (Touch ID), a software
-    /// key in the view host.
-    typealias Signer = (_ digest: Data, _ done: @escaping (Result<Data, Error>) -> Void) -> Void
+    /// A letter's two signatures under one Touch ID (docs/AUTHORSHIP.md
+    /// §3.2): signs the token's 32-byte digest with the identity key, hands
+    /// that DER signature to `attachToken` (on main), which returns the
+    /// envelope's digest or throws, signs that too, and calls back on main
+    /// with the envelope's DER signature: SignService in the app, a software
+    /// key in the view host and the lock probe.
+    typealias Signer = (_ tokenDigest: Data, _ attachToken: @escaping (Data) throws -> Data,
+                        _ done: @escaping (Result<Data, Error>) -> Void) -> Void
 
     private static let log = Logger(subsystem: "no.brev.app", category: "compose")
     static let contentSize = NSSize(width: 600, height: 460)
@@ -76,13 +89,14 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
     private let rateLimited = InterfaceText(L10n.composeRateLimited, width: messageWidth, alignment: .left)
     private let netFailure = InterfaceText(L10n.netError, width: messageWidth, alignment: .left)
     private let sending = InterfaceText(L10n.composeSending, width: messageWidth, alignment: .left)
-    /// compose.environment with the checks that failed: made for each
+    /// compose.environment with the facts short of class A: made for each
     /// refusal, in the place of the texts above.
     private var environmentFailure: InterfaceText?
     private var buttonRow: NSStackView?
     private weak var session: Session?
     private let contact: Data
-    private let keys: () -> EnvironmentProbe.Keys
+    /// A sample of the Mac and of this sheet (EnvironmentProbe in the app).
+    private let sampler: (NSWindow?) -> Sample
     private let signer: Signer
     private var step = Step.editing
     /// Bumped by `wipeAll` (every close and the lock sequence): a result of
@@ -92,34 +106,46 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
     private(set) var sentThread: Data?
 
     /// Shows a new letter to `contact` on `parent`, with the subject
-    /// focused. `keys` says what the keys did for this unlock, for the
-    /// environment report of a send. `completion` gets the new thread's id
-    /// after a send, and nil after Avbryt or Escape. A lock is not reported:
-    /// the lock sequence ends the sheet with `endSheet(_:)` (code .stop)
-    /// while Rust is still unlocked, and nothing may be read then (§1.10).
+    /// focused, and starts the letter's fact log in Rust: how Brev is built
+    /// now (EnvironmentProbe.design), whether the user is an admin (read
+    /// once, HandSampler), and `keyOrigin`, where the identity key lives.
+    /// `sampler` samples the Mac and the sheet for a send. `completion` gets
+    /// the new thread's id after a send, and nil after Avbryt or Escape. A
+    /// lock is not reported: the lock sequence ends the sheet with
+    /// `endSheet(_:)` (code .stop) while Rust is still unlocked, and nothing
+    /// may be read then (§1.10). Every close ends the fact log.
     @discardableResult
-    static func present(on parent: NSWindow, to contact: ContactItem, session: Session,
-                        keys: @escaping () -> EnvironmentProbe.Keys, signer: @escaping Signer,
-                        completion: @escaping (Data?) -> Void) -> ComposeSheet {
-        let sheet = ComposeSheet(contact: contact, session: session, keys: keys, signer: signer, limits: limits())
+    static func present(on parent: NSWindow, to contact: ContactItem, session: Session, keyOrigin: KeyOrigin,
+                        sampler: @escaping (NSWindow?) -> Sample = EnvironmentProbe.sample(for:),
+                        signer: @escaping Signer, completion: @escaping (Data?) -> Void) -> ComposeSheet {
+        let sheet = ComposeSheet(contact: contact, session: session, sampler: sampler, signer: signer,
+                                 limits: limits())
         parent.beginSheet(sheet) { code in
             if sheet.sentThread == nil { session.cancelSend() }
+            try? session.composeClosed()
             sheet.wipeAll()
             GlyphFlush.flush()
             if code == .OK || code == .cancel { completion(sheet.sentThread) }
         }
         sheet.makeFirstResponder(sheet.subject)
+        do {
+            try session.composeStarted(design: EnvironmentProbe.design(), admin: HandSampler.isAdmin(),
+                                       keyOrigin: keyOrigin)
+        } catch {
+            // Locked: a send finds no compose session and says so.
+            log.error("compose not started: \((error as? BrevError).map { "\($0)" } ?? "other", privacy: .public)")
+        }
         Hardening.assertAllWindows()
         return sheet
     }
 
-    private init(contact: ContactItem, session: Session, keys: @escaping () -> EnvironmentProbe.Keys,
+    private init(contact: ContactItem, session: Session, sampler: @escaping (NSWindow?) -> Sample,
                  signer: @escaping Signer, limits: Limits) {
         subject = SecureComposeView(maxBytes: Int(limits.maxSubject), multiline: false)
         body = SecureComposeView(maxBytes: Int(limits.maxBody), multiline: true)
         self.contact = contact.id
         self.session = session
-        self.keys = keys
+        self.sampler = sampler
         self.signer = signer
         super.init(contentRect: NSRect(origin: .zero, size: Self.contentSize), styleMask: [.titled],
                    backing: .buffered, defer: false)
@@ -236,40 +262,43 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         submit()
     }
 
-    /// Step 0 on `Session.net`: the contact's key at the relay. No content.
-    /// Right before it, on main, Brev reports its defences to Rust.
+    /// Step 0 on `Session.net`: the compose session's class (an early exit)
+    /// and the contact's key at the relay. No content. The sample it takes
+    /// is made right before, on main.
     func send() {
         guard step == .editing, sentThread == nil, let session, sheetParent != nil else { return }
         show(.sending)
-        do {
-            try session.reportEnvironment(EnvironmentProbe.report(keys()))
-        } catch {
-            return failed(error)
-        }
+        let sample = sampler(self)
         let contact = contact, started = epoch
         Session.net.async {
-            let result = Result { try session.prepareSend(contact: contact) }
+            let result = Result { try session.prepareSend(contact: contact, sample: sample) }
             DispatchQueue.main.async { [weak self] in self?.prepared(result, started) }
         }
     }
 
-    /// Steps 1 and 2 on main: seal the letter (no I/O), then the one Touch
-    /// ID prompt.
+    /// Steps 1 and 2 on main: the letter and its token's digest, with a new
+    /// sample (no I/O), then the one Touch ID prompt, which signs the token
+    /// and, once Rust has sealed the letter with it, the envelope.
     private func prepared(_ result: Result<Void, Error>, _ started: Int) {
         guard started == epoch, let session else { return }
         let digest: Data
         do {
             try result.get()
-            digest = try session.signRequest(contact: contact, subject: subject.model.text, body: body.model.text)
+            digest = try session.signRequest(contact: contact, subject: subject.model.text, body: body.model.text,
+                                             sample: sampler(self))
         } catch {
             return failed(error)
         }
         show(.signing)
-        signer(digest) { [weak self] signed in self?.signed(signed, started) }
+        signer(digest, { [weak self] tokenSignature in
+            guard let self, started == self.epoch, let session = self.session else { throw BrevError.Locked }
+            return try session.attachTokenSignature(tokenSignature)
+        }) { [weak self] signed in self?.signed(signed, started) }
     }
 
-    /// Step 3 on main: the signature, which Rust checks against the own
-    /// key; then step 4. A cancelled prompt returns to editing.
+    /// Step 3 on main: the envelope's signature, which Rust checks against
+    /// the own key; then step 4. A cancelled prompt returns to editing, and
+    /// Rust forgets the letter either way.
     private func signed(_ result: Result<Data, Error>, _ started: Int) {
         guard started == epoch, let session else { return }
         do {
@@ -312,10 +341,11 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         }
     }
 
-    /// Back to editing with the text that fits `error`. Rust has forgotten
-    /// the ticket or the letter, or `cancelSend` does it when the sheet
-    /// closes.
+    /// Back to editing with the text that fits `error`. Rust forgets the
+    /// ticket and the letter now (`cancelSend`; it has already on most
+    /// errors), so no plaintext waits for a signature.
     private func failed(_ error: Error) {
+        session?.cancelSend()
         let name = (error as? BrevError).map { "\($0)" }
             ?? UnlockFailure.chain(error).map { "\($0.domain) \($0.code)" }.joined(separator: ", ")
         Self.log.error("send failed: \(name, privacy: .public)")
@@ -324,15 +354,16 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         case BrevError.NotApproved: show(.editing, notApproved)
         case BrevError.RateLimited: show(.editing, rateLimited)
         case BrevError.Network: show(.editing, netFailure)
-        case BrevError.Environment(let checks): show(.editing, environmentText(checks))
+        case BrevError.Environment(let facts): show(.editing, environmentText(facts))
         default: show(.editing, failure)
         }
     }
 
-    /// compose.environment naming `checks`, in the place of the other texts.
-    private func environmentText(_ checks: [ReportField]) -> InterfaceText {
+    /// compose.environment, one line per fact short of class A, in the
+    /// place of the other texts.
+    private func environmentText(_ facts: [String]) -> InterfaceText {
         environmentFailure?.removeFromSuperview()
-        let text = InterfaceText(L10n.composeEnvironment(checks), width: Self.messageWidth, alignment: .left)
+        let text = InterfaceText(L10n.composeEnvironment(facts), width: Self.messageWidth, alignment: .left)
         environmentFailure = text
         guard let root = contentView, let buttons = buttonRow else { return text }
         text.translatesAutoresizingMaskIntoConstraints = false

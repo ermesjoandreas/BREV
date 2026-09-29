@@ -8,9 +8,16 @@
 // docs/PHASE3_DESIGN.md §3.2), when the screen locks,
 // before sleep, when the displays sleep, on a user switch, after 300 s
 // without input on Brev's own clock (or once Rust has locked itself on its
-// own idle clock, LockState.rustIdleSecs), on ⌘L or the Lås button, and on
-// quit. An unlock shows mail only once Rust confirms it (`confirmActive`,
-// within 2 s of `Brev.unlock`).
+// own idle clock, LockState.rustIdleSecs), on ⌘L or the Lås button, on
+// quit, and when a sample of the Mac shows a running `sudo` or `su`, or SIP
+// off (docs/AUTHORSHIP.md §4.3, D-0109): every 2 s while unlocked a sample
+// (EnvironmentProbe: of the compose sheet while one is up, else of the main
+// window) goes to Rust's `observe`, which locks itself at once and names
+// the cause, and the lock screen then says why. An unlock shows mail only
+// once Rust confirms it (`confirmActive`, within 2 s of `Brev.unlock`, with
+// a sample of its own: `sudo` or SIP off refuses it, and the lock screen
+// says so). A lock also invalidates a signature's Touch ID context in
+// flight (`cancelSignature`, SignService).
 // Triggers only ever lock; nothing here unlocks. The decisions are in
 // LockState; this file observes the triggers and runs the sequence. Main
 // thread only.
@@ -44,23 +51,28 @@ final class LockController: NSObject {
     /// panel made Brev resign active.
     private static let touchIDLog = Logger(subsystem: "no.brev.app", category: "touchid")
 
+    /// Seconds between two samples for Rust's `observe` (D-0109).
+    static let observeInterval: TimeInterval = 2
+
     let state: LockState
     weak var window: MainWindow?
     weak var session: Session?
-    /// Shows the lock screen in the root (set by AppDelegate).
+    /// Shows the lock screen in the root (set by AppDelegate), with
+    /// `lockNotice` under its title.
     var showLockScreen: () -> Void = {}
+    /// Invalidates a signature's Touch ID context in flight (SignService's
+    /// `cancel`, set by AppDelegate).
+    var cancelSignature: () -> Void = {}
+    /// A sample of the Mac and of `window` (the compose sheet while one is
+    /// up, else the main window). The lock probe passes a fixed one.
+    var sampler: (NSWindow?) -> Sample = EnvironmentProbe.sample(for:)
+    /// Why the last lock happened, for the lock screen, when a sample made
+    /// it (`sudo`, SIP off); nil otherwise. Cleared when an unlock begins.
+    private(set) var lockNotice: String?
 
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var idleTimer: Timer?
-    /// The generation whose unlock unwrapped the DEK with Touch ID.
-    private var touchIDGeneration: UInt64?
-
-    /// Whether this unlock used Touch ID (UnlockService), for the
-    /// environment report (EnvironmentProbe): gone with the next lock, which
-    /// starts a new generation.
-    var unlockUsedTouchID: Bool {
-        state.unlocked && touchIDGeneration == state.generation
-    }
+    private var observeTimer: Timer?
 
     /// Brev's is `LockState()`; the lock probe passes one with the U4 switch
     /// in the other position.
@@ -113,26 +125,32 @@ final class LockController: NSObject {
 
     /// A human clicked unlock; returns the generation for `endUnlock`.
     func beginUnlock() -> UInt64 {
-        state.beginUnlock()
+        lockNotice = nil
+        return state.beginUnlock()
     }
 
     /// Called on main when the unlock closure returns. True means show
     /// mail; on false after a successful unlock the session is locked again
     /// (a lock happened meanwhile, or Brev is not the active app, or Rust
-    /// found the confirmation too late). `touchID`: the unlock unwrapped the
-    /// DEK with Touch ID (UnlockService), kept for this generation.
-    func endUnlock(_ started: UInt64, succeeded: Bool, touchID: Bool = false) -> Bool {
+    /// found the confirmation too late, or its sample shows `sudo` or SIP
+    /// off, which `lockNotice` then names). Then the samples for `observe`
+    /// start.
+    func endUnlock(_ started: UInt64, succeeded: Bool) -> Bool {
         guard state.endUnlock(started, succeeded: succeeded, appActive: NSApp.isActive) else {
             if succeeded { session?.brev.lock() }
             return false
         }
         do {
-            try session?.brev.confirmActive()
+            try session?.brev.confirmActive(sample: sampler(window))
+        } catch BrevError.Environment(let facts) {
+            lock(.environment, notice: L10n.unlockRefused(facts))
+            return false
         } catch {
             lock(.unlockExpired)
             return false
         }
-        touchIDGeneration = touchID ? state.generation : nil
+        observeTimer?.invalidate()
+        observeTimer = commonModeTimer(every: Self.observeInterval) { [weak self] in self?.observeNow() }
         idleTimer?.invalidate()
         idleTimer = commonModeTimer(every: LockState.idleCheckInterval) { [weak self] in
             guard let self else { return }
@@ -144,6 +162,20 @@ final class LockController: NSObject {
             }
         }
         return true
+    }
+
+    /// A sample for Rust's `observe` (every 2 s while unlocked): causes back
+    /// mean Rust has locked everything already, and the lock sequence
+    /// blanks Brev with the causes on the lock screen. `Locked` means Rust
+    /// locked on its own (its idle deadline): the lock sequence too.
+    func observeNow() {
+        guard state.unlocked, let session else { return }
+        do {
+            let causes = try session.observe(sampler(window?.attachedSheet ?? window))
+            if !causes.isEmpty { lock(.environment, notice: L10n.lockedBecause(causes)) }
+        } catch {
+            if (error as? BrevError) == .Locked { lock(.idle) }
+        }
     }
 
     // MARK: - A signature's Touch ID prompt (docs/PHASE3_DESIGN.md §3.2)
@@ -169,8 +201,10 @@ final class LockController: NSObject {
     // MARK: - The lock sequence (§8.4)
 
     /// Idempotent. Every step runs on every lock; only the switch to the
-    /// lock screen depends on whether Brev was unlocked.
-    func lock(_ reason: LockReason) {
+    /// lock screen depends on whether Brev was unlocked. `notice`: what the
+    /// lock screen says about it (a sample's `sudo` or SIP off), else
+    /// nothing.
+    func lock(_ reason: LockReason, notice: String? = nil) {
         dispatchPrecondition(condition: .onQueue(.main))
         // U4: whether a Touch ID panel takes activation from Brev shows here,
         // in the log, with no prompt of its own (docs/PHASE3_DESIGN.md §3.2).
@@ -183,11 +217,16 @@ final class LockController: NSObject {
         SelfScan.run(control: true)
         #endif
         // 1. New generation (an unlock in flight is discarded); the idle
-        //    timer stops (the sync timer stops with the mail screen in 3);
-        //    secure event input off; an open menu closes.
+        //    and sample timers stop (the sync timer stops with the mail
+        //    screen in 3); a signature's Touch ID context in flight is
+        //    invalidated; secure event input off; an open menu closes.
         let wasUnlocked = state.lock()
+        lockNotice = notice
         idleTimer?.invalidate()
         idleTimer = nil
+        observeTimer?.invalidate()
+        observeTimer = nil
+        cancelSignature()
         SecureInput.disable()
         NSApp.mainMenu.map(Self.menus)?.forEach { $0.cancelTracking() }
         // 2, 3. A compose sheet wipes its own content and every sheet ends,

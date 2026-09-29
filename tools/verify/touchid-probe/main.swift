@@ -238,7 +238,9 @@ func afterUnlock(_ result: Result<Void, UnlockFailure>) -> Never {
     switch result {
     case .success:
         // LockController's confirmation on main, as after Brev's unlock.
-        check("the unlock is confirmed within Rust's 2 s window", (try? session.brev.confirmActive()) != nil)
+        let sample = HandSampler.sample(sharingNone: false, preventsCapture: false)
+        check("the unlock is confirmed within Rust's 2 s window",
+              (try? session.brev.confirmActive(sample: sample)) != nil)
         let h = scan()
         check("while unlocked: the DEK is in Rust's box (positive control)", h[0] >= 1 && !session.brev.isLocked(), show(h))
         residueCheck("while unlocked: no copy of the DEK besides Rust's box", h[0] == 1, show(h))

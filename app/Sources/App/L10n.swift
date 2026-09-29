@@ -4,8 +4,9 @@
 // §1.5 (docs/PHASE2_DESIGN.md §5.6): every string here is fixed interface
 // text. None is ever built from content, and none takes an address, a
 // name or an identity code (docs/PHASE3_DESIGN.md §6.4, §6.6); the only
-// arguments are a date (metadata) and the names of failed checks, which are
-// strings from this file.
+// arguments are a date (metadata), Hand's fixed names of checks and facts
+// (from Rust, each shown as its text from this file), a class letter and
+// the counts of a letter's proof (docs/AUTHORSHIP.md §6).
 
 import Foundation
 
@@ -39,6 +40,19 @@ enum L10n {
     static let unlockErrorUnavailable = tr("unlock.error.unavailable")
     static let unlockErrorFingers = tr("unlock.error.fingers")
     static let unlockErrorDamaged = tr("unlock.error.damaged")
+
+    /// The lock screen after a sample locked Brev (docs/AUTHORSHIP.md §4.3):
+    /// one line per cause.
+    static func lockedBecause(_ causes: [LockCause]) -> String {
+        causes.map { $0 == .sudo ? tr("lock.sudo") : tr("lock.sip") }.joined(separator: "\n")
+    }
+
+    /// The lock screen after Rust refused to confirm an unlock whose sample
+    /// shows `sudo` or SIP off: one line per fact ("sudo", "sip").
+    static func unlockRefused(_ facts: [String]) -> String {
+        let lines = facts.compactMap { ["sudo": tr("unlock.refused.sudo"), "sip": tr("unlock.refused.sip")][$0] }
+        return lines.isEmpty ? unlockErrorRetry : lines.joined(separator: "\n")
+    }
 
     static let resetButton = tr("reset.button")
     static let resetConfirmTitle = tr("reset.confirm.title")
@@ -75,12 +89,12 @@ enum L10n {
     static let composeNotApproved = tr("compose.notapproved")
     static let composeRateLimited = tr("compose.ratelimited")
     static let composeRetry = tr("compose.retry")
-    /// "Brevet ble ikke sendt: <the checks that failed>." for
-    /// BrevError.Environment (docs/VAULT_SPLIT_PLAN.md §6, owner answer Q6).
-    /// No check named means Rust got no report since the unlock.
-    static func composeEnvironment(_ checks: [ReportField]) -> String {
-        let names = checks.isEmpty ? [tr("environment.noreport")] : checks.map(environmentCheck)
-        return String(format: tr("compose.environment"), names.joined(separator: ", "))
+    /// "Kan ikke sende: <the fact> (<its name>)." for each fact Rust names
+    /// in BrevError.Environment (docs/AUTHORSHIP.md §3.3), one line each.
+    /// No fact named means no compose session was measuring.
+    static func composeEnvironment(_ facts: [String]) -> String {
+        guard !facts.isEmpty else { return tr("compose.environment.none") }
+        return facts.map { String(format: tr("compose.environment"), fact($0), $0) }.joined(separator: "\n")
     }
     static let sendReason = tr("send.reason")
     static let netError = tr("net.error")
@@ -141,16 +155,51 @@ enum L10n {
 
     static let windowMainTitle = tr("window.main.title")
 
-    private static func environmentCheck(_ check: ReportField) -> String {
-        switch check {
-        case .keyOrigin: return tr("environment.keyorigin")
-        case .biometricUsed: return tr("environment.biometric")
-        case .captureExcluded: return tr("environment.capture")
-        case .secureInputActive: return tr("environment.secureinput")
-        case .syntheticInputRejected: return tr("environment.synthetic")
-        case .accessibilityOpaque: return tr("environment.accessibility")
-        case .pasteboardDisabled: return tr("environment.pasteboard")
-        }
+    // MARK: - A letter's proof (docs/AUTHORSHIP.md §6)
+
+    /// «Skrevet i Brev · klasse A» (B, C) for a verified letter, «Ikke
+    /// verifisert» otherwise.
+    static func badge(verified: Bool, classCode: UInt8?) -> String {
+        guard verified, let code = classCode, (1...3).contains(code) else { return tr("badge.unverified") }
+        return String(format: tr("badge.verified"), ["A", "B", "C"][Int(code) - 1])
+    }
+
+    /// The text of a failed check (`"token"`, `"signature"`, `"content"`,
+    /// `"iat"`, `"app-attest"`), or nil for a name that is not a check.
+    static func proofCheck(_ name: String) -> String? {
+        ["token", "signature", "content", "iat", "app-attest"].contains(name) ? tr("proof.check.\(name)") : nil
+    }
+
+    /// «Klassen stemmer ikke med målingene: <facts>».
+    static func proofClass(_ facts: [String]) -> String {
+        String(format: tr("proof.check.class"), facts.map(fact).joined(separator: ", "))
+    }
+
+    static func proofKey(_ value: String) -> String { String(format: tr("proof.key"), value) }
+    static func proofWindows(_ value: String) -> String { String(format: tr("proof.windows"), value) }
+    static func proofAgents(_ value: String) -> String { String(format: tr("proof.agents"), value) }
+    static func proofAdmin(_ value: String) -> String { String(format: tr("proof.admin"), value) }
+    static func proofBlocked(_ value: String) -> String { String(format: tr("proof.blocked"), value) }
+    static func proofSeconds(_ value: String) -> String { String(format: tr("proof.seconds"), value) }
+    static func proofSIP(_ value: String) -> String { String(format: tr("proof.sip"), value) }
+    static func proofSudo(_ value: String) -> String { String(format: tr("proof.sudo"), value) }
+    /// "<n> min".
+    static func proofMinutes(_ n: UInt32) -> String { String(format: tr("proof.minutes"), "\(n)") }
+    static let proofUnderAMinute = tr("proof.minutes.under")
+    static let proofYes = tr("proof.yes")
+    static let proofNo = tr("proof.no")
+    static let proofOn = tr("proof.on")
+    static let proofOff = tr("proof.off")
+    static let proofUnknown = tr("proof.unknown")
+    static let proofAttest = tr("proof.attest")
+    static let proofClose = tr("proof.close")
+
+    /// A fact of the token (Rust's fixed name, such as "max-gap") in words;
+    /// a name this file does not know is shown as it is.
+    private static func fact(_ name: String) -> String {
+        let key = "fact.\(name)"
+        let text = tr(key)
+        return text == key ? name : text
     }
 
     private static func tr(_ key: String) -> String {

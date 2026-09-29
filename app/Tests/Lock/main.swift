@@ -44,11 +44,19 @@
 // - an unlock opens Rust only with confirmActive, which must come within
 //   2 s: the time from Brev.unlock to the completion on main is noted
 //   (docs/VAULT_SPLIT_PLAN.md R4);
-// - the app's environment report (EnvironmentProbe) says what this process
-//   is: a software key and no Touch ID, BrevApplication, content views that
-//   expose nothing to accessibility, no Copy, Cut or Paste; its letters go
-//   out with it, since the test archive sends in class C
-//   (allow-software-keys; docs/VAULT_SPLIT_PLAN.md §6, §8).
+// - Hand (docs/AUTHORSHIP.md; D-0111): EnvironmentProbe's sample of the
+//   main window reads the window's settings and the Mac (SIP, processes,
+//   windows), and its design facts say what this process is
+//   (BrevApplication, content views that expose nothing to accessibility,
+//   no Copy, Cut or Paste); each dropped input event is told to Rust; a
+//   sample with sudo running, through LockController's `observeNow`, has
+//   Rust lock at once and runs the lock sequence with the notice for the
+//   lock screen; the received letter on the mail screen carries its badge
+//   («Skrevet i Brev · klasse C»: a software key, which the test archive
+//   sends in, allow-software-keys) and the sent one none, the badges are
+//   all that accessibility sees of the letter pane, and the badge's detail
+//   ends with «Appen er ikke bekreftet av Apple». Rust gets a fixed clean
+//   sample everywhere else, so a sudo in a terminal cannot fail the probe.
 // The mail screen lives in a MainWindow that is never ordered onto the
 // screen; each content view draws its visible part into its pixel buffers
 // as AppKit's display pass would make it. Output is check names only.
@@ -129,6 +137,15 @@ guard let rootCode = getenv("BREV_ROOT_INVITE"), strlen(rootCode) > 0 else {
     exit(2)
 }
 
+/// A sample of a Mac with nothing wrong, for every Rust call that takes one.
+let clean = Sample(secureInput: true, sharingNone: true, preventsCapture: true, csrConfig: 0,
+                   processes: ["launchd", "lock-probe"], windows: [])
+
+/// Every input event BrevApplication drops is told to Rust (AppDelegate
+/// sets this hook to `syntheticDropped`); counted here.
+var toldRust = 0
+BrevApplication.syntheticDropped = { toldRust += 1 }
+
 // MARK: - Dropped input does not move the idle clock (BrevApplication)
 
 /// What this process logged in `category` of Brev's subsystem since `since`.
@@ -148,10 +165,10 @@ let drop10 = "dropped synthetic 10 pid=\(getpid())", drop11 = "dropped synthetic
 if let e = CGEvent(keyboardEventSource: nil, virtualKey: 125, keyDown: true).flatMap(NSEvent.init(cgEvent:)) {
     NSApp.sendEvent(e)
 }
-check("sendEvent: a dropped key does not move the idle clock (control: it was dropped)",
+check("sendEvent: a dropped key does not move the idle clock, and is told to Rust (control: it was dropped)",
       BrevApplication.lastHumanInput == idleClock
-          && logged("input", since: since) == [drop10],
-      "\(logged("input", since: since))")
+          && logged("input", since: since) == [drop10] && toldRust == 1,
+      "\(logged("input", since: since)), told \(toldRust)")
 // nextEvent: a ↓ key posted to this process (never to another).
 if CGPreflightPostEventAccess() {
     for down in [true, false] {
@@ -229,21 +246,20 @@ func contact(_ s: Session, _ address: String) throws -> Data {
     return found.id
 }
 
-/// What the keys of this process did: a software identity key, no Touch ID.
-func softwareKeys(_ identity: SecKey) -> EnvironmentProbe.Keys {
-    EnvironmentProbe.Keys(identityKey: EnvironmentProbe.origin(of: identity), touchID: false)
-}
-
-/// One letter in the app's steps (the environment report, prepare, seal,
-/// sign, attach, submit).
+/// One letter in the app's steps (docs/AUTHORSHIP.md §3): a compose
+/// session with this process's design and its software key, prepare, the
+/// token's digest and signature, the envelope's, submit.
 func send(_ s: Session, _ identity: SecKey, to contact: Data, subject: String, body: String) throws {
     let st = text(subject), bt = text(body)
     defer { st.wipe(); bt.wipe() }
-    try s.reportEnvironment(EnvironmentProbe.report(softwareKeys(identity)))
-    try s.prepareSend(contact: contact)
-    try s.attachSignature(try Enclave.sign(digest: try s.signRequest(contact: contact, subject: st, body: bt),
-                                           key: identity))
+    try s.composeStarted(design: EnvironmentProbe.design(), admin: nil,
+                         keyOrigin: EnvironmentProbe.origin(of: identity))
+    try s.prepareSend(contact: contact, sample: clean)
+    let token = try s.signRequest(contact: contact, subject: st, body: bt, sample: clean)
+    let envelope = try s.attachTokenSignature(try Enclave.sign(digest: token, key: identity))
+    try s.attachSignature(try Enclave.sign(digest: envelope, key: identity))
     _ = try s.submit()
+    try s.composeClosed()
 }
 
 let softwareKEK = softwareKey(), identity = softwareKey()
@@ -263,13 +279,14 @@ func unlockRust() -> Bool {
         try Enclave.unwrap(wrappedDEK, with: softwareKEK) {
             try session.brev.unlock(dek: $0, idleSecs: LockState.rustIdleSecs)
         }
-        try session.brev.confirmActive()
+        try session.brev.confirmActive(sample: clean)
     } catch { return false }
     return !session.brev.isLocked()
 }
 
 let lock = LockController()
 lock.session = session
+lock.sampler = { _ in clean }
 var lockScreens = 0
 lock.showLockScreen = { lockScreens += 1 }
 
@@ -280,7 +297,7 @@ do {
         try session.brev.unlock(dek: $0, idleSecs: LockState.rustIdleSecs)
     }
     let armed = session.brev.isLocked()
-    try session.brev.confirmActive()
+    try session.brev.confirmActive(sample: clean)
     check("an unlock opens Rust only once it is confirmed", armed && !session.brev.isLocked())
 } catch {
     check("an unlock opens Rust only once it is confirmed", false, "\(error)")
@@ -314,7 +331,7 @@ do {
     let peerKEK = softwareKey(), peerIdentity = softwareKey()
     let (peer, peerWrapped) = try makeSession("b", kek: peerKEK, identity: peerIdentity)
     try Enclave.unwrap(peerWrapped, with: peerKEK) { try peer.brev.unlock(dek: $0, idleSecs: LockState.rustIdleSecs) }
-    try peer.brev.confirmActive()
+    try peer.brev.confirmActive(sample: clean)
     let me = freshAddress("a"), other = freshAddress("b")
     // The root invite for the first, an invite code of the first's for the
     // second; the first's sync pins the second (its invited event).
@@ -364,12 +381,38 @@ check("control: the header shows both addresses and codes, as pixels in their bu
           && header.codes.lines.allSatisfy { $0?.length == 35 } && !header.showsKeyChange)
 check("draw(_:) of every content view in sight draws nothing (print and PDF output)",
       !inSight.isEmpty && inSight.allSatisfy { !drawInks($0, $0.visibleRect.intersection($0.bounds)) })
-let report = EnvironmentProbe.report(softwareKeys(identity))
-check("the environment report with the mail screen up: a software key, no Touch ID, BrevApplication, "
-        + "content views opaque, no Copy, Cut or Paste",
-      report.keyOrigin == .software && !report.biometricUsed && report.syntheticInputRejected
-          && report.accessibilityOpaque && report.pasteboardDisabled,
-      "\(report)")
+let design = EnvironmentProbe.design()
+let sampled = EnvironmentProbe.sample(for: window)
+check("Hand's design facts with the mail screen up: BrevApplication, content views opaque, no Copy, Cut or Paste; "
+        + "the key is a software key",
+      design.inputFilter && design.axOpaque && design.pasteboardOff
+          && EnvironmentProbe.origin(of: identity) == .software,
+      "\(design)")
+check("Hand's sample of the main window: its sharingType, the protected layers, SIP's bits and every process "
+        + "name (this one's among them) are read",
+      sampled.sharingNone && sampled.preventsCapture && sampled.csrConfig != nil
+          && sampled.processes?.contains("lock-probe") == true,
+      "sharing \(sampled.sharingNone), capture \(sampled.preventsCapture), csr \(sampled.csrConfig != nil), "
+          + "processes \(sampled.processes?.count ?? -1)")
+check("Hand's sample of no window sets neither window setting",
+      !EnvironmentProbe.sample(for: nil).sharingNone)
+// The badge (docs/AUTHORSHIP.md §6): the newest thread is the peer's answer.
+let pane = all(LetterStackView.self, in: mail.view).first
+let badges = pane?.badges ?? []
+let badgeTitles = badges.map { $0?.title }
+let verifiedC = L10n.badge(verified: true, classCode: 3)
+check("the received letter carries its badge, verified in class C (a software key); a sent letter has none",
+      badgeTitles == [verifiedC] && mail.proofs.count == 1 && mail.proofs[0]?.verified == true
+          && mail.proofs[0]?.class == 3,
+      "\(badgeTitles)")
+check("accessibility sees the badges of the letter pane and nothing else in it",
+      (pane?.accessibilityChildren() as? [NSButton]).map { $0.map(\.title) } == [verifiedC])
+let detail = mail.proofs.first.flatMap { $0 }.map(ProofSheet.lines) ?? []
+check("the badge's detail lists what the sender's app reported, and ends with «Appen er ikke bekreftet av Apple»",
+      detail.last == L10n.proofAttest && detail.contains(L10n.proofKey(L10n.proofNo))
+          && detail.contains(L10n.proofWindows("0")) && detail.contains(L10n.proofSudo(L10n.proofNo))
+          && detail.contains(L10n.proofAdmin(L10n.proofUnknown)),
+      "\(detail.count) lines")
 
 lock.lock(.manual)
 check("lock: every pixel buffer of every content view is zero, also those of letters it removed",
@@ -488,8 +531,8 @@ check("control: the next frame draws the header again", headerLines.allSatisfy {
 var reports: [String] = []
 composing.onNewLetter = { [weak composing] contact in
     let id = contact.id
-    ComposeSheet.present(on: window, to: contact, session: session, keys: { softwareKeys(identity) },
-                         signer: { _, done in done(.failure(BrevError.Signing)) }) { thread in
+    ComposeSheet.present(on: window, to: contact, session: session, keyOrigin: EnvironmentProbe.origin(of: identity),
+                         sampler: { _ in clean }, signer: { _, _, done in done(.failure(BrevError.Signing)) }) { thread in
         reports.append(lock.state.unlocked ? "unlocked" : "locking")
         if let thread { composing?.showSent(thread: thread, contact: id) } else { composing?.reloadContacts(selecting: id) }
     }
@@ -557,6 +600,33 @@ for takes in [true, false] {
     }
 }
 
+// MARK: - A sample with sudo running locks (docs/AUTHORSHIP.md §4.3)
+
+guard unlockRust() else {
+    check("unlock for the sudo sample", false)
+    finish()
+}
+_ = lock.state.endUnlock(lock.state.beginUnlock(), succeeded: true, appActive: true)
+let observed = MailViewController(session: session)
+window.root.show(observed)
+observed.start()
+let screensBefore = lockScreens
+lock.observeNow()
+check("control: a clean sample leaves Brev unlocked", !session.brev.isLocked() && lockScreens == screensBefore)
+lock.sampler = { _ in
+    Sample(secureInput: true, sharingNone: true, preventsCapture: true, csrConfig: 0,
+           processes: ["launchd", "sudo"], windows: [])
+}
+lock.observeNow()
+check("a sample with sudo running: Rust locks, the lock sequence runs and the lock screen says why",
+      session.brev.isLocked() && !lock.state.unlocked && lockScreens == screensBefore + 1
+          && lock.lockNotice == L10n.lockedBecause([.sudo])
+          && all(SecureListView.self, in: observed.view).allSatisfy { $0.count == 0 },
+      "locked \(session.brev.isLocked()), screens \(lockScreens - screensBefore)")
+lock.sampler = { _ in clean }
+_ = lock.endUnlock(lock.beginUnlock(), succeeded: false)
+check("a new unlock clears the notice", lock.lockNotice == nil)
+
 // MARK: - UnlockService locks Rust when its closure fails
 
 /// UnlockService's keychain calls without the keychain: the KEK is the
@@ -573,7 +643,7 @@ final class FailingInstall: KeyStore {
     override func readWrapped() throws -> Data { wrappedDEK }
     override func storeWrapped(_ wrapped: Data) throws {
         unlockedAt = clock_gettime_nsec_np(CLOCK_MONOTONIC)
-        unlockedAtInstall = (try? session.brev.confirmActive()) != nil && !session.brev.isLocked()
+        unlockedAtInstall = (try? session.brev.confirmActive(sample: clean)) != nil && !session.brev.isLocked()
         throw KeyStore.error(errSecIO)
     }
     override func readBiometryState() -> Data? { nil }
