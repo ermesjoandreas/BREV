@@ -209,16 +209,17 @@ if [[ "$(grep -c . <<<"$GUARD_SITES")" != 2 ]]; then
   exit 1
 fi
 
-# brev-mail's allow-software-keys lets a letter go out in environment class
-# C (software keys, no Touch ID; docs/VAULT_SPLIT_PLAN.md §6). Only the test
-# archive has it: its marker is checked below, in gen-bindings.sh and in
+# brev-mail's allow-software-keys skips the hardware-key requirement on
+# both sides, so a letter with a software key and no Touch ID goes out and
+# verifies (docs/VAULT_SPLIT_PLAN.md §6; D-0115). Only the test archive has
+# it: its marker is checked below, in gen-bindings.sh and in
 # app/project.yml's build phase. Like the launch guard's, its cfg sites are
 # counted (R7): a new one fails here until it is reviewed and the count
 # updated.
 echo "==> allow-software-keys: its cfg sites"
 SOFT_SITES="$(cd "$REPO_ROOT" && grep -rn 'feature = "allow-software-keys"' core/*/src || true)"
 if [[ "$(grep -c . <<<"$SOFT_SITES")" != 3 ]]; then
-  echo "error: expected 3 cfg sites of allow-software-keys (the send threshold and the marker in ffi.rs, the refusal test in ffi/tests.rs), found:" >&2
+  echo "error: expected 3 cfg sites of allow-software-keys (KEY_RULE in store.rs, the marker in ffi.rs, the refusal test in ffi/tests.rs), found:" >&2
   echo "$SOFT_SITES" >&2
   exit 1
 fi
@@ -306,7 +307,7 @@ if [[ "$DARWIN" == yes ]]; then
   # N4). The harness, the lock probe and the view host link it, since some
   # of their runs have no MallocScribble (the lock probe, the harness's
   # controls), and they send letters with software keys and no Touch ID
-  # (environment class C). The control of the marker checks: the test
+  # (the hardware-key requirement skipped). The control of the marker checks: the test
   # archive has the marker, the app's does not. Features must not change
   # the FFI: its bindings, patched, are the app's.
   echo "==> test archive (no launch guard, allow-software-keys), its marker and its bindings"

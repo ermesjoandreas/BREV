@@ -66,7 +66,7 @@ fn stranger() -> PublicBundle {
     PublicBundle::new(&TestKey::new().public, random()).unwrap()
 }
 
-/// Drafts, makes the class-A token and seals, signs (the test key stands in
+/// Drafts, makes the token (every requirement met) and seals, signs (the test key stands in
 /// for the Enclave), stores the own copy and hands the envelope to the
 /// transport.
 fn send(from: &mut Party, to: ContactId, subject: &[u8], body: &[u8]) -> Envelope {
@@ -112,10 +112,10 @@ fn round_trip_a_encrypts_b_decrypts() {
     let m = b.core.receive(&inbox[0].1, inbox[0].0).unwrap();
     b.net.ack(&[inbox[0].1.id()]).unwrap();
     assert!(b.net.poll().unwrap().is_empty());
-    // The token checks out with A's pinned key: class A.
+    // The token checks out with A's pinned key, and meets every
+    // requirement.
     let proof = b.core.proof(m).unwrap().unwrap();
     assert!(proof.passed(), "{proof:?}");
-    assert_eq!(proof.class(), Some(brev_hand::EnvironmentClass::A));
 
     let threads = b.core.threads().unwrap();
     assert_eq!(threads.len(), 1);

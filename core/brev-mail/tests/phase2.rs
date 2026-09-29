@@ -273,7 +273,7 @@ fn no_plaintext_in_any_file() {
     assert_eq!(b.dir.files(), FILES, "no journal left behind");
 }
 
-/// The sealed content columns of a Hand store, schema v6 (`invites` is
+/// The sealed content columns of a Hand store, schema v7 (`invites` is
 /// empty here: A's invite was used when B registered).
 const SEALED: [(&str, &str); 10] = [
     ("identity", "keys"),
@@ -336,14 +336,14 @@ fn older_store_is_refused() {
     let dek: [u8; 32] = random();
     drop(Brev::create(dir.arg(), "http://127.0.0.1:9".into(), &dek, &key).unwrap());
     let raw = rusqlite::Connection::open(dir.0.join("brev.db")).unwrap();
-    for old in [1, 2, 3, 4, 5] {
+    for old in [1, 2, 3, 4, 5, 6] {
         raw.pragma_update(None, "user_version", old).unwrap();
         assert!(matches!(
             Brev::open(dir.arg(), "http://127.0.0.1:9".into()).map(drop),
             Err(BrevError::Corrupt)
         ));
     }
-    raw.pragma_update(None, "user_version", 6).unwrap();
+    raw.pragma_update(None, "user_version", 7).unwrap();
     Brev::open(dir.arg(), "http://127.0.0.1:9".into())
         .unwrap()
         .unlock(&dek, TEST_IDLE)

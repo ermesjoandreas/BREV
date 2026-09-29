@@ -1005,16 +1005,17 @@ fn folder_and_file_modes_are_checked() {
     unlock_active(&Brev::open(arg, NO_RELAY.into()).unwrap(), &dek);
 }
 
-/// A letter needs environment class A (docs/AUTHORSHIP.md §3.3): facts of
-/// class B, a software key (class C; a release build refuses it), or no
-/// compose session give `Environment` with the facts short of class A,
-/// before any request, and leave no ticket. Class A sends.
+/// A letter needs every requirement (docs/AUTHORSHIP.md §3.3, §4.1): facts
+/// that miss one, a software or unknown key (a release build refuses it),
+/// or no compose session give `Environment` with the requirements not met,
+/// before any request, and leave no ticket. Facts that meet them all send.
 #[cfg(not(feature = "allow-software-keys"))]
 #[test]
-fn prepare_send_needs_class_a() {
+fn prepare_send_needs_every_requirement() {
+    assert_eq!(KEY_RULE, brev_hand::Rule::All);
     let net = net();
     let (a, _b, b_at_a, _) = pair(&net);
-    let class_b = Sample {
+    let missing = Sample {
         secure_input: false,
         prevents_capture: false,
         ..clean()
@@ -1023,11 +1024,16 @@ fn prepare_send_needs_class_a() {
     for (key, sample, want) in [
         (
             Some(KeyOrigin::SecureEnclave),
-            class_b,
+            missing.clone(),
             vec!["capture-off", "secure-input"],
         ),
         (Some(KeyOrigin::Software), clean(), vec!["key"]),
         (Some(KeyOrigin::Unknown), clean(), vec!["key"]),
+        (
+            Some(KeyOrigin::Software),
+            missing,
+            vec!["key", "capture-off", "secure-input"],
+        ),
         (None, clean(), vec![]),
     ] {
         // A lock forgets the compose session; the unlock makes none.
@@ -1047,38 +1053,9 @@ fn prepare_send_needs_class_a() {
         ));
     }
     assert_eq!(net.server.requests(), before, "the relay saw no request");
-    // Control: class A sends.
+    // Control: every requirement met sends.
     send(&a, &b_at_a, b"s", b"x");
     assert_eq!(net.server.requests(), before + 2, "lookup and submit");
-}
-
-/// The threshold compares ranks: A sends at A; everything sends at C.
-#[test]
-fn may_send_compares_ranks() {
-    use EnvironmentClass::{A, B, C};
-    assert!(may_send(A, A) && !may_send(B, A) && !may_send(C, A));
-    assert!(may_send(A, C) && may_send(B, C) && may_send(C, C));
-}
-
-/// The sent letter's row keeps the class it went out in (1 = A); the
-/// received row has none.
-#[test]
-fn the_sent_row_keeps_its_environment_class() {
-    let net = net();
-    let (a, b, b_at_a, _) = pair(&net);
-    send(&a, &b_at_a, b"s", b"x");
-    assert_eq!(b.b.sync().unwrap().letters, 1);
-    let classes = |u: &User| -> Vec<Option<i64>> {
-        let s = guard(&u.b.s);
-        let mut stmt =
-            s.me.db_for_test()
-                .prepare("SELECT env_class FROM messages")
-                .unwrap();
-        let rows = stmt.query_map([], |r| r.get(0)).unwrap();
-        rows.collect::<Result<_, _>>().unwrap()
-    };
-    assert_eq!(classes(&a), [Some(1)]);
-    assert_eq!(classes(&b), [None]);
 }
 
 /// The compose calls go through the gate, and a lock forgets the session;
@@ -1188,14 +1165,14 @@ fn deliver(b: &User, envelopes: &[&Envelope], received_at: Option<u64>) -> u32 {
     arrived
 }
 
-/// docs/AUTHORSHIP.md §8: a letter A → B in class A through a
-/// `MockTransport`. The facts come from raw samples and events, counted in
+/// docs/AUTHORSHIP.md §8: a letter A → B that meets every requirement,
+/// through a `MockTransport`. The facts come from raw samples and events, counted in
 /// Rust; the Secure Enclave key (a test key) signs the token and the
 /// envelope; B's core checks the token with A's pinned key and the
-/// transport's `received_at`, and stores the result: verified, class A,
-/// with the counts A's app saw. A's own copy has no proof.
+/// transport's `received_at`, and stores the result: verified, with the
+/// counts A's app saw. A's own copy has no proof.
 #[test]
-fn a_letter_round_trips_with_a_verified_class_a_token() {
+fn a_letter_round_trips_with_a_verified_token() {
     let net = net();
     let (a, b, b_at_a, a_at_b) = pair(&net);
     compose(&a);
@@ -1244,7 +1221,6 @@ fn a_letter_round_trips_with_a_verified_class_a_token() {
         proof,
         Proof {
             verified: true,
-            class: Some(1),
             failed: Vec::new(),
             attested: false,
             admin: Some(true),
@@ -1272,8 +1248,8 @@ fn a_letter_round_trips_with_a_verified_class_a_token() {
 /// docs/AUTHORSHIP.md §6: a token tampered with inside a payload that the
 /// sender's key sealed and signed again. The letter is stored anyway, with
 /// the failed check: a signature one bit off fails `"signature"`; a good
-/// token moved to another letter fails `"content"`. Neither shows a class
-/// or the sender's counts. So does a letter the relay stamped a day late:
+/// token moved to another letter fails `"content"`. Neither shows the
+/// sender's counts. So does a letter the relay stamped a day late:
 /// `"iat"`.
 #[test]
 fn a_tampered_token_is_stored_as_not_verified() {
@@ -1317,7 +1293,6 @@ fn a_tampered_token_is_stored_as_not_verified() {
             proof,
             Proof {
                 verified: false,
-                class: None,
                 failed: vec![want.to_owned()],
                 attested: false,
                 admin: None,
@@ -1334,7 +1309,7 @@ fn a_tampered_token_is_stored_as_not_verified() {
     // Control: a letter built the same way with its own token verifies.
     assert_eq!(deliver(&b, &[&good], None), 1);
     let proof = b.b.letter_proof(received(&b, &a_at_b)).unwrap().unwrap();
-    assert!(proof.verified && proof.class == Some(1), "{proof:?}");
+    assert!(proof.verified && proof.failed.is_empty(), "{proof:?}");
 }
 
 /// docs/AUTHORSHIP.md §6 step 5: a replayed envelope, the same message id
@@ -1403,7 +1378,7 @@ fn a_sudo_sample_locks_everything() {
         Err(BrevError::Locked)
     ));
 
-    // A read that failed is no reason to lock (it gives class B).
+    // A read that failed is no reason to lock (it fails the requirements).
     unlock_active(&a.b, &a.dek);
     let unread = Sample {
         processes: None,
@@ -1482,7 +1457,7 @@ fn confirm_active_with_sip_off_refuses_and_stays_locked() {
 
 /// docs/AUTHORSHIP.md §2.2, §4.1: a gap of more than 5 s in the measuring
 /// (here the compose session's clock moved 6 s on since the last sample)
-/// gives class B, so `sign_request` refuses after a `prepare_send` that
+/// misses a requirement, so `sign_request` refuses after a `prepare_send` that
 /// passed, with `"max-gap"`. The letter from before (sealed, unsent) and
 /// the ticket are gone, and nothing decrypted is left.
 #[test]

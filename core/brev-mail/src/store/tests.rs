@@ -72,7 +72,8 @@ fn at() -> u64 {
     now().unsigned_abs()
 }
 
-/// The whole send path at the core: a draft, its class-A token (the test
+/// The whole send path at the core: a draft, its token (every requirement
+/// met; the test
 /// key signs), seal, sign the digest, attach, store the own copy. Returns
 /// the signed envelope.
 fn send(from: &mut Party, to: ContactId, subject: &[u8], body: &[u8]) -> Envelope {
@@ -196,10 +197,10 @@ fn unlock_refuses_all_zero_dek() {
     drop(Cleanup(path));
 }
 
-/// Design §8 brev-mail 7 and docs/AUTHORSHIP.md §6: schema v6, its
-/// pragmas and its tables, column by column.
+/// Design §8 brev-mail 7, docs/AUTHORSHIP.md §6 and D-0115: schema v7,
+/// its pragmas and its tables, column by column.
 #[test]
-fn schema_v6() {
+fn schema_v7() {
     let p = party();
     drop(p.core);
     let core = Core::open(&p.path).unwrap();
@@ -217,7 +218,7 @@ fn schema_v6() {
     assert_eq!(q("fullfsync"), "Integer(1)");
     assert_eq!(q("trusted_schema"), "Integer(0)");
     assert_eq!(q("application_id"), format!("Integer({APPLICATION_ID})"));
-    assert_eq!(q("user_version"), "Integer(6)");
+    assert_eq!(q("user_version"), "Integer(7)");
     assert!(core
         .db()
         .db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
@@ -251,14 +252,13 @@ fn schema_v6() {
             "outgoing",
             "read",
             "body",
-            "env_class",
             "proof"
         ]
     );
 }
 
 /// A real Phase 2 store (its schema, application_id and user_version 2)
-/// and a v3 store relabelled as version 2 are both refused, unchanged.
+/// and a v7 store relabelled as version 2 are both refused, unchanged.
 #[test]
 fn v2_store_is_refused() {
     const V2_SCHEMA: &str = "
@@ -299,18 +299,18 @@ CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
     assert_eq!(fs::read(&path).unwrap(), before);
     drop(Cleanup(path));
 
-    // A v6 store relabelled as version 2.
+    // A v7 store relabelled as version 2.
     let p = party();
     drop(p.core);
     let raw = Connection::open(&p.path).unwrap();
     raw.pragma_update(None, "user_version", 2).unwrap();
     assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
-    raw.pragma_update(None, "user_version", 6).unwrap();
+    raw.pragma_update(None, "user_version", 7).unwrap();
     drop(Core::open(&p.path).unwrap());
 }
 
 /// A real Phase 3 store before the environment class (schema v3: no
-/// `messages.env_class`) and a v6 store relabelled as version 3 are both
+/// `messages.env_class`) and a v7 store relabelled as version 3 are both
 /// refused, unchanged: there is no migration (docs/VAULT_SPLIT_PLAN.md Q4).
 #[test]
 fn v3_store_is_refused() {
@@ -355,18 +355,18 @@ CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
     assert_eq!(fs::read(&path).unwrap(), before);
     drop(Cleanup(path));
 
-    // A v6 store relabelled as version 3.
+    // A v7 store relabelled as version 3.
     let p = party();
     drop(p.core);
     let raw = Connection::open(&p.path).unwrap();
     raw.pragma_update(None, "user_version", 3).unwrap();
     assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
-    raw.pragma_update(None, "user_version", 6).unwrap();
+    raw.pragma_update(None, "user_version", 7).unwrap();
     drop(Core::open(&p.path).unwrap());
 }
 
 /// Design §8 brev-mail 7: a real Phase 3 store (schema v4: no
-/// `contacts.flags`, no `invites`) and a v6 store relabelled as version 4
+/// `contacts.flags`, no `invites`) and a v7 store relabelled as version 4
 /// are both refused, unchanged: there is no migration
 /// (docs/PHASE4_DESIGN.md §5.1).
 #[test]
@@ -411,60 +411,76 @@ CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
     let before = fs::read(&path).unwrap();
     assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
     assert_eq!(fs::read(&path).unwrap(), before);
-    // Control: the same file labelled version 6 is still refused (its
-    // schema is not v6's), so the check is the schema, not only the label.
+    // Control: the same file labelled version 7 is still refused (its
+    // schema is not v7's), so the check is the schema, not only the label.
     let raw = Connection::open(&path).unwrap();
-    raw.pragma_update(None, "user_version", 6).unwrap();
+    raw.pragma_update(None, "user_version", 7).unwrap();
     drop(raw);
     assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
     drop(Cleanup(path));
 
-    // A v6 store relabelled as version 4.
+    // A v7 store relabelled as version 4.
     let p = party();
     drop(p.core);
     let raw = Connection::open(&p.path).unwrap();
     raw.pragma_update(None, "user_version", 4).unwrap();
     assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
-    raw.pragma_update(None, "user_version", 6).unwrap();
+    raw.pragma_update(None, "user_version", 7).unwrap();
     drop(Core::open(&p.path).unwrap());
 }
 
-/// docs/AUTHORSHIP.md §6: a real Phase 4 store (schema v5: no
-/// `messages.proof`) and a v6 store relabelled as version 5 are both
-/// refused, unchanged: there is no migration.
-#[test]
-fn v5_store_is_refused() {
-    let v5_schema = SCHEMA.replace(
-        "env_class  INTEGER,                    -- pt: environment class a sent letter went out in (1 = A); NULL otherwise
-    proof      BLOB NOT NULL               -- ct: a received letter's Hand result (pass bits || token); empty for a sent one",
-        "env_class  INTEGER                     -- pt: environment class a sent letter went out in (1 = A); NULL otherwise",
-    );
-    assert_ne!(v5_schema, SCHEMA, "control: the column is cut");
+/// The `messages.proof` line of the schema, and the `env_class` lines of
+/// versions 4 and 5 (the last column) and of version 6 (before `proof`).
+const PROOF_LINE: &str = "    proof      BLOB NOT NULL               -- ct: a received letter's Hand result (pass bits || token); empty for a sent one";
+const ENV_CLASS_LAST: &str = "    env_class  INTEGER                     -- pt: environment class a sent letter went out in (1 = A); NULL otherwise";
+const ENV_CLASS_V6: &str = "    env_class  INTEGER,                    -- pt: environment class a sent letter went out in (1 = A); NULL otherwise";
+
+/// A store with `schema` labelled `version` is refused, unchanged; so is
+/// the same file labelled version 7 (the check is the schema, not only the
+/// label); and so is a v7 store relabelled as `version`: there is no
+/// migration.
+fn refused(schema: &str, version: i32) {
+    assert_ne!(schema, SCHEMA, "control: the schema differs");
     let path = temp_path();
     let raw = Connection::open(&path).unwrap();
     raw.pragma_update(None, "application_id", APPLICATION_ID)
         .unwrap();
-    raw.execute_batch(&v5_schema).unwrap();
-    raw.pragma_update(None, "user_version", 5).unwrap();
+    raw.execute_batch(schema).unwrap();
+    raw.pragma_update(None, "user_version", version).unwrap();
     drop(raw);
     let before = fs::read(&path).unwrap();
     assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
     assert_eq!(fs::read(&path).unwrap(), before);
-    // Labelled version 6, its schema still is not v6's.
     let raw = Connection::open(&path).unwrap();
-    raw.pragma_update(None, "user_version", 6).unwrap();
+    raw.pragma_update(None, "user_version", 7).unwrap();
     drop(raw);
     assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
     drop(Cleanup(path));
 
-    // A v6 store relabelled as version 5.
     let p = party();
     drop(p.core);
     let raw = Connection::open(&p.path).unwrap();
-    raw.pragma_update(None, "user_version", 5).unwrap();
+    raw.pragma_update(None, "user_version", version).unwrap();
     assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
-    raw.pragma_update(None, "user_version", 6).unwrap();
+    raw.pragma_update(None, "user_version", 7).unwrap();
     drop(Core::open(&p.path).unwrap());
+}
+
+/// docs/AUTHORSHIP.md §6: a real Phase 4 store (schema v5: `env_class`, no
+/// `messages.proof`) is refused.
+#[test]
+fn v5_store_is_refused() {
+    refused(&SCHEMA.replace(PROOF_LINE, ENV_CLASS_LAST), 5);
+}
+
+/// D-0115: a Hand store with classes (schema v6: `messages.env_class`
+/// before `messages.proof`) is refused.
+#[test]
+fn v6_store_is_refused() {
+    refused(
+        &SCHEMA.replace(PROOF_LINE, &format!("{ENV_CLASS_V6}\n{PROOF_LINE}")),
+        6,
+    );
 }
 
 static SQL_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());

@@ -354,16 +354,15 @@ seq.append(try FfiConverterTypeRequestRow.read(from: &buf))
 FfiConverterTypeRequestRow.write(item, into: &buf)
 
 # Hand (docs/AUTHORSHIP.md §3.1, §4.3, §6; D-0110). App to Rust: raw
-# observations and design facts only, never a count or a class. A Sample
+# observations and design facts only, never a count or a result. A Sample
 # (observe, confirmActive, prepareSend, signRequest): three flags, the SIP
 # bits (UInt32?), the process names ([String]?) and the on-screen windows
 # ([Window]?, each an owner pid and a layer, Int32). composeStarted's Design
 # (three flags), the admin flag (Bool?) and the KeyOrigin. The input events
 # (syntheticDropped, pasteAccepted) carry nothing. Rust to app: observe's
 # list of LockCause; BrevError.Environment's list of fact names; and
-# letterProof's Proof? (verified, class UInt8? = 1/2/3, failed names,
-# attested, and admin, agents, windows, blockedInput, seconds, sip, sudo,
-# each optional). Flags, fixed names, counts and process names only, no
+# letterProof's Proof? (verified, failed names, attested, and admin,
+# agents, windows, blockedInput, seconds, sip, sudo, each optional). Flags, fixed names, counts and process names only, no
 # content.
 FfiConverterTypeDesign_lower(design),
 FfiConverterOptionBool.lower(admin),
@@ -375,9 +374,7 @@ FfiConverterTypeSample_lower(sample),uniffiCallStatus
 return try  FfiConverterSequenceTypeLockCause.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
 return try  FfiConverterOptionTypeProof.lift(try rustCallWithError(FfiConverterTypeBrevError_lift) {
 fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
-fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
 fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
-fileprivate struct FfiConverterOptionUInt8: FfiConverterRustBuffer {
 fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
 fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
 fileprivate struct FfiConverterOptionSequenceTypeWindow: FfiConverterRustBuffer {
@@ -414,8 +411,6 @@ return FfiConverterTypeWindow.lower(value)
 # tag, each sequence's items.
 case 1: return try FfiConverterBool.read(from: &buf)
 FfiConverterBool.write(value, into: &buf)
-case 1: return try FfiConverterUInt8.read(from: &buf)
-FfiConverterUInt8.write(value, into: &buf)
 case 1: return try FfiConverterUInt32.read(from: &buf)
 FfiConverterUInt32.write(value, into: &buf)
 case 1: return try FfiConverterSequenceString.read(from: &buf)
@@ -456,8 +451,6 @@ FfiConverterBool.write(value.inputFilter, into: &buf)
 # Proof's fields.
 verified: FfiConverterBool.read(from: &buf),
 FfiConverterBool.write(value.verified, into: &buf)
-class: FfiConverterOptionUInt8.read(from: &buf),
-FfiConverterOptionUInt8.write(value.`class`, into: &buf)
 failed: FfiConverterSequenceString.read(from: &buf),
 FfiConverterSequenceString.write(value.failed, into: &buf)
 attested: FfiConverterBool.read(from: &buf),

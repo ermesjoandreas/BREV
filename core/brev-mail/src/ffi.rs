@@ -33,12 +33,12 @@
 //! compose session (`compose_started` to `compose_closed`) keeps a
 //! brev-hand `FactLog` of them and of the input events. A sample that shows
 //! a running `sudo` or `su`, or SIP off, locks everything at once. A letter
-//! goes out only in environment class A, computed here from the facts and
-//! the key origin the app names, and it carries a token that the identity
-//! key signs with the same Touch ID as the envelope: `sign_request` gives
-//! the token's digest, `attach_token_signature` seals the letter with the
-//! token and gives the envelope's. The app has no call that sets a count or
-//! a class. The facts are still the app's own word: until attestation they
+//! goes out only when all the requirements hold (brev-hand's
+//! `requirements`), checked here on the facts and the key origin the app
+//! names, and it carries a token that the identity key signs with the same
+//! Touch ID as the envelope: `sign_request` gives the token's digest,
+//! `attach_token_signature` seals the letter with the token and gives the
+//! envelope's. The app has no call that sets a count or a result. The facts are still the app's own word: until attestation they
 //! catch bugs in the app, not attackers (CLAUDE.md §2). A received letter's
 //! token is checked and its result stored; [`Brev::letter_proof`] reads it
 //! for the badge.
@@ -48,18 +48,21 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use brev_hand::{lock_reasons, token, Claims, Env, FactLog, LockReason, Verification};
+use brev_hand::{
+    lock_reasons, requirements, token, Claims, Env, FactLog, LockReason, Verification,
+};
 use brev_proto::body::{self, is_valid_address, EventKind, ADDRESS_MAX};
 use brev_proto::invite::{self, MAX_CODE, SECRET_LEN};
 use brev_proto::SIG_LEN;
-use brev_vault::{EnvironmentClass, Holder, Text, Timer};
+use brev_vault::{Holder, Text, Timer};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, Plaintext};
 use crate::relay::{Incoming, Mailbox, RelayTransport};
 use crate::store::{
-    is_permanent, today, Draft, Letter, APPROVED_ME, BLOCKED, BLOCK_UNTOLD, MAIL, VERIFIED,
+    is_permanent, today, Draft, Letter, APPROVED_ME, BLOCKED, BLOCK_UNTOLD, KEY_RULE, MAIL,
+    VERIFIED,
 };
 use crate::transport::{NetError, Transport};
 use crate::{ContactId, Core, Error, IdentityId, MessageId, PublicBundle, ThreadId};
@@ -78,20 +81,10 @@ const MAX_IDLE_SECS: u32 = 3600;
 /// most [`MAX_CODE`] bytes once trimmed.
 const MAX_PASTE: usize = 256;
 
-/// The lowest environment class that may send a letter: A. A test archive
-/// built with the cargo feature allow-software-keys (for the Swift harness,
-/// the lock probe and the view host, which have software keys and no Touch
-/// ID) lowers it to C. The app's archive never has that feature:
-/// scripts/gen-bindings.sh and the build phase in app/project.yml fail on
-/// its marker (docs/VAULT_SPLIT_PLAN.md §6).
-const SEND_THRESHOLD: EnvironmentClass = if cfg!(feature = "allow-software-keys") {
-    EnvironmentClass::C
-} else {
-    EnvironmentClass::A
-};
-
-/// The mark of allow-software-keys in the archive, for the release checks
-/// above; scripts/test.sh checks that the test archive has it.
+/// The mark of allow-software-keys (the store's `KEY_RULE`) in the archive,
+/// for the release checks: scripts/gen-bindings.sh and the build phase in
+/// app/project.yml fail on it; scripts/test.sh checks that the test archive
+/// has it.
 #[cfg(feature = "allow-software-keys")]
 #[used]
 static SOFTWARE_KEYS_MARKER: [u8; 26] = *b"BREV-ALLOW-SOFTWARE-KEYS-1";
@@ -159,15 +152,15 @@ pub enum BrevError {
     /// safe to decrypt in (a `DYLD_*` variable, no `MallocScribble=1`).
     #[error("unsafe")]
     Unsafe,
-    /// `prepare_send`, `sign_request`: the letter's facts are below the
-    /// class sending needs (A), or no compose session is open, so nothing
-    /// was signed or sent. `confirm_active`, `prepare_send`, `sign_request`:
+    /// `prepare_send`, `sign_request`: the letter's facts do not meet the
+    /// requirements, or no compose session is open, so nothing was signed
+    /// or sent. `confirm_active`, `prepare_send`, `sign_request`:
     /// the sample shows a reason to lock (docs/AUTHORSHIP.md §4.3), and
     /// everything is locked now.
     #[error("environment")]
     Environment {
-        /// The token's names of the facts short of class A, in token order
-        /// (`"key"` for a key that is not in hardware), or of the facts
+        /// The token's names of the requirements not met, in token order
+        /// (`"key"` first, for a key that is not in hardware), or of the facts
         /// that locked (`"sudo"`, `"sip"`); empty without a compose
         /// session.
         failed: Vec<String>,
@@ -362,15 +355,12 @@ fn lock_fact(r: LockReason) -> &'static str {
 /// names and counts.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Proof {
-    /// Every check passed: «Skrevet i Brev · klasse …». Otherwise
-    /// «Ikke verifisert».
+    /// Every check passed: «Skrevet i Brev». Otherwise «Ikke verifisert».
     pub verified: bool,
-    /// The class, when verified: 1 = A, 2 = B, 3 = C.
-    pub class: Option<u8>,
     /// What failed, in the order of the checks: `"token"` (its form),
     /// `"signature"`, `"app-attest"`, `"content"`, `"iat"` (its time), and
-    /// for the class check the facts that do not support the claimed class
-    /// (`"sip"`, `"key"`, …). Empty when verified.
+    /// for the requirements check the facts that miss one (`"key"`,
+    /// `"sip"`, …). Empty when verified.
     pub failed: Vec<String>,
     /// Apple's App Attest vouched for the app: always false on Mac
     /// (D-0108), «Appen er ikke bekreftet av Apple».
@@ -402,7 +392,6 @@ impl From<&Verification> for Proof {
         let env = v.claims.as_ref().filter(|_| v.passed()).map(|c| c.env);
         Proof {
             verified: v.passed(),
-            class: v.class().and_then(|c| u8::try_from(c.code()).ok()),
             failed,
             attested: false,
             admin: env.and_then(|e| e.admin),
@@ -414,11 +403,6 @@ impl From<&Verification> for Proof {
             sudo: env.and_then(|e| e.sudo),
         }
     }
-}
-
-/// Whether class `c` reaches `threshold`.
-fn may_send(c: EnvironmentClass, threshold: EnvironmentClass) -> bool {
-    c.rank() >= threshold.rank()
 }
 
 /// The content limits and chunk size, so the app sizes its fixed buffers
@@ -646,12 +630,11 @@ impl Compose {
 }
 
 /// A letter whose token is being signed (docs/AUTHORSHIP.md §3.2): its
-/// draft (the plaintext, a vault `Plaintext` that a lock wipes), the claims
-/// as signed, and their class.
+/// draft (the plaintext, a vault `Plaintext` that a lock wipes) and the
+/// claims as signed.
 struct Pending {
     draft: Draft,
     payload: Vec<u8>,
-    class: EnvironmentClass,
 }
 
 struct Registering {
@@ -1311,8 +1294,8 @@ impl Brev {
 
     /// What a received letter's authorship token showed, as stored when it
     /// arrived (docs/AUTHORSHIP.md §6): for the badge and its detail. `None`
-    /// for a letter the user sent (its own class went out with it and is
-    /// not shown back). Decrypts no content.
+    /// for a letter the user sent (it went out only because it met the
+    /// requirements, and nothing is shown back). Decrypts no content.
     pub fn letter_proof(&self, message: Vec<u8>) -> Result<Option<Proof>, BrevError> {
         let message = MessageId(id(&message)?);
         let s = self.session()?;
@@ -1330,9 +1313,9 @@ impl Brev {
     /// not registered; `Network`, `Refused`. Before any request, with
     /// `sample` taken just now: a reason to lock locks everything
     /// (`Environment`, docs/AUTHORSHIP.md §4.3); the open compose session's
-    /// facts must reach class A (§3.3, an early exit: `sign_request`
-    /// decides), else `Environment` with the facts short of it, also
-    /// without a compose session; and a blocked contact is `NotApproved`.
+    /// facts must meet the requirements (§3.3, an early exit:
+    /// `sign_request` decides), else `Environment` with the ones not met,
+    /// also without a compose session; and a blocked contact is `NotApproved`.
     /// Forgets a letter waiting for its token signature.
     pub fn prepare_send(&self, contact: Vec<u8>, sample: Sample) -> Result<(), BrevError> {
         let contact = ContactId(id(&contact)?);
@@ -1375,9 +1358,9 @@ impl Brev {
     /// `KeyChanged` while the contact's key change waits; `Malformed`
     /// without the ticket of a `prepare_send` for this contact (the ticket
     /// is used up either way). Then the compose session's facts are frozen
-    /// with the sample, and their class must reach A (§3.3): `Environment`
-    /// with the facts short of it otherwise, also without a compose
-    /// session. No I/O. Keeps the letter's plaintext (a vault `Plaintext`,
+    /// with the sample, and they must meet the requirements (§3.3):
+    /// `Environment` with the ones not met otherwise, also without a
+    /// compose session. No I/O. Keeps the letter's plaintext (a vault `Plaintext`,
     /// which `cancel_send` and a lock wipe) and the claims, with the
     /// sender's clock as `iat`, and returns the digest of the token the
     /// identity key signs. Any failure forgets the letter.
@@ -1408,17 +1391,12 @@ impl Brev {
             return Err(BrevError::Malformed);
         }
         let (key, env) = s.facts(&sample)?;
-        let class = allowed(key, &env)?;
+        allowed(key, &env)?;
         let draft = s.me.draft(contact, subject, body)?;
         let claims = Claims::new(draft.letter(), unix_now(), key, env)?;
-        debug_assert_eq!(claims.class, class, "one class rule");
         let payload = claims.encode();
         let digest = token::digest(&payload);
-        s.pending = Some(Pending {
-            draft,
-            payload,
-            class,
-        });
+        s.pending = Some(Pending { draft, payload });
         Ok(digest.to_vec())
     }
 
@@ -1447,9 +1425,8 @@ impl Brev {
             }
         };
         let token = token::assemble(&pending.payload, &raw);
-        let mut letter = s.me.seal_letter(&pending.draft, &token)?;
+        let letter = s.me.seal_letter(&pending.draft, &token)?;
         drop(pending.draft);
-        letter.class = Some(pending.class);
         let digest = letter.digest();
         s.letter = Some(letter);
         Ok(digest.to_vec())
@@ -1956,13 +1933,13 @@ fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The class of a letter written with a key in `key` under `env`
-/// (brev-hand's rule), if it reaches [`SEND_THRESHOLD`]; otherwise
-/// `Environment` with the facts short of class A.
-fn allowed(key: brev_vault::KeyOrigin, env: &Env) -> Result<EnvironmentClass, BrevError> {
-    let (class, failed) = brev_hand::classify(key, env);
-    if may_send(class, SEND_THRESHOLD) {
-        Ok(class)
+/// Whether a letter written with a key in `key` under `env` meets the
+/// requirements of [`KEY_RULE`] (brev-hand's `requirements`); otherwise
+/// `Environment` with the ones it does not meet.
+fn allowed(key: brev_vault::KeyOrigin, env: &Env) -> Result<(), BrevError> {
+    let failed = requirements::unmet(key, env, KEY_RULE);
+    if failed.is_empty() {
+        Ok(())
     } else {
         Err(names(failed))
     }

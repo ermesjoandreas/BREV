@@ -122,8 +122,8 @@ targets:
 
     # Before anything is compiled, in every configuration: the Rust archive
     # this target links must not be a test archive. brev-mail's feature
-    # allow-software-keys lets a letter go out in environment class C
-    # (software keys, no Touch ID; docs/VAULT_SPLIT_PLAN.md §6) and compiles a
+    # allow-software-keys skips the hardware-key requirement (software keys,
+    # no Touch ID; docs/VAULT_SPLIT_PLAN.md §6, D-0115) and compiles a
     # marker into the archive, which fails the build here. That covers
     # Release and Archive from the IDE and the Verify build of
     # tools/verify/build.sh; scripts/gen-bindings.sh checks the same after its

@@ -59,7 +59,7 @@ pub const DESIGN: Design = Design {
     input_filter: true,
 };
 
-/// Every fact of a class-A letter, for tokens made by hand.
+/// Facts that meet every requirement, for tokens made by hand.
 pub fn clean_env() -> Env {
     Env {
         sip: Some(true),
@@ -175,7 +175,7 @@ impl TestKey {
         sig.to_der().as_bytes().to_vec()
     }
 
-    /// A class-A authorship token for `letter`, now, signed by this key.
+    /// An authorship token for `letter` that meets every requirement, now, signed by this key.
     pub fn token(&self, letter: &[u8]) -> Vec<u8> {
         let claims = Claims::new(
             letter,

@@ -25,8 +25,8 @@ thiserror = { workspace = true }
 brev-proto = { path = "../brev-proto" }
 # The store, its DEK, column encryption, padding and the zeroing allocator.
 brev-vault = { path = "../brev-vault", default-features = false, features = ["zeroing-allocator"] }
-# Hand (docs/AUTHORSHIP.md): the facts of a letter, its class, the token the
-# identity key signs, and the recipient's checks.
+# Hand (docs/AUTHORSHIP.md): the facts of a letter, its requirements, the
+# token the identity key signs, and the recipient's checks.
 brev-hand = { path = "../brev-hand" }
 rusqlite = { workspace = true }
 x25519-dalek = { workspace = true }
@@ -45,7 +45,8 @@ launch-guard = ["brev-vault/launch-guard"]
 # (docs/VAULT_SPLIT_PLAN.md Q5). Never in the app's archive: gen-bindings.sh
 # builds with the default features.
 test-hooks = ["brev-vault/test-hooks"]
-# Sending in environment class C (software keys, no Touch ID), for the test
+# The requirements without the hardware key, on the sender's and the
+# recipient's side (software keys, no Touch ID; D-0115), for the test
 # archive that the Swift harness, the lock probe and the view host link
 # (docs/VAULT_SPLIT_PLAN.md §6). Never in the app's archive:
 # scripts/gen-bindings.sh and the build phase in app/project.yml fail on its

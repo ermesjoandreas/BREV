@@ -20,6 +20,9 @@
 //! letter's Hand result (brev-hand's `Verification::encode`, the checks that
 //! passed and the token), sealed beside it; empty for a sent letter. The
 //! envelope payload is protocol version 2: the letter and its token.
+//! Schema v7 (docs/DECISIONS.md D-0115) drops `messages.env_class`: there
+//! are no classes, and a letter goes out only when it meets the
+//! requirements.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -28,10 +31,10 @@ use std::sync::Weak;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use brev_hand::token::MAX_TOKEN;
-use brev_hand::Verification;
+use brev_hand::{Rule, Verification};
 use brev_proto::body::{self, is_valid_address};
 use brev_proto::{identity_code, invite, sig, IDENTITY_CODE_LEN, SIG_LEN};
-use brev_vault::{check_path, Clock, DekSlot, EnvironmentClass, Text, Vault, VaultConfig};
+use brev_vault::{check_path, Clock, DekSlot, Text, Vault, VaultConfig};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use zeroize::Zeroizing;
 
@@ -40,14 +43,28 @@ use crate::{Envelope, Error};
 
 /// "BREV" in the SQLite header's application_id field.
 const APPLICATION_ID: i32 = 0x4252_4556;
-/// 6: version 3 (local contact ids, the keyed contact tag, sealed
+/// 7: version 3 (local contact ids, the keyed contact tag, sealed
 /// addresses and `pending`, the relay token in `identity.keys`;
-/// docs/PHASE3_DESIGN.md §6.1), `messages.env_class` (version 4,
-/// docs/VAULT_SPLIT_PLAN.md §6), `contacts.flags` and `invites` (version 5,
-/// docs/PHASE4_DESIGN.md §5.1), and `messages.proof` (docs/AUTHORSHIP.md
-/// §6). A version 2, 3, 4 or 5 store opens as `Corrupt`; there is no
-/// migration.
-const SCHEMA_VERSION: i32 = 6;
+/// docs/PHASE3_DESIGN.md §6.1), `contacts.flags` and `invites` (version 5,
+/// docs/PHASE4_DESIGN.md §5.1), `messages.proof` (version 6,
+/// docs/AUTHORSHIP.md §6), and no `messages.env_class` (version 4 added
+/// it, version 7 drops it; D-0115). A version 2 to 6 store opens as
+/// `Corrupt`; there is no migration.
+const SCHEMA_VERSION: i32 = 7;
+
+/// The requirements a letter must meet, sent and received (brev-hand's
+/// `requirements`): all of them. A test archive built with the cargo
+/// feature allow-software-keys (for the Swift harness, the lock probe, the
+/// view host and the snapshot tool, which have software keys and no Touch
+/// ID) skips only the hardware key, on both sides. The app's archive never
+/// has that feature: scripts/gen-bindings.sh and the build phase in
+/// app/project.yml fail on its marker (ffi.rs; docs/VAULT_SPLIT_PLAN.md
+/// §6).
+pub(crate) const KEY_RULE: Rule = if cfg!(feature = "allow-software-keys") {
+    Rule::AnyKey
+} else {
+    Rule::All
+};
 
 const SCHEMA: &str = "
 CREATE TABLE identity (
@@ -80,7 +97,6 @@ CREATE TABLE messages (
     outgoing   INTEGER NOT NULL,           -- pt: 1 = sent by me
     read       INTEGER NOT NULL,           -- pt
     body       BLOB NOT NULL,              -- ct
-    env_class  INTEGER,                    -- pt: environment class a sent letter went out in (1 = A); NULL otherwise
     proof      BLOB NOT NULL               -- ct: a received letter's Hand result (pass bits || token); empty for a sent one
 ) STRICT;
 CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
@@ -286,10 +302,6 @@ pub struct Letter {
     /// The own copy's `messages.proof`: sealed, empty.
     proof: Vec<u8>,
     envelope: Envelope,
-    /// The environment class the letter's token carries
-    /// (docs/AUTHORSHIP.md §3.3): set by the FFI's `attach_token_signature`,
-    /// stored by [`Core::store_sent`]. None from [`Core::seal_letter`].
-    pub(crate) class: Option<EnvironmentClass>,
 }
 
 impl Letter {
@@ -921,7 +933,6 @@ impl Core {
             body,
             proof,
             envelope,
-            class: None,
         })
     }
 
@@ -948,9 +959,8 @@ impl Core {
 
     /// Stores the own copy of a signed letter the relay has accepted: its
     /// thread and message rows, sealed by [`Core::seal_letter`], in one
-    /// transaction, with the letter's environment class in `env_class`
-    /// (plaintext; NULL without one) and an empty proof. An unsigned letter
-    /// gives `Malformed`.
+    /// transaction, with an empty proof. An unsigned letter gives
+    /// `Malformed`.
     pub fn store_sent(&mut self, letter: &Letter) -> Result<ThreadId, Error> {
         self.dek()?;
         if !letter.is_signed() {
@@ -967,13 +977,12 @@ impl Core {
             ],
         )?;
         tx.execute(
-            "INSERT INTO messages (id, thread_id, created_at, outgoing, read, body, env_class, proof) VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6)",
+            "INSERT INTO messages (id, thread_id, created_at, outgoing, read, body, proof) VALUES (?1, ?2, ?3, 1, 1, ?4, ?5)",
             params![
                 &letter.message[..],
                 &letter.thread[..],
                 letter.created_at,
                 letter.body,
-                letter.class.map(EnvironmentClass::code),
                 letter.proof
             ],
         )?;
@@ -1056,8 +1065,8 @@ impl Core {
 
     /// The Hand result of a received letter (docs/AUTHORSHIP.md §6): what
     /// [`Core::receive`] stored, rebuilt by brev-hand's
-    /// `Verification::decode`. `None` for a sent letter, whose proof is
-    /// empty (its own class is in `env_class`). The proof must open under
+    /// `Verification::decode` under [`KEY_RULE`]. `None` for a sent letter,
+    /// whose proof is empty. The proof must open under
     /// the row's AD, which holds the direction (`Crypto` otherwise), and
     /// decode (`Corrupt` otherwise).
     pub fn proof(&self, message: MessageId) -> Result<Option<Verification>, Error> {
@@ -1085,7 +1094,9 @@ impl Core {
         let proof = crypto::open_column(dek, &ad, &sealed)?;
         match (outgoing, proof.is_empty()) {
             (true, true) => Ok(None),
-            (false, false) => Verification::decode(&proof).map(Some).ok_or(Error::Corrupt),
+            (false, false) => Verification::decode(&proof, KEY_RULE)
+                .map(Some)
+                .ok_or(Error::Corrupt),
             _ => Err(Error::Corrupt),
         }
     }
@@ -1205,8 +1216,8 @@ impl Core {
     ///    docs/AUTHORSHIP.md §6 step 5).
     ///
     /// The token is checked (brev-hand's `verify`, with the pinned signing
-    /// key that verified the envelope and the relay's `received_at`, Unix
-    /// seconds) and its result is sealed beside the letter. A token that
+    /// key that verified the envelope, the relay's `received_at`, Unix
+    /// seconds, and [`KEY_RULE`]) and its result is sealed beside the letter. A token that
     /// fails does not refuse the letter: the letter is stored with its
     /// failed result, and the app shows «Ikke verifisert».
     pub fn receive(&mut self, env: &Envelope, received_at: u64) -> Result<MessageId, Error> {
@@ -1245,7 +1256,8 @@ impl Core {
             let (letter, token) = decode_v2(&payload)?;
             let (id, thread, subject, body) = decode_payload(letter)?;
             let proof =
-                brev_hand::verify(letter, token, &bundle.signing_key, received_at).encode(token);
+                brev_hand::verify(letter, token, &bundle.signing_key, received_at, KEY_RULE)
+                    .encode(token);
 
             let existing: Option<([u8; 16], i64, Vec<u8>)> = self
                 .db()
@@ -1413,12 +1425,6 @@ impl Core {
     #[cfg(test)]
     pub(crate) fn open_texts_for_test(&self) -> &[Weak<Text>] {
         self.v.open_texts_for_test()
-    }
-
-    /// Test only: the connection, for the session's tests.
-    #[cfg(test)]
-    pub(crate) fn db_for_test(&self) -> &Connection {
-        self.db()
     }
 }
 
