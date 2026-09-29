@@ -70,6 +70,8 @@ enum L10n {
     static let composeError = tr("compose.error")
     static let composeSending = tr("compose.sending")
     static let composeKeyChanged = tr("compose.keychanged")
+    static let composeNotApproved = tr("compose.notapproved")
+    static let composeRateLimited = tr("compose.ratelimited")
     static let composeRetry = tr("compose.retry")
     /// "Brevet ble ikke sendt: <the checks that failed>." for
     /// BrevError.Environment (docs/VAULT_SPLIT_PLAN.md §6, owner answer Q6).

@@ -120,14 +120,6 @@ pub struct Config {
     pub invite_days: u32,
     /// Where today comes from.
     pub clock: Clock,
-    /// Transitional, until Phase 4 WP3 and WP4 move brev-mail's client and
-    /// the app to Phase 4's bodies: `/v1/register`, `/v1/lookup` and
-    /// `/v1/envelopes` take and answer Phase 3's bodies under Phase 3's
-    /// rules (no invite, no approval, no limit, no token on submit), and
-    /// Phase 4's own endpoints do not exist. Off by default; `serve
-    /// --phase3` and [`Relay::open`] turn it on. It defeats every Phase 4
-    /// check, so it is for Phase 3's callers and tests only.
-    pub phase3: bool,
 }
 
 impl Default for Config {
@@ -140,7 +132,6 @@ impl Default for Config {
             pending_requests: 16,
             invite_days: 7,
             clock: Clock::System,
-            phase3: false,
         }
     }
 }

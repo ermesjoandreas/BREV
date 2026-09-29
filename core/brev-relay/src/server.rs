@@ -10,9 +10,6 @@
 //! recipient is looked up only after its signature is verified, and a
 //! registration learns whether an address is taken only with a valid
 //! invite, so neither can probe the directory without a key and an invite.
-//!
-//! With [`crate::Config::phase3`] the router serves Phase 3's endpoints and
-//! bodies instead, for Phase 3's callers until Phase 4 WP3 and WP4.
 
 use std::future::IntoFuture;
 use std::io::{self, Write};
@@ -29,16 +26,15 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
-use brev_proto::body::{self, token_hash, Registration, RegistrationV2, SUBMIT_MAX};
-use brev_proto::{identity_id, sig, Envelope, MAX_WIRE, SIG_LEN};
+use brev_proto::body::{self, token_hash, RegistrationV2, SUBMIT_MAX};
+use brev_proto::{identity_id, sig, Envelope, SIG_LEN};
 
 use crate::rules::{Fail, NewIdentity};
-use crate::store::{Registered, Relay};
+use crate::store::Relay;
 use crate::{Decision, Endpoint, Error};
 
-/// Body limit of every endpoint but `/v1/envelopes` (Phase 4:
-/// [`SUBMIT_MAX`], Phase 3: [`MAX_WIRE`]). The largest registration v2
-/// (8 484 bytes) fits.
+/// Body limit of every endpoint but `/v1/envelopes` ([`SUBMIT_MAX`]). The
+/// largest registration v2 (8 484 bytes) fits.
 const SMALL_BODY: usize = 16 * 1024;
 
 /// What `GET /v1/health` answers.
@@ -252,60 +248,6 @@ fn invite_redeem(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
         .map_err(failed)
 }
 
-/// Phase 3's `POST /v1/register` (only with `phase3`): 201 new, 200 the
-/// same identity, address and token hash again, 409 taken or another
-/// address or token for this identity.
-fn register_phase3(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
-    let reg = Registration::parse(body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    reg.verify().map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let address = address(reg.address)?;
-    allow(relay.policy.register(address))?;
-    let id = identity_id(reg.signing_key, reg.x25519);
-    let registered = relay
-        .register(&id, address, reg.signing_key, reg.x25519, reg.token_hash)
-        .map_err(internal)?;
-    match registered {
-        Registered::New => Ok(StatusCode::CREATED),
-        Registered::Same => Ok(StatusCode::OK),
-        Registered::Conflict => Err(StatusCode::CONFLICT),
-    }
-}
-
-/// Phase 3's `POST /v1/lookup` (only with `phase3`): the 97-byte bundle
-/// registered with the address, or 404.
-fn lookup_phase3(relay: &Relay, body: &[u8]) -> Result<Vec<u8>, StatusCode> {
-    let request = authenticate(relay, body)?;
-    let address = address(request.lookup().map_err(|_| StatusCode::BAD_REQUEST)?)?;
-    allow(relay.policy.request(request.caller, Endpoint::Lookup))?;
-    let (signing_key, x25519) = relay
-        .lookup(address)
-        .map_err(internal)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let (signing_key, x25519) = stored_bundle(&signing_key, &x25519)?;
-    Ok(body::lookup_answer(signing_key, x25519).to_vec())
-}
-
-/// Phase 3's `POST /v1/envelopes` (a bare wire, only with `phase3`): 202
-/// stored, 200 already waiting; 400 not an envelope, 403 unknown sender or
-/// bad signature, 404 unknown recipient.
-fn submit_phase3(relay: &Relay, wire: &[u8]) -> Result<StatusCode, StatusCode> {
-    let envelope = Envelope::from_wire(wire).map_err(|_| StatusCode::BAD_REQUEST)?;
-    verify_envelope(relay, &envelope)?;
-    allow(
-        relay
-            .policy
-            .submit(&envelope.sender, &envelope.recipient, wire.len()),
-    )?;
-    let stored = relay
-        .store(&envelope.id(), &envelope.recipient, wire)
-        .map_err(internal)?;
-    Ok(if stored {
-        StatusCode::ACCEPTED
-    } else {
-        StatusCode::OK
-    })
-}
-
 /// `POST /v1/inbox`: the caller's waiting envelopes, oldest first, framed
 /// (brev_proto::body::inbox_answer). Deletes nothing.
 fn inbox(relay: &Relay, body: &[u8]) -> Result<Vec<u8>, StatusCode> {
@@ -361,9 +303,6 @@ status_route!(block_route, block);
 status_route!(invite_create_route, invite_create);
 body_route!(invite_open_route, invite_open);
 status_route!(invite_redeem_route, invite_redeem);
-status_route!(register_phase3_route, register_phase3);
-body_route!(lookup_phase3_route, lookup_phase3);
-status_route!(submit_phase3_route, submit_phase3);
 body_route!(inbox_route, inbox);
 status_route!(ack_route, ack);
 
@@ -390,35 +329,23 @@ async fn tally(State(tally): State<Tally>, request: Request, next: Next) -> Resp
 }
 
 fn router(relay: Arc<Relay>, tally_state: Tally) -> Router {
-    let common = Router::new()
+    Router::new()
         .route("/v1/inbox", post(inbox_route))
         .route("/v1/inbox/ack", post(ack_route))
-        .route("/v1/health", get(health_route));
-    let routes = if relay.config.phase3 {
-        common
-            .route("/v1/register", post(register_phase3_route))
-            .route("/v1/lookup", post(lookup_phase3_route))
-            .route(
-                "/v1/envelopes",
-                post(submit_phase3_route).layer(DefaultBodyLimit::max(MAX_WIRE)),
-            )
-    } else {
-        common
-            .route("/v1/register", post(register_route))
-            .route("/v1/lookup", post(lookup_route))
-            .route(
-                "/v1/envelopes",
-                post(submit_route).layer(DefaultBodyLimit::max(SUBMIT_MAX)),
-            )
-            .route("/v1/requests", post(request_route))
-            .route("/v1/events", post(events_route))
-            .route("/v1/events/answer", post(answer_route))
-            .route("/v1/block", post(block_route))
-            .route("/v1/invites", post(invite_create_route))
-            .route("/v1/invites/open", post(invite_open_route))
-            .route("/v1/invites/redeem", post(invite_redeem_route))
-    };
-    routes
+        .route("/v1/health", get(health_route))
+        .route("/v1/register", post(register_route))
+        .route("/v1/lookup", post(lookup_route))
+        .route(
+            "/v1/envelopes",
+            post(submit_route).layer(DefaultBodyLimit::max(SUBMIT_MAX)),
+        )
+        .route("/v1/requests", post(request_route))
+        .route("/v1/events", post(events_route))
+        .route("/v1/events/answer", post(answer_route))
+        .route("/v1/block", post(block_route))
+        .route("/v1/invites", post(invite_create_route))
+        .route("/v1/invites/open", post(invite_open_route))
+        .route("/v1/invites/redeem", post(invite_redeem_route))
         .layer(DefaultBodyLimit::max(SMALL_BODY))
         .layer(middleware::from_fn_with_state(tally_state, tally))
         .with_state(relay)

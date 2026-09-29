@@ -1,17 +1,20 @@
 // Session.swift — the app's side of the Rust session.
 //
 // Upholds CLAUDE.md §1.10, §3.1 and §6 (docs/PHASE2_DESIGN.md §4.2, §6.2;
-// docs/PHASE3_DESIGN.md §3.2, §5.2, §6.4): Session is the only owner of the
-// Rust `Brev` handle. Every address, subject and body comes out as a
-// SecretText that the view holding it wipes, and every identity code as a
-// SecretBytes; each OpenText is read completely and closed at once, so Rust
-// holds no content between calls. Content and typed addresses go to Rust
-// only as a no-copy view of a SecretBytes, which is wiped right after the
-// call. The calls that go to the relay (`register`, `addContact`,
-// `prepareSend`, `submit`, `sync`) run on `Session.net`, never on the main
-// thread, and take no content; the calls that take content (`signRequest`,
-// `registerRequest`) do no I/O. No AppKit: compiled into the app and the CLI
-// harness.
+// docs/PHASE3_DESIGN.md §3.2, §5.2, §6.4; docs/PHASE4_DESIGN.md §5.4, §7.1):
+// Session is the only owner of the Rust `Brev` handle. Every address,
+// subject and body comes out as a SecretText that the view holding it
+// wipes, and every identity code and invite code as a SecretBytes; each
+// OpenText is read completely and closed at once, so Rust holds no content
+// between calls. Content, typed addresses and invite codes go to Rust only
+// as a no-copy view of a SecretBytes, which is wiped right after the call.
+// The calls that go to the relay (`register`, `addContact`, `prepareSend`,
+// `submit`, `sync`, and Phase 4's `createInvite`, `openInvite`,
+// `redeemInvite`, `answerRequest`, `blockContact`) run on `Session.net`,
+// never on the main thread, and take no content; the calls that take
+// content (`signRequest`, `registerRequest`) do no I/O. A registration
+// carries the attestor's attestation of its digest (NoAttestor: empty until
+// App Attest). No AppKit: compiled into the app and the CLI harness.
 
 import Foundation
 
@@ -22,6 +25,13 @@ struct ContactItem {
     /// The relay returned another key: nothing is sent to this contact
     /// until the new key is accepted (docs/PHASE3_DESIGN.md §6.3).
     let keyChanged: Bool
+    /// The contact has not approved the user yet: «Venter på svar»
+    /// (docs/PHASE4_DESIGN.md §5.2).
+    let waiting: Bool
+    /// The contact's key was checked through an invite code.
+    let verified: Bool
+    /// The user blocked the contact (*Blokker*).
+    let blocked: Bool
 }
 
 /// A thread, with its subject read out of Rust.
@@ -50,6 +60,33 @@ struct ContactDetails {
     /// The code of the changed key waiting for acceptance: 35 bytes, or
     /// count 0 when there is none.
     let newCode: SecretBytes
+    /// As ContactItem's.
+    let waiting: Bool
+    let verified: Bool
+    let blocked: Bool
+}
+
+/// A contact request from an address that is not a contact; it carries no
+/// text (docs/PHASE4_DESIGN.md §5.2). The holder wipes the address and the
+/// code.
+struct RequestItem {
+    /// The asker's identity id, 32 bytes: what `answerRequest` takes.
+    let peer: Data
+    let address: SecretText
+    /// The asker's identity code: 35 ASCII bytes.
+    let code: SecretBytes
+}
+
+/// An invite code that `openInvite` checked against the relay's answer
+/// (docs/PHASE4_DESIGN.md §3.4). The holder wipes the address and the code.
+struct InviteItem {
+    /// A root invite, from the relay's operator: no inviter.
+    let root: Bool
+    /// The inviter's address; empty for a root invite.
+    let address: SecretText
+    /// The inviter's identity code: 35 ASCII bytes, or count 0 for a root
+    /// invite.
+    let code: SecretBytes
 }
 
 final class Session {
@@ -58,9 +95,12 @@ final class Session {
     static let net = DispatchQueue(label: "no.brev.net")
 
     let brev: Brev
+    /// Attests a registration's digest (docs/PHASE4_DESIGN.md §7.1).
+    private let attestor: Attestor
 
-    init(brev: Brev) {
+    init(brev: Brev, attestor: Attestor = NoAttestor()) {
         self.brev = brev
+        self.attestor = attestor
     }
 
     /// Onboarding (§5.3 step 6): creates the store in `dir` under `dek` (32
@@ -89,7 +129,10 @@ final class Session {
     func contacts() throws -> [ContactItem] {
         let rows = try brev.contacts()
         let names = try Self.readAll(rows.map { $0.name })
-        return zip(rows, names).map { ContactItem(id: $0.id, name: $1, keyChanged: $0.keyChanged) }
+        return zip(rows, names).map {
+            ContactItem(id: $0.id, name: $1, keyChanged: $0.keyChanged, waiting: $0.waiting, verified: $0.verified,
+                        blocked: $0.blocked)
+        }
     }
 
     func threads(contact: Data) throws -> [ThreadItem] {
@@ -126,22 +169,26 @@ final class Session {
             info.newCode.wipe()
         }
         let address = try TextReader.read(info.address)
-        return ContactDetails(address: address, code: Self.secret(info.code), newCode: Self.secret(info.newCode))
+        return ContactDetails(address: address, code: Self.secret(info.code), newCode: Self.secret(info.newCode),
+                              waiting: info.waiting, verified: info.verified, blocked: info.blocked)
     }
 
     // MARK: - Registration (no content; the address is typed like content)
 
-    /// Starts registering the typed `address`; returns the digest the
+    /// Starts registering the typed `address` with the invite `openInvite`
+    /// checked (`InviteInvalid` without one); returns the digest the
     /// identity key signs. No I/O. The UTF-8 copy is wiped when this
     /// returns; the caller wipes `address`.
     func registerRequest(address: SecretText) throws -> Data {
         try Self.withUTF8(address) { a, al in try brev.registerRequest(address: a, addressLen: al) }
     }
 
-    /// Finishes the registration with the DER signature over the digest
-    /// (network: `Session.net`).
-    func register(signature: Data) throws {
-        try brev.register(signature: signature)
+    /// Finishes the registration with the DER signature over `digest` (the
+    /// one `registerRequest` returned) and the attestor's attestation of
+    /// the same digest (network: `Session.net`).
+    func register(signature: Data, digest: Data) throws {
+        let attestation = Data(attestor.attestation(for: [UInt8](digest)))
+        try brev.register(signature: signature, attestation: attestation)
     }
 
     /// Adds the contact with the typed `address` and returns its local id
@@ -149,6 +196,62 @@ final class Session {
     /// the UTF-8 copy here is wiped when this returns.
     func addContact(address: SecretText) throws -> Data {
         try Self.withUTF8(address) { a, al in try brev.addContact(address: a, addressLen: al) }
+    }
+
+    // MARK: - Invites, requests and Blokker (docs/PHASE4_DESIGN.md §5.3)
+
+    /// Makes a one-time invite code: one human click, no Touch ID (network:
+    /// `Session.net`). The code is a bearer secret: it comes back as at
+    /// most 96 ASCII bytes in a SecretBytes the caller wipes; the FFI's copy
+    /// is wiped here.
+    func createInvite() throws -> SecretBytes {
+        var code = try brev.createInvite()
+        defer { code.wipe() }
+        return Self.secret(code)
+    }
+
+    /// Checks the invite code in `code` (Rust trims it and folds A–Z)
+    /// against the relay's answer, and keeps it for `registerRequest` or
+    /// `redeemInvite` (network: `Session.net`; no token, so it works before
+    /// registration). Rust copies the code before its request; the caller
+    /// wipes `code`.
+    func openInvite(code: SecretBytes) throws -> InviteItem {
+        var info = try code.withFFIView { c, n in try brev.openInvite(code: c, codeLen: n) }
+        defer { info.code.wipe() }
+        let address = try TextReader.read(info.address)
+        return InviteItem(root: info.root, address: address, code: Self.secret(info.code))
+    }
+
+    /// Redeems the invite `openInvite` checked, once registered: the
+    /// inviter and the user become approved contacts of each other; returns
+    /// the inviter's local id (network: `Session.net`).
+    func redeemInvite() throws -> Data {
+        try brev.redeemInvite()
+    }
+
+    /// The contact requests the last `sync` fetched, oldest first. No I/O.
+    func requests() throws -> [RequestItem] {
+        var rows = try brev.requests()
+        defer { for i in rows.indices { rows[i].code.wipe() } }
+        let addresses = try Self.readAll(rows.map { $0.address })
+        return rows.indices.map {
+            RequestItem(peer: rows[$0].peer, address: addresses[$0], code: Self.secret(rows[$0].code))
+        }
+    }
+
+    /// Answers the request of `peer` (a RequestItem's) with one click, no
+    /// Touch ID: `approve` pins the asker and returns its local id; a
+    /// decline returns an empty id (network: `Session.net`).
+    func answerRequest(peer: Data, approve: Bool) throws -> Data {
+        try brev.answerRequest(peer: peer, approve: approve)
+    }
+
+    /// *Blokker*: nothing is sent to `contact` and its letters are dropped
+    /// from now on; the relay is told to store no more from it (network:
+    /// `Session.net`). `Network`: the local block holds, and calling this
+    /// again tells the relay.
+    func blockContact(contact: Data) throws {
+        try brev.blockContact(contact: contact)
     }
 
     /// Accepts the contact's changed key; `newCode` is the code shown.
@@ -202,9 +305,11 @@ final class Session {
         brev.cancelSend()
     }
 
-    /// Fetches, stores and acknowledges the letters waiting at the relay;
-    /// returns how many arrived (network: `Session.net`).
-    func sync() throws -> UInt32 {
+    /// Handles the events waiting at the relay (requests, redeemed invites,
+    /// approvals), then fetches, stores and acknowledges the waiting
+    /// letters; returns how many arrived, whether a contact changed and how
+    /// many requests wait (network: `Session.net`).
+    func sync() throws -> SyncResult {
         try brev.sync()
     }
 

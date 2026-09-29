@@ -2,9 +2,8 @@
 //! Phase 4 relay (docs/PHASE4_DESIGN.md §8): registration rules with an
 //! invite, token checks on every endpoint, envelope checks with the sender's
 //! token, inbox and ack, deletion from the file, no plaintext, the policy
-//! hook, release, and the binary's listen rule, port file and trace. Plus
-//! the transitional Phase 3 mode that brev-mail's client and the app still
-//! use until Phase 4 WP3 and WP4. The relay runs in-process on 127.0.0.1:0
+//! hook, release, and the binary's listen rule, port file and trace. The
+//! relay runs in-process on 127.0.0.1:0
 //! and is spoken to over real HTTP with reqwest, as brev-core does;
 //! identities sign with p256 test keys (tests only).
 
@@ -917,72 +916,4 @@ fn stop_closes_the_port_and_a_new_server_reuses_it() {
     assert_eq!(server.addr(), addr);
     assert_eq!(health().unwrap().status(), StatusCode::OK);
     assert_eq!(server.requests(), 1);
-}
-
-/// The transitional Phase 3 mode (`Relay::open`, `serve --phase3`), which
-/// brev-mail's client and the app still speak until Phase 4 WP3 and WP4:
-/// Phase 3's registration, lookup and bare-wire submit with none of Phase
-/// 4's checks, and none of Phase 4's endpoints. The Phase 4 relay refuses
-/// Phase 3's bodies.
-#[test]
-fn phase3_mode_keeps_phase3_bodies_until_wp3() {
-    let (a, b) = (Identity::new(1), Identity::new(2));
-    let r = Relayed::phase3();
-    for (who, address) in [(&a, "anna"), (&b, "bob")] {
-        let body = who.registration_v1(address.as_bytes());
-        assert_eq!(r.post("/v1/register", body.clone()).0, StatusCode::CREATED);
-        assert_eq!(r.post("/v1/register", body).0, StatusCode::OK);
-    }
-    assert_eq!(r.lookup(&a, "bob"), (StatusCode::OK, b.bundle()));
-    let w = wire(&envelope(&a, &b.id, 256, 1));
-    assert_eq!(r.post("/v1/envelopes", w.clone()).0, StatusCode::ACCEPTED);
-    assert_eq!(r.post("/v1/envelopes", w.clone()).0, StatusCode::OK);
-    assert_eq!(r.inbox(&b), std::slice::from_ref(&w));
-    assert_eq!(r.ack(&b, &[id(&w)]), StatusCode::NO_CONTENT);
-    let root = Secret::new(1);
-    let v2 = Identity::new(3).registration(b"carl", &root.key(), &invite::ROOT_TAG);
-    assert_eq!(r.post("/v1/register", v2).0, StatusCode::BAD_REQUEST);
-    for path in [
-        "/v1/requests",
-        "/v1/events",
-        "/v1/events/answer",
-        "/v1/block",
-        "/v1/invites",
-        "/v1/invites/open",
-        "/v1/invites/redeem",
-    ] {
-        assert_eq!(
-            r.post(path, a.request(&[])).0,
-            StatusCode::NOT_FOUND,
-            "{path}"
-        );
-    }
-
-    // The Phase 4 relay: Phase 3's registration and a bare wire are 400,
-    // and a lookup answers with the status byte.
-    let r = Relayed::new();
-    r.join(&b, "bob");
-    assert_eq!(
-        r.post("/v1/register", a.registration_v1(b"anna")).0,
-        StatusCode::BAD_REQUEST
-    );
-    r.join(&a, "anna");
-    r.approve(&a, &b, "bob");
-    assert_eq!(
-        r.post("/v1/envelopes", w.clone()).0,
-        StatusCode::BAD_REQUEST
-    );
-    assert_eq!(r.waiting(), 0);
-    assert_eq!(r.lookup(&a, "bob"), (StatusCode::OK, b.reply(true)));
-
-    // The binary with --phase3, as scripts/test.sh starts it for the app's
-    // harness until WP4.
-    let tmp = TempDir::new();
-    let (_child, base) = spawn(&tmp, &tmp.0.join("relay.db"), &["--phase3"]);
-    let answer = client()
-        .post(format!("{base}/v1/register"))
-        .body(a.registration_v1(b"anna"))
-        .send()
-        .unwrap();
-    assert_eq!(answer.status(), StatusCode::CREATED);
 }

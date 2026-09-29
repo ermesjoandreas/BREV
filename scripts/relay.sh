@@ -8,13 +8,11 @@
 #
 # Usage: scripts/relay.sh [--trace] [--letters-per-day N] [--requests-per-day N]
 #          [--invites-per-day N] [--open-invites N] [--pending-requests N]
-#          [--invite-days N] [--phase3]
+#          [--invite-days N]
 #   --trace   print one line per request to stdout: path and status
 #   limits    per identity per UTC day 50 letters, 10 requests, 3 invites
 #             made; 5 open invites; 16 pending requests per recipient;
 #             invites live 7 days
-#   --phase3  Phase 3's bodies without any Phase 4 check, for the Phase 3 app
-#             until Phase 4 WP4 (takes no limits)
 #
 # Operator commands (the relay may be running):
 #   print a root invite, the only way to bring in the first identity
@@ -36,10 +34,10 @@ for arg in "$@"; do
     continue
   fi
   case "$arg" in
-    --trace|--phase3) ;;
+    --trace) ;;
     --letters-per-day|--requests-per-day|--invites-per-day|--open-invites|--pending-requests|--invite-days)
       NEEDS="$arg" ;;
-    -h|--help) sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)         echo "error: unknown argument '$arg' (see --help)" >&2; exit 2 ;;
   esac
 done

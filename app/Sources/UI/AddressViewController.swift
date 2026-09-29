@@ -52,9 +52,9 @@ final class AddressViewController: NSViewController, ContentHolder {
     private var step = Step.editing
     /// Bumped by `wipeAll`: a result of a step begun before it is dropped.
     private var epoch = 0
-    /// The DER signature of the registration Rust keeps after `Network`.
-    /// Not secret.
-    private var signature: Data?
+    /// The DER signature of the registration Rust keeps after `Network`,
+    /// and the digest it signs (for the attestation). Not secret.
+    private var kept: (signature: Data, digest: Data)?
 
     init(session: Session, signer: @escaping ComposeSheet.Signer) {
         field = SecureComposeView(maxBytes: Int(limits().maxAddress), multiline: false, charset: .address)
@@ -137,7 +137,7 @@ final class AddressViewController: NSViewController, ContentHolder {
         case .working:
             return
         case .retry:
-            if let signature { post(signature) }
+            if let kept { post(kept.signature, kept.digest) }
         case .editing:
             guard field.model.text.length > 0 else { return NSSound.beep() }
             let digest: Data
@@ -150,16 +150,16 @@ final class AddressViewController: NSViewController, ContentHolder {
             }
             show(.working)
             let started = epoch
-            signer(digest) { [weak self] result in self?.signed(result, started) }
+            signer(digest) { [weak self] result in self?.signed(result, digest, started) }
         }
     }
 
     /// A cancelled prompt returns to editing.
-    private func signed(_ result: Result<Data, Error>, _ started: Int) {
+    private func signed(_ result: Result<Data, Error>, _ digest: Data, _ started: Int) {
         guard started == epoch else { return }
         switch result {
         case .success(let der):
-            post(der)
+            post(der, digest)
         case .failure(let error):
             if !(error is BrevError), UnlockFailure.classify(error, fingersChanged: false) == .cancelled {
                 Self.log.notice("registration cancelled at Touch ID")
@@ -170,24 +170,24 @@ final class AddressViewController: NSViewController, ContentHolder {
     }
 
     /// Posts the signed registration on `Session.net`.
-    private func post(_ der: Data) {
+    private func post(_ der: Data, _ digest: Data) {
         guard let session else { return }
         show(.working)
         let started = epoch
         Session.net.async {
-            let result = Result { try session.register(signature: der) }
-            DispatchQueue.main.async { [weak self] in self?.posted(result, der, started) }
+            let result = Result { try session.register(signature: der, digest: digest) }
+            DispatchQueue.main.async { [weak self] in self?.posted(result, der, digest, started) }
         }
     }
 
-    private func posted(_ result: Result<Void, Error>, _ der: Data, _ started: Int) {
+    private func posted(_ result: Result<Void, Error>, _ der: Data, _ digest: Data, _ started: Int) {
         guard started == epoch else { return }
         switch result {
         case .success:
             registered()
         case .failure(BrevError.Network):
             Self.log.error("register failed: Network (signed; Registrer posts again)")
-            signature = der
+            kept = (der, digest)
             show(.retry, netFailure)
         case .failure(let error):
             failed(error)
@@ -196,7 +196,7 @@ final class AddressViewController: NSViewController, ContentHolder {
 
     private func registered() {
         Self.log.notice("address registered")
-        signature = nil
+        kept = nil
         _ = view.window?.makeFirstResponder(nil)
         field.wipe()
         onRegistered()
@@ -204,7 +204,7 @@ final class AddressViewController: NSViewController, ContentHolder {
 
     /// Back to editing with the text that fits `error`.
     private func failed(_ error: Error) {
-        signature = nil
+        kept = nil
         let name = (error as? BrevError).map { "\($0)" }
             ?? UnlockFailure.chain(error).map { "\($0.domain) \($0.code)" }.joined(separator: ", ")
         Self.log.error("register failed: \(name, privacy: .public)")
@@ -220,7 +220,7 @@ final class AddressViewController: NSViewController, ContentHolder {
     /// replaces it at the next Registrer), and the field can be edited.
     private func backToEditing() {
         guard step == .retry else { return }
-        signature = nil
+        kept = nil
         show(.editing)
     }
 
@@ -230,7 +230,7 @@ final class AddressViewController: NSViewController, ContentHolder {
     /// wiped and its pixels zeroed, and a step under way is dropped.
     func wipeAll() {
         epoch &+= 1
-        signature = nil
+        kept = nil
         _ = view.window?.makeFirstResponder(nil)
         SecureInput.disable()
         field.wipe()

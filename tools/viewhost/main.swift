@@ -1,14 +1,18 @@
 // main.swift — ViewHost: Brev's mail window with fake letters, for tests.
 //
 // A test app, never linked into Brev.app (tools/viewhost/build.sh builds it
-// from app/Sources/{Shared,App,UI}). It needs no keychain and no Touch ID:
+// from app/Sources/{Shared,App,UI} and Keys/Attestor.swift). It needs no
+// keychain and no Touch ID:
 // the stores live in a temporary folder, each DEK is wrapped to a software
 // P-256 key and each identity key is a software key, as in the CLI harness
 // (app/Tests). It starts its own relay (brev-relay, built by build.sh, on
 // 127.0.0.1 with a port the OS picks and a database in the temporary folder;
 // stopped at the end) and makes three users: this host ("testvert") and the
 // contacts Ekko and Speil ("ekko", "speil"), which live in this process
-// without a window. The host sends fake, non-secret letters to Ekko and
+// without a window. The host registers with a root invite (the relay's
+// `invite` command, run here) and invites Ekko and Speil with its own
+// codes, so all are approved and verified contacts (docs/PHASE4_DESIGN.md
+// §3.4). The host sends fake, non-secret letters to Ekko and
 // Speil, Ekko sends a long one back, and the host shows the real
 // MailViewController in a hardened MainWindow without activating itself
 // (with --compose it asks to be active). Every letter carries the test
@@ -39,13 +43,16 @@
 // from this process's log. Then exit.
 // With --contacts (docs/PHASE3_DESIGN.md §6; docs/VERIFY.md V67, V68): the
 // host starts unregistered, and its contact registers the contact address
-// marker ($ADDR_B). The address page (the real AddressViewController, signing
+// marker ($ADDR_B) with a root invite. The host opens another root invite in
+// process, in the place of the address page's invite step (Phase 4 WP5).
+// The address page (the real AddressViewController, signing
 // with this host's software key) → the address marker $ADDR_A typed by
 // key-downs → Registrer refuses a click made in code and an AX press → ready
 // → (hold) → Return registers → the mail screen and its header → Legg til
 // kontakt opens the real AddContactSheet → $ADDR_B typed → Legg til refuses
-// the same → ready → (hold) → Return adds the contact → the relay releases
-// $ADDR_B and a new identity registers it → Send in a compose sheet finds
+// the same → ready → (hold) → Return adds the contact (and asks it, which
+// has not answered) → the relay releases $ADDR_B and a new identity
+// registers it with a root invite → Send in a compose sheet finds
 // the changed key → Escape → the header shows the warning, both codes and
 // Godta ny kode, which refuses the same → ConfirmSheet → its Godta refuses
 // the same → ready → (hold) → Godta accepts the shown code → an
@@ -272,18 +279,34 @@ final class User {
         }
     }
 
-    func register(_ address: String) throws {
+    /// Opens the invite `code` (the caller wipes it) and registers
+    /// `address` with it.
+    func register(_ address: String, invite code: SecretBytes) throws {
+        let opened = try session.openInvite(code: code)
+        opened.address.wipe()
+        opened.code.wipe()
         let typed = fake([address])
         defer { typed.wipe() }
-        try session.register(signature: try Enclave.sign(digest: try session.registerRequest(address: typed),
-                                                         key: identity))
+        let digest = try session.registerRequest(address: typed)
+        try session.register(signature: try Enclave.sign(digest: digest, key: identity), digest: digest)
     }
 
-    /// Adds the contact with `address`; returns its local id.
-    func add(_ address: String) throws -> Data {
-        let typed = fake([address])
-        defer { typed.wipe() }
-        return try session.addContact(address: typed)
+    /// Invites the user `invitee` with a code of this user's, and registers
+    /// `address` there with it.
+    func invite(_ invitee: User, as address: String) throws {
+        let code = try session.createInvite()
+        defer { code.wipe() }
+        try invitee.register(address, invite: code)
+    }
+
+    /// The local id of the contact with `address`; the names read are wiped.
+    func contact(_ address: String) throws -> Data {
+        let items = try session.contacts()
+        defer { items.forEach { $0.name.wipe() } }
+        let u = Array(address.utf16)
+        let found = items.first { c in c.name.length == u.count && (0..<u.count).allSatisfy { c.name.units[$0] == u[$0] } }
+        guard let found else { throw BrevError.NotFound }
+        return found.id
     }
 
     /// What the keys did: a software identity key, no Touch ID.
@@ -471,6 +494,27 @@ func finish() -> Never {
     print(failures == 0 ? "PASS" : "FAIL: \(failures) check(s)")
     exit(failures == 0 ? 0 : 1)
 }
+/// A root invite from this run's relay file (the operator's `brev-relay
+/// invite`, which works while the relay serves), in a SecretBytes; nil if
+/// it fails.
+func rootInvite() -> SecretBytes? {
+    guard let path = relayBinary else { return nil }
+    let command = Process()
+    command.executableURL = URL(fileURLWithPath: path)
+    command.arguments = ["invite", "--db", dir.appendingPathComponent("relay.db").path]
+    let out = Pipe()
+    command.standardOutput = out
+    command.standardError = FileHandle.nullDevice
+    guard (try? command.run()) != nil else { return nil }
+    var printed = out.fileHandleForReading.readDataToEndOfFile()
+    command.waitUntilExit()
+    defer { printed.wipe() }
+    let code = SecretBytes(capacity: Int(limits().maxInvite))
+    let n = printed.firstIndex(of: 0x0A).map { $0 - printed.startIndex } ?? printed.count
+    let fits = printed.withUnsafeBytes { code.append(UnsafeRawBufferPointer(rebasing: $0[..<n])) }
+    return command.terminationStatus == 0 && fits && code.count > 0 ? code : nil
+}
+
 // A safety net: the host never outlives its run by much.
 DispatchQueue.main.asyncAfter(deadline: .now() + hold * (contactsMode ? 3 : 1) + 60
                               + (triggers == "idle" ? idleLimit + idleTick + 30 : 0)) {
@@ -492,7 +536,11 @@ do {
     me = try User(in: dir.appendingPathComponent("testvert"), relay: relayURL)
     ekkoUser = try User(in: dir.appendingPathComponent("ekko"), relay: relayURL)
     session = me.session
-    if contactsMode { try ekkoUser.register(addrB) }
+    if contactsMode {
+        guard let root = rootInvite() else { throw BrevError.InviteInvalid }
+        defer { root.wipe() }
+        try ekkoUser.register(addrB, invite: root)
+    }
 } catch {
     check("the users are made", false, "\((error as? BrevError).map { "\($0)" } ?? "other")")
     finish()
@@ -500,23 +548,27 @@ do {
 if !contactsMode {
     do {
         let speilUser = try User(in: dir.appendingPathComponent("speil"), relay: relayURL)
-        try me.register("testvert")
-        try ekkoUser.register("ekko")
-        try speilUser.register("speil")
-        ekko = try me.add("ekko")
-        let speil = try me.add("speil")
-        meAtEkko = try ekkoUser.add("testvert")
+        guard let root = rootInvite() else { throw BrevError.InviteInvalid }
+        defer { root.wipe() }
+        try me.register("testvert", invite: root)
+        try me.invite(ekkoUser, as: "ekko")
+        try me.invite(speilUser, as: "speil")
+        // The host pins its invitees (their invited events), Ekko first.
+        _ = try session.sync()
+        ekko = try me.contact("ekko")
+        let speil = try me.contact("speil")
+        meAtEkko = try ekkoUser.contact("testvert")
         // Two threads with Ekko, one with Speil: a letter to each, and Ekko's
         // long letter, which arrives on sync.
         try me.send(to: ekko, subject: fake(["Det første brevet ", nil]), body: letterBody(3))
         try me.send(to: speil, subject: fake(["Et brev til Speil ", nil]), body: letterBody(1))
         try ekkoUser.send(to: meAtEkko, subject: fake(["Hei fra Ekko ", nil, "\nandre linje"]), body: letterBody(12))
         speilUser.session.brev.lock()
-        let arrived = try session.sync()
+        let arrived = try session.sync().letters
         check("Ekko's letter arrives through the relay", arrived == 1, "\(arrived)")
         // Ekko takes the first letter now, so its sync after a compose send
         // counts only the composed letter.
-        let atEkko = try ekkoUser.session.sync()
+        let atEkko = try ekkoUser.session.sync().letters
         check("the first letter arrives at Ekko", atEkko == 1, "\(atEkko)")
     } catch {
         check("fake letters sent", false, "\((error as? BrevError).map { "\($0)" } ?? "other")")
@@ -908,7 +960,7 @@ func composeAfterHold(_ sheet: ComposeSheet) {
                   && !buffers.contains(where: hasPixels) && secureInputOff() && !sheet.subject.hasFocus
                   && !sheet.body.hasFocus)
         sentSheet = sheet
-        let fetched = try? ekkoUser.session.sync()
+        let fetched = try? ekkoUser.session.sync().letters
         check("compose: Ekko fetches the letter from the relay", fetched == 1, "\(String(describing: fetched))")
         ekkoUser.session.brev.lock()
         composeCancelAndLock()
@@ -1113,8 +1165,17 @@ func announceStage(_ stage: String, _ views: [(String, NSView?)], then next: @es
 
 /// --contacts: the address page first, as AppDelegate routes an unlocked
 /// Brev without an address; Registrer signs with this host's software key.
+/// A root invite is opened first, in process, as the page's invite step
+/// will (Phase 4 WP5).
 func contactsStart() {
     if scanning { print("skip --scan: --contacts shows no letters") }
+    guard let root = rootInvite(), let opened = try? session.openInvite(code: root) else {
+        check("contacts: a root invite opens for the host", false)
+        finish()
+    }
+    root.wipe()
+    opened.address.wipe()
+    opened.code.wipe()
     wireCompose()
     let page = AddressViewController(session: session, signer: me.sign)
     page.onRegistered = {
@@ -1228,7 +1289,8 @@ func addContactStage() {
 }
 
 /// The relay's operator frees $ADDR_B (`brev-relay release`), and a new
-/// identity registers it: the host's pinned key for it has changed.
+/// identity registers it with a root invite: the host's pinned key for it
+/// has changed.
 func replaceContact() -> User? {
     guard let path = relayBinary else { return nil }
     let release = Process()
@@ -1238,8 +1300,10 @@ func replaceContact() -> User? {
     guard (try? release.run()) != nil else { return nil }
     release.waitUntilExit()
     guard release.terminationStatus == 0, let user = try? User(in: dir.appendingPathComponent("ekko2"), relay: relayURL),
-          (try? user.register(addrB)) != nil
+          let root = rootInvite()
     else { return nil }
+    defer { root.wipe() }
+    guard (try? user.register(addrB, invite: root)) != nil else { return nil }
     return user
 }
 

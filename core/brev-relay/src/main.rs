@@ -18,12 +18,10 @@ use brev_relay::{parse_listen, Config, Gates, Open, Relay, Server};
 const USAGE: &str = "usage: brev-relay serve --db <absolute path> --listen 127.0.0.1:<port> [--port-file <path>] [--trace]
                         [--letters-per-day N] [--requests-per-day N] [--invites-per-day N]
                         [--open-invites N] [--pending-requests N] [--invite-days N]
-       brev-relay serve --phase3 --db <absolute path> --listen 127.0.0.1:<port> [--port-file <path>] [--trace]
        brev-relay release --db <absolute path> <address>
        brev-relay invite --db <absolute path>
 defaults: 50 letters, 10 requests and 3 invites per identity per UTC day, 5 open
-invites, 16 pending requests per recipient, invites live 7 days. --phase3 serves
-Phase 3's bodies without any Phase 4 check, for Phase 3's app and tests only.";
+invites, 16 pending requests per recipient, invites live 7 days.";
 
 /// A usage error (exit 2) or a failure (exit 1), with its message.
 enum Fail {
@@ -62,7 +60,6 @@ fn run(args: Vec<OsString>) -> Result<(), Fail> {
     let mut listen = None;
     let mut port_file = None;
     let mut trace = false;
-    let mut phase3 = false;
     let mut limits = false;
     let mut config = Config::default();
     let mut rest = Vec::new();
@@ -88,10 +85,6 @@ fn run(args: Vec<OsString>) -> Result<(), Fail> {
                 trace = true;
                 None
             }
-            Some("--phase3") => {
-                phase3 = true;
-                None
-            }
             Some("--letters-per-day") => Some(&mut config.letters_per_day),
             Some("--requests-per-day") => Some(&mut config.requests_per_day),
             Some("--invites-per-day") => Some(&mut config.invites_per_day),
@@ -109,14 +102,11 @@ fn run(args: Vec<OsString>) -> Result<(), Fail> {
         }
     }
     let db = db.ok_or(Fail::Usage("--db is required".into()))?;
-    let only_db = listen.is_none() && port_file.is_none() && !trace && !phase3 && !limits;
+    let only_db = listen.is_none() && port_file.is_none() && !trace && !limits;
     match command.to_str() {
         Some("serve") => {
             if !rest.is_empty() {
                 return Err(Fail::Usage(format!("unexpected arguments {rest:?}")));
-            }
-            if phase3 && limits {
-                return Err(Fail::Usage("--phase3 has no limits to set".into()));
             }
             let listen = listen.ok_or(Fail::Usage("--listen is required".into()))?;
             let listen = listen
@@ -124,7 +114,6 @@ fn run(args: Vec<OsString>) -> Result<(), Fail> {
                 .ok_or(brev_relay::Error::Listen)
                 .and_then(parse_listen)
                 .map_err(|e| Fail::Usage(e.to_string()))?;
-            config.phase3 = phase3;
             serve(&db, config, listen, port_file.as_deref(), trace)
         }
         Some("release") => {

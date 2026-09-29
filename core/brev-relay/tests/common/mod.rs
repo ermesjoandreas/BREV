@@ -134,7 +134,7 @@ impl Identity {
         self.registration_with(address, &self.public, invite, tag, ATTESTATION)
     }
 
-    /// A Phase 3 registration body (brev-mail's today).
+    /// A Phase 3 registration body, which the relay refuses.
     pub fn registration_v1(&self, address: &[u8]) -> Vec<u8> {
         let unsigned = body::registration_body(
             address,
@@ -270,13 +270,6 @@ impl Relayed {
         edit(&mut config);
         let relay = Relay::open_with(&tmp.0.join("relay").join("relay.db"), policy, config, gates);
         Relayed::serve(Arc::new(relay.unwrap()), secs, tmp)
-    }
-
-    /// A relay in Phase 3's mode, as brev-mail's tests open it.
-    pub fn phase3() -> Relayed {
-        let tmp = TempDir::new();
-        let relay = Relay::open(&tmp.0.join("relay").join("relay.db"), Box::new(Open)).unwrap();
-        Relayed::serve(Arc::new(relay), Arc::new(AtomicU64::new(START)), tmp)
     }
 
     fn serve(relay: Arc<Relay>, secs: Arc<AtomicU64>, tmp: TempDir) -> Relayed {

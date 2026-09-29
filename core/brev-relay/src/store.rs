@@ -76,32 +76,7 @@ pub struct Relay {
     pub(crate) gates: Gates,
 }
 
-/// A registered signing key and X25519 key, as stored.
-pub(crate) type Bundle = (Vec<u8>, Vec<u8>);
-
-/// What a valid Phase 3 registration did.
-pub(crate) enum Registered {
-    /// A new identity with this address (201).
-    New,
-    /// Exactly this identity, address and token hash already (200).
-    Same,
-    /// The address belongs to another identity, or this identity has
-    /// another address or token (409).
-    Conflict,
-}
-
 impl Relay {
-    /// Phase 3's constructor, kept for Phase 3's callers (brev-mail's
-    /// tests) until Phase 4 WP3: [`Relay::open_with`] with the default
-    /// limits, [`Config::phase3`] on and the default [`Gates`].
-    pub fn open(path: &Path, policy: Box<dyn Policy>) -> Result<Relay, Error> {
-        let config = Config {
-            phase3: true,
-            ..Config::default()
-        };
-        Relay::open_with(path, policy, config, Gates::default())
-    }
-
     /// Opens the relay file at `path` (absolute), creating it and its folder
     /// if needed: the folder 0700, the file 0600. A new file gets the
     /// schema; an existing one must be a relay file of this version. On the
@@ -172,49 +147,6 @@ impl Relay {
         self.db.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Phase 3's registration (only with [`Config::phase3`]): registers `id`
-    /// with `address`, or finds it already registered. No invite; the new
-    /// identity's `invited_by` is NULL.
-    pub(crate) fn register(
-        &self,
-        id: &[u8; 32],
-        address: &str,
-        signing_key: &[u8],
-        x25519: &[u8; 32],
-        token_hash: &[u8; 32],
-    ) -> Result<Registered, Error> {
-        let mut db = self.db();
-        let tx = db.transaction()?;
-        let by_address: Option<(Vec<u8>, Vec<u8>)> = tx
-            .query_row(
-                "SELECT id, token_hash FROM identities WHERE address = ?1",
-                [address],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let answer = match by_address {
-            Some((known, hash)) if known == id && hash == token_hash => Registered::Same,
-            Some(_) => Registered::Conflict,
-            None => {
-                let by_id: Option<i64> = tx
-                    .query_row("SELECT 1 FROM identities WHERE id = ?1", [id], |r| r.get(0))
-                    .optional()?;
-                if by_id.is_some() {
-                    Registered::Conflict
-                } else {
-                    tx.execute(
-                        "INSERT INTO identities (id, address, signing_key, x25519, token_hash)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![id, address, signing_key, x25519, token_hash],
-                    )?;
-                    Registered::New
-                }
-            }
-        };
-        tx.commit()?;
-        Ok(answer)
-    }
-
     /// SHA-256 of `id`'s relay token, if `id` is registered.
     pub(crate) fn token_hash(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>, Error> {
         Ok(self
@@ -242,35 +174,6 @@ impl Relay {
     /// Whether `id` is registered.
     pub(crate) fn is_registered(&self, id: &[u8; 32]) -> Result<bool, Error> {
         Ok(self.signing_key(id)?.is_some())
-    }
-
-    /// The signing key and X25519 key registered with `address`.
-    pub(crate) fn lookup(&self, address: &str) -> Result<Option<Bundle>, Error> {
-        Ok(self
-            .db()
-            .query_row(
-                "SELECT signing_key, x25519 FROM identities WHERE address = ?1",
-                [address],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?)
-    }
-
-    /// Phase 3's store (only with [`Config::phase3`]): stores an envelope
-    /// for `recipient` under its id. False if that id already waits (the
-    /// stored copy is kept).
-    pub(crate) fn store(
-        &self,
-        id: &[u8; 32],
-        recipient: &[u8; 32],
-        wire: &[u8],
-    ) -> Result<bool, Error> {
-        let n = self.db().execute(
-            "INSERT INTO envelopes (id, recipient, wire) VALUES (?1, ?2, ?3)
-             ON CONFLICT(id) DO NOTHING",
-            params![id, recipient, wire],
-        )?;
-        Ok(n == 1)
     }
 
     /// `recipient`'s waiting envelopes, oldest first: at most

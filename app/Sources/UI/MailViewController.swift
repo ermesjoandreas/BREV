@@ -14,14 +14,17 @@
 // contact it adds is selected. Godta ny kode opens ConfirmSheet, and only
 // its Godta accepts the code the header shows (acceptNewKey). After a
 // compose sheet is cancelled (it may have found a changed key),
-// the contacts are read again. `sync()` fetches the
-// letters waiting at the relay: once at `start()`, every 5 seconds from a
+// the contacts are read again. `sync()` handles the relay's events and
+// fetches the letters waiting there: once at `start()`, every 5 seconds from a
 // timer in the common run-loop modes (docs/DECISIONS.md D-0050), and
 // once after a letter is sent. It runs on `Session.net`, never on main; a
 // sync still running makes the next tick skip, and its result returns to
-// main, where a result from before `wipeAll()` is dropped. When letters
-// arrive, the thread and letter panes are read again (their old texts wiped)
-// and keep the selected thread by id. Every text read here is a SecretText
+// main, where a result from before `wipeAll()` is dropped. When a contact
+// changed (added by an invite or an approval, or its state or key), the
+// contacts are read again, keeping the selected contact and thread by id
+// (docs/PHASE4_DESIGN.md §6.1); when only letters arrived, the thread and
+// letter panes are read again (their old texts wiped) and keep the selected
+// thread by id. Every text read here is a SecretText
 // owned by a list or letter view; a new selection wipes what it replaces,
 // and `wipeAll()` (lock sequence §8.4 step 3) wipes everything and stops the
 // timer. The controller holds the Session weakly, never an OpenText. Logs
@@ -335,16 +338,19 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
         }
     }
 
-    /// On main. When letters arrived, the thread and letter panes are read
-    /// again. A locked session stops the timer.
-    private func synced(_ result: Result<UInt32, Error>, _ generation: Int) {
+    /// On main. When a contact changed, the contacts are read again; else
+    /// when letters arrived, the thread and letter panes are. A locked
+    /// session stops the timer.
+    private func synced(_ result: Result<SyncResult, Error>, _ generation: Int) {
         syncing = false
         guard generation == syncGeneration else { return }
         switch result {
-        case .success(let arrived):
+        case .success(let got):
             noteSync("ok")
-            guard arrived > 0 else { return }
-            Self.log.notice("sync arrived=\(arrived, privacy: .public)")
+            guard got.letters > 0 || got.contactsChanged else { return }
+            Self.log.notice(
+                "sync arrived=\(got.letters, privacy: .public) contacts=\(got.contactsChanged, privacy: .public)")
+            if got.contactsChanged { return reloadContacts(selecting: selectedContact?.id) }
             let kept = threadList.selected.flatMap { threads.indices.contains($0) ? threads[$0].id : nil }
             showThreads(keeping: kept)
         case .failure(BrevError.Locked):

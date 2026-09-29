@@ -2,7 +2,8 @@
 # Builds ViewHost.app: Brev's mail window with fake letters, for screenshots,
 # AX dumps and the in-process checks in tools/viewhost/main.swift. A test
 # app only, never linked into Brev.app. It compiles app/Sources/{Shared,App,UI}
-# with the patched bindings, the test archive (the release build of brev-mail
+# and Keys/Attestor.swift (Session's attestor) with the patched bindings,
+# the test archive (the release build of brev-mail
 # without the launch guard and with allow-software-keys, so its letters go
 # out with software keys; this script builds it in core/target/test-archive,
 # as scripts/test.sh does) and the heap scanner of
@@ -65,7 +66,7 @@ xcrun clang -O2 -Wall -target "$ARCH-apple-macos14.0" -c "$REPO_ROOT/app/Tests/s
 xcrun swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" -D BREV_SELFSCAN \
   -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
   "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/App/*.swift "$REPO_ROOT"/app/Sources/UI/*.swift \
-  "$REPO_ROOT/app/Sources/Verify/SelfScan.swift" \
+  "$REPO_ROOT/app/Sources/Keys/Attestor.swift" "$REPO_ROOT/app/Sources/Verify/SelfScan.swift" \
   "$BINDINGS" "$REPO_ROOT/tools/viewhost/main.swift" "$OUT/scan.o" "$TEST_STATICLIB" \
   -o "$APP/Contents/MacOS/ViewHost"
 plutil -insert BrevRelayBinary -string "$RELAY" "$APP/Contents/Info.plist"

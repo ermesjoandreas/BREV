@@ -85,6 +85,9 @@
 "send.reason" = "sende brevet";
 "compose.sending" = "Sender …";
 "compose.keychanged" = "Sikkerhetskoden til mottakeren er endret. Brevet ble ikke sendt.";
+/* The relay's refusals (docs/PHASE4_DESIGN.md §6.1, §6.3): the recipient has not approved the sender (or declined, which the sender is not told apart), or the daily letter limit is reached. The draft stays. */
+"compose.notapproved" = "Mottakeren har ikke godtatt deg ennå. Brevet ble ikke sendt.";
+"compose.ratelimited" = "Du har sendt for mange brev i dag. Brevet ble ikke sendt.";
 "compose.retry" = "Prøv igjen";
 "net.error" = "Fikk ikke kontakt med Brev-tjenesten. Prøv igjen.";
 /* A letter Rust refused because Brev's report on its own defences was not complete (docs/VAULT_SPLIT_PLAN.md §6, owner answer Q6). %@ is a list of the environment.* texts below, joined by ", ". */

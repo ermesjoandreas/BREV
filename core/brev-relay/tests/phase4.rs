@@ -857,8 +857,8 @@ fn release_deletes_links_events_invites_counts() {
     assert_eq!(r.count(&c, 2), 2);
 }
 
-/// Test 12b: a Phase 3 relay file (version 1) is refused in both modes and
-/// left as it was, and so is another database.
+/// Test 12b: a Phase 3 relay file (version 1) is refused and left as it
+/// was, and so is another database.
 #[test]
 fn v1_relay_file_is_refused() {
     let tmp = TempDir::new();
@@ -885,10 +885,6 @@ fn v1_relay_file_is_refused() {
         let config = Config::default();
         assert!(matches!(
             Relay::open_with(path, Box::new(Open), config, Gates::default()),
-            Err(Error::NotRelay)
-        ));
-        assert!(matches!(
-            Relay::open(path, Box::new(Open)),
             Err(Error::NotRelay)
         ));
         for command in ["invite", "serve"] {
@@ -1047,10 +1043,9 @@ fn config_defaults_are_the_owners_values() {
             c.invites_per_day,
             c.open_invites,
             c.pending_requests,
-            c.invite_days,
-            c.phase3
+            c.invite_days
         ),
-        (50, 10, 3, 5, 16, 7, false)
+        (50, 10, 3, 5, 16, 7)
     );
     assert!(matches!(c.clock, Clock::System));
     let now = SystemTime::now()
@@ -1162,7 +1157,8 @@ fn serve_takes_the_limit_flags() {
         &["--letters-per-day", "-1"],
         &["--letters-per-day", "+1"],
         &["--invite-days", "4294967296"],
-        &["--phase3", "--open-invites", "3"],
+        // Phase 3's transitional mode is gone (Phase 4 WP4).
+        &["--phase3"],
     ] {
         let out = Command::new(BIN)
             .args(["serve", "--db"])

@@ -11,8 +11,9 @@
 # the forbidden-API grep, the check that
 # AVFoundation, CoreMedia and CoreVideo stay in the protected layer, the
 # check that the Xcode minimum is stated alike, the dependency audit, a relay
-# on 127.0.0.1 with a fresh database (macOS; stopped when the script ends),
-# the Swift heap-scan harness and the lock probe against it (macOS), a
+# on 127.0.0.1 with a fresh database and the owner's limits (macOS; stopped
+# when the script ends), the Swift heap-scan harness and the lock probe
+# against it, each run with a root invite of its own (macOS), a
 # compile check of the view host (macOS), a type-check of the verification
 # tools and capture-probe's self-test (macOS) and an Xcode compile check
 # (macOS with xcodegen).
@@ -421,19 +422,24 @@ else
 fi
 
 # The relay the harness and the lock probe send letters through
-# (docs/PHASE3_DESIGN.md §8): brev-relay on 127.0.0.1 with a port the OS
-# picks and a fresh database under core/target, written to --port-file; the
-# script waits for /v1/health and stops the relay when it ends, also on a
-# failure (trap). Nothing listens anywhere but 127.0.0.1. --phase3: the
-# harness and the lock probe speak brev-mail's Phase 3 bodies until Phase 4
-# WP4 moves them (docs/PHASE4_DESIGN.md §9).
+# (docs/PHASE3_DESIGN.md §8, docs/PHASE4_DESIGN.md §8): brev-relay on
+# 127.0.0.1 with a port the OS picks, a fresh database under core/target and
+# the default limits (the owner's), written to --port-file; the script waits
+# for /v1/health and stops the relay when it ends, also on a failure (trap).
+# Nothing listens anywhere but 127.0.0.1. `root_invite` prints a new root
+# invite (the operator's `brev-relay invite`, which works while the relay
+# serves): each harness run and the lock probe get one in BREV_ROOT_INVITE
+# for their first user, who brings in the others with its own codes.
 if [[ "$DARWIN" == yes ]]; then
-  echo "==> relay for the harness and the lock probe (127.0.0.1, fresh database, Phase 3 bodies)"
+  echo "==> relay for the harness and the lock probe (127.0.0.1, fresh database, default limits)"
   cargo build --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-relay
   RELAY_DIR="$TARGET_DIR/test-relay"
   rm -rf "$RELAY_DIR"
   mkdir -p -m 700 "$RELAY_DIR"
-  "$TARGET_DIR/release/brev-relay" serve --phase3 --db "$RELAY_DIR/relay.db" --listen 127.0.0.1:0 \
+  root_invite() {
+    "$TARGET_DIR/release/brev-relay" invite --db "$RELAY_DIR/relay.db"
+  }
+  "$TARGET_DIR/release/brev-relay" serve --db "$RELAY_DIR/relay.db" --listen 127.0.0.1:0 \
     --port-file "$RELAY_DIR/port" 2>"$RELAY_DIR/relay.log" &
   RELAY_PID=$!
   trap 'kill "$RELAY_PID" 2>/dev/null || true; wait "$RELAY_PID" 2>/dev/null || true' EXIT
@@ -464,9 +470,11 @@ fi
 # glyphs (it finds nothing at 200 units or less, so it runs at 4096 and
 # 65000). Case 7's proves that the scribble probe SelfScan runs in the
 # Verify build (docs/VERIFY.md V39) can fail: without scribbling, the freed
-# block keeps its pattern. Cases 4, 5 and 8 send their letters through the
-# relay above (BREV_RELAY_URL); case 8 is the network round trip of
-# docs/PHASE3_DESIGN.md §8.
+# block keeps its pattern. Cases 4, 5, 8 and 9 send their letters through
+# the relay above (BREV_RELAY_URL), their first user registered with the
+# run's root invite (BREV_ROOT_INVITE); case 8 is the network round trip of
+# docs/PHASE3_DESIGN.md §8, case 9 the invite, approval, letter and Blokker
+# round trip of docs/PHASE4_DESIGN.md §8.
 if [[ "$DARWIN" == yes ]]; then
   echo "==> Swift harness (app/Tests)"
   HARNESS_DIR="$TARGET_DIR/harness"
@@ -475,8 +483,9 @@ if [[ "$DARWIN" == yes ]]; then
   xcrun clang -O2 -Wall -target "$ARCH-apple-macos14.0" -c "$REPO_ROOT/app/Tests/scan.c" -o "$HARNESS_DIR/scan.o"
   xcrun swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" \
     -import-objc-header "$REPO_ROOT/app/Tests/bridging.h" -I "$REPO_ROOT/app/Generated" \
-    "$REPO_ROOT"/app/Sources/Shared/*.swift "$BINDINGS" "$REPO_ROOT"/app/Tests/*.swift \
-    "$HARNESS_DIR/scan.o" "$TEST_ARCHIVE_DIR/release/libbrev_core.a" -o "$HARNESS_DIR/harness"
+    "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT/app/Sources/Keys/Attestor.swift" "$BINDINGS" \
+    "$REPO_ROOT"/app/Tests/*.swift "$HARNESS_DIR/scan.o" "$TEST_ARCHIVE_DIR/release/libbrev_core.a" \
+    -o "$HARNESS_DIR/harness"
   # run_harness <label> <scribble|none> <harness arguments...>
   # A case may skip a part this Mac cannot run (design §11) and still pass;
   # its "skip ..." lines are shown under the result, never hidden.
@@ -486,7 +495,7 @@ if [[ "$DARWIN" == yes ]]; then
     local env_args=(TMPDIR="$HARNESS_DIR/tmp/" BREV_RELAY_URL="$BREV_RELAY_URL")
     if [[ "$mode" == scribble ]]; then env_args+=(MallocScribble=1); else env_args=(-u MallocScribble "${env_args[@]}"); fi
     for i in 1 2 3 4 5; do
-      if ! out="$(env "${env_args[@]}" "$HARNESS_DIR/harness" "$@" 2>&1)"; then
+      if ! out="$(env "${env_args[@]}" BREV_ROOT_INVITE="$(root_invite)" "$HARNESS_DIR/harness" "$@" 2>&1)"; then
         echo "$out"
         echo "error: harness $label failed in run $i of 5" >&2
         exit 1
@@ -511,6 +520,7 @@ if [[ "$DARWIN" == yes ]]; then
   run_harness "case 7 (scribble probe)" scribble scribble
   run_harness "case 7 (no scribbling: the freed block is kept)" none scribble --no-scribble
   run_harness "case 8 (network round trip through the relay)" scribble network
+  run_harness "case 9 (invite, approval, letters and Blokker through the relay)" scribble invite
 else
   echo "==> Swift harness skipped: not macOS ($(uname -s))"
 fi
@@ -539,7 +549,8 @@ if [[ "$DARWIN" == yes ]]; then
     "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/App/*.swift \
     "$REPO_ROOT"/app/Sources/UI/*.swift "$REPO_ROOT"/app/Sources/Keys/*.swift \
     "$BINDINGS" "$REPO_ROOT/app/Tests/Lock/main.swift" "$TEST_ARCHIVE_DIR/release/libbrev_core.a" -o "$LOCK_DIR/lock-probe"
-  if ! out="$(env TMPDIR="$LOCK_DIR/tmp/" BREV_RELAY_URL="$BREV_RELAY_URL" "$LOCK_DIR/lock-probe" 2>&1)"; then
+  if ! out="$(env TMPDIR="$LOCK_DIR/tmp/" BREV_RELAY_URL="$BREV_RELAY_URL" BREV_ROOT_INVITE="$(root_invite)" \
+      "$LOCK_DIR/lock-probe" 2>&1)"; then
     echo "$out"
     echo "error: the lock probe failed" >&2
     exit 1

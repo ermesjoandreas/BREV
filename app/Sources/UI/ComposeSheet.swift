@@ -15,10 +15,15 @@
 // (EnvironmentProbe; docs/VAULT_SPLIT_PLAN.md §6, §8), then `prepareSend` on
 // `Session.net` (no content; a changed key shows compose.keychanged and keeps
 // the letter; a report below Rust's environment class A shows
-// compose.environment, which names the checks that failed), then on main
-// `signRequest` (the content, no I/O), the one Touch ID prompt through the
-// signer (SignService; Avbryt there returns to editing), `attachSignature`,
-// and `submit` on `Session.net`, which closes the sheet. When the relay
+// compose.environment, which names the checks that failed; a recipient that
+// has not approved the user, or one the user blocked, shows
+// compose.notapproved before any prompt), then on main `signRequest` (the
+// content, no I/O), the one Touch ID prompt through the signer
+// (SignService; Avbryt there returns to editing), `attachSignature`, and
+// `submit` on `Session.net`, which closes the sheet. When the relay refuses
+// the signed letter, as not approved or over the daily limit,
+// compose.notapproved or compose.ratelimited shows and the draft stays
+// (docs/PHASE4_DESIGN.md §6.1). When the relay
 // fails after the letter is signed, net.error and Prøv igjen show: that
 // sends the same signed letter again (`submit` only, no second prompt). A
 // step whose result arrives after the sheet was wiped (a close or a lock,
@@ -67,6 +72,8 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
     private var cancelButton: HumanButton?
     private let failure = InterfaceText(L10n.composeError, width: messageWidth, alignment: .left)
     private let keyChanged = InterfaceText(L10n.composeKeyChanged, width: messageWidth, alignment: .left)
+    private let notApproved = InterfaceText(L10n.composeNotApproved, width: messageWidth, alignment: .left)
+    private let rateLimited = InterfaceText(L10n.composeRateLimited, width: messageWidth, alignment: .left)
     private let netFailure = InterfaceText(L10n.netError, width: messageWidth, alignment: .left)
     private let sending = InterfaceText(L10n.composeSending, width: messageWidth, alignment: .left)
     /// compose.environment with the checks that failed: made for each
@@ -148,7 +155,7 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         let buttons = NSStackView(views: [cancel, retry, send])
         buttons.spacing = 12
         buttonRow = buttons
-        let messages = [failure, keyChanged, netFailure, sending]
+        let messages = [failure, keyChanged, notApproved, rateLimited, netFailure, sending]
         for v in [to, about, recipient, subjectField, bodyField, buttons] + messages as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
@@ -206,7 +213,8 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         step = next
         let busy = next == .sending || next == .signing
         let shown = busy ? sending : message
-        for m in [failure, keyChanged, netFailure, sending] + [environmentFailure].compactMap({ $0 }) {
+        for m in [failure, keyChanged, notApproved, rateLimited, netFailure, sending]
+            + [environmentFailure].compactMap({ $0 }) {
             m.isHidden = m !== shown
         }
         sendButton?.isHidden = next == .retry
@@ -313,6 +321,8 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         Self.log.error("send failed: \(name, privacy: .public)")
         switch error {
         case BrevError.KeyChanged: show(.editing, keyChanged)
+        case BrevError.NotApproved: show(.editing, notApproved)
+        case BrevError.RateLimited: show(.editing, rateLimited)
         case BrevError.Network: show(.editing, netFailure)
         case BrevError.Environment(let checks): show(.editing, environmentText(checks))
         default: show(.editing, failure)

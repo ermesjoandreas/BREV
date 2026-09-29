@@ -8,9 +8,11 @@
 // software P-256 key and the identity key is a software key too, as in the
 // heap-scan harness (app/Tests/main.swift). The letters on the mail screen
 // come from a second user through the relay scripts/test.sh starts
-// (BREV_RELAY_URL). It runs the real BrevApplication, LockController and
-// UnlockService, and checks what the harness (Shared/ only) and the view
-// host (a window, never run by test.sh) cannot:
+// (BREV_RELAY_URL); the first user registers with the root invite test.sh
+// mints for this run (BREV_ROOT_INVITE), the second with the first's invite
+// code (docs/PHASE4_DESIGN.md §3.4). It runs the real BrevApplication,
+// LockController and UnlockService, and checks what the harness (Shared/
+// only) and the view host (a window, never run by test.sh) cannot:
 // - a synthetic key that BrevApplication drops, in sendEvent and in
 //   nextEvent (a ↓ key posted to this process), does not move the idle
 //   clock, so posted input cannot keep Brev from idle-locking (design
@@ -48,7 +50,7 @@
 // screen; each content view draws its visible part into its pixel buffers
 // as AppKit's display pass would make it. Output is check names only.
 //
-// usage: BREV_RELAY_URL=http://127.0.0.1:<port> lock-probe
+// usage: BREV_RELAY_URL=http://127.0.0.1:<port> BREV_ROOT_INVITE=<code> lock-probe
 
 import AppKit
 import LocalAuthentication
@@ -117,6 +119,10 @@ _ = NSApp.setActivationPolicy(.prohibited)
 
 guard let relay = getenv("BREV_RELAY_URL").map({ String(cString: $0) }), !relay.isEmpty else {
     print("FAIL the lock probe needs BREV_RELAY_URL (the relay scripts/test.sh starts)")
+    exit(2)
+}
+guard let rootCode = getenv("BREV_ROOT_INVITE"), strlen(rootCode) > 0 else {
+    print("FAIL the lock probe needs BREV_ROOT_INVITE (the root invite scripts/test.sh mints)")
     exit(2)
 }
 
@@ -198,18 +204,26 @@ func makeSession(_ sub: String, kek: SecKey, identity: SecKey) throws -> (Sessio
 /// A fresh address: the relay lives through the whole test.sh run.
 func freshAddress(_ who: String) -> String { "\(who)-\(getpid())-\(UInt32.random(in: 0...UInt32.max))" }
 
-/// Registers `address`, typed as the app passes it.
-func register(_ s: Session, _ identity: SecKey, _ address: String) throws {
+/// Opens the invite `code` (the caller wipes it) and registers `address`
+/// with it, typed as the app passes it.
+func register(_ s: Session, _ identity: SecKey, _ address: String, invite code: SecretBytes) throws {
+    let opened = try s.openInvite(code: code)
+    opened.address.wipe()
+    opened.code.wipe()
     let typed = text(address)
     defer { typed.wipe() }
-    try s.register(signature: try Enclave.sign(digest: try s.registerRequest(address: typed), key: identity))
+    let digest = try s.registerRequest(address: typed)
+    try s.register(signature: try Enclave.sign(digest: digest, key: identity), digest: digest)
 }
 
-/// Adds the contact with `address`; returns its local id.
-func add(_ s: Session, _ address: String) throws -> Data {
-    let typed = text(address)
-    defer { typed.wipe() }
-    return try s.addContact(address: typed)
+/// The local id of the contact with `address`; the names read are wiped.
+func contact(_ s: Session, _ address: String) throws -> Data {
+    let items = try s.contacts()
+    defer { items.forEach { $0.name.wipe() } }
+    let u = Array(address.utf16)
+    let found = items.first { c in c.name.length == u.count && (0..<u.count).allSatisfy { c.name.units[$0] == u[$0] } }
+    guard let found else { throw BrevError.NotFound }
+    return found.id
 }
 
 /// What the keys of this process did: a software identity key, no Touch ID.
@@ -297,15 +311,23 @@ do {
     try Enclave.unwrap(peerWrapped, with: peerKEK) { try peer.brev.unlock(dek: $0, idleSecs: LockState.rustIdleSecs) }
     try peer.brev.confirmActive()
     let me = freshAddress("a"), other = freshAddress("b")
-    try register(session, identity, me)
-    try register(peer, peerIdentity, other)
-    let peerAtMe = try add(session, other), meAtPeer = try add(peer, me)
+    // The root invite for the first, an invite code of the first's for the
+    // second; the first's sync pins the second (its invited event).
+    let root = SecretBytes(capacity: Int(limits().maxInvite))
+    _ = root.append(UnsafeRawBufferPointer(start: rootCode, count: strlen(rootCode)))
+    defer { root.wipe() }
+    try register(session, identity, me, invite: root)
+    let code = try session.createInvite()
+    defer { code.wipe() }
+    try register(peer, peerIdentity, other, invite: code)
+    _ = try session.sync()
+    let peerAtMe = try contact(session, other), meAtPeer = try contact(peer, me)
     try send(session, identity, to: peerAtMe, subject: "Et testbrev",
              body: "Hei!\n\nDette er et testbrev fra låseprøven, med æ, ø og å.\n\nHilsen")
     try send(peer, peerIdentity, to: meAtPeer, subject: "Et svar",
              body: "Hei igjen!\n\nDette er svaret, gjennom reléet.\n\nHilsen")
     peer.brev.lock()
-    let arrived = try session.sync()
+    let arrived = try session.sync().letters
     check("a letter each way through the relay", arrived == 1, "\(arrived)")
 } catch {
     check("a letter each way through the relay", false, "\(error)")
