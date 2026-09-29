@@ -68,22 +68,56 @@ The Rust archive the app links must be a release archive without test
 features. `scripts/gen-bindings.sh` builds it and checks that; the app's
 pre-build script fails the build if `allow-software-keys` is in the archive.
 
+The release is built the way `scripts/repro-build.sh` builds, so a user
+can rebuild it and get the same executable (`docs/REPRODUCIBLE_BUILD.md`).
+That needs the same path mappings, the same folder layout (`<root>/src`
+for the source, `<root>/dd` for derived data) and `ARCHS=arm64`. The flags
+below are copied from the script's `build_one`; if the script changes, copy
+them again.
+
+**Architecture: arm64 only.** Build on an Apple Silicon Mac. The Rust
+archive is built for this Mac's architecture only, and `xcodebuild
+archive` ignores `ONLY_ACTIVE_ARCH`, so without `ARCHS=arm64` it also tries
+to link x86_64 and fails.
+
 1. From a clean checkout of the tagged commit, run the full check first:
 
        scripts/test.sh
 
-2. Build the Rust archive, the bindings and the Xcode project:
+2. Export the commit to a fresh folder and build the Rust archive, the
+   bindings and the Xcode project there, with the script's settings. Run
+   this from the checkout, in one shell (step 3 uses the variables):
 
-       scripts/gen-bindings.sh
-       xcodegen generate --spec app/project.yml --project app
+       REPO="$PWD"
+       COMMIT="$(git rev-parse HEAD)"
+       ROOT="$(cd "$(mktemp -d -t brev-release)" && pwd -P)"
+       XROOT="${ROOT#/private}"   # Xcode drops /private; both spellings are mapped
+       mkdir -p "$ROOT/src" && git archive --format=tar "$COMMIT" | tar -x -C "$ROOT/src"
+       export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$COMMIT")" ZERO_AR_DATE=1
+       CARGO_HOME_DIR="$(cd "${CARGO_HOME:-$HOME/.cargo}" && pwd -P)"
+       RUST_SRC="$(rustc --print sysroot)/lib/rustlib/src/rust"
+       RUST_COMMIT="$(rustc -vV | awk '/^commit-hash:/ {print $2}')"
+       RUSTFLAGS="--remap-path-prefix=$ROOT=/brev --remap-path-prefix=$CARGO_HOME_DIR=/cargo --remap-path-prefix=$RUST_SRC=/rustc/$RUST_COMMIT" \
+       CFLAGS="-ffile-prefix-map=$ROOT=/brev -ffile-prefix-map=$CARGO_HOME_DIR=/cargo" \
+         "$ROOT/src/scripts/gen-bindings.sh"
+       xcodegen generate --spec "$ROOT/src/app/project.yml" --project "$ROOT/src/app"
+
+   `RUSTFLAGS` and `CFLAGS` are set for the cargo step only: `xcodebuild`
+   would read them from the environment as build settings.
 
 3. Archive with manual Developer ID signing. The overrides replace the
    automatic "Apple Development" signing of `app/project.yml` for this
-   build only; `--timestamp` adds the secure timestamp notarization needs:
+   build only; `--timestamp` adds the secure timestamp notarization needs.
+   Everything up to `OTHER_CFLAGS` is as in the script:
 
        xcodebuild archive \
-         -project app/Brev.xcodeproj -scheme Brev -configuration Release \
-         -archivePath build/Brev.xcarchive \
+         -project "$ROOT/src/app/Brev.xcodeproj" -scheme Brev -configuration Release \
+         -destination "platform=macOS,arch=arm64" \
+         -derivedDataPath "$ROOT/dd" \
+         -archivePath "$REPO/build/Brev.xcarchive" \
+         ARCHS=arm64 ONLY_ACTIVE_ARCH=YES COMPILER_INDEX_STORE_ENABLE=NO \
+         "OTHER_SWIFT_FLAGS=\$(inherited) -file-prefix-map $XROOT=/brev -file-prefix-map $ROOT=/brev" \
+         "OTHER_CFLAGS=\$(inherited) -ffile-prefix-map=$XROOT=/brev -ffile-prefix-map=$ROOT=/brev" \
          CODE_SIGN_STYLE=Manual \
          DEVELOPMENT_TEAM=AV26DNQ5SC \
          CODE_SIGN_IDENTITY="Developer ID Application" \
@@ -116,11 +150,23 @@ pre-build script fails the build if `allow-software-keys` is in the archive.
          -exportOptionsPlist build/ExportOptions.plist \
          -exportPath build/export
 
-   The app is `build/export/Brev.app`.
+   The app is `build/export/Brev.app`. The build folder is no longer
+   needed: `rm -rf "$ROOT"`.
 
-Limit: the Rust archive is built for the build Mac's architecture only, so
-the app runs on that architecture only. A universal build is a Phase 5
-item not yet done.
+5. Check that a rebuild gives the same executable. This builds the commit
+   twice more, unsigned, and compares both with the signed app, signatures
+   removed:
+
+       scripts/repro-build.sh --commit "$COMMIT" --against build/export/Brev.app
+
+   The last line must start with `REPRODUCIBLE`. If it says `NOT
+   REPRODUCIBLE`, do not publish; find the difference first. A Developer
+   ID-signed build has not been compared yet (`docs/REPRODUCIBLE_BUILD.md`
+   §4), so the first release is also that test. Publish the hashes the
+   script prints with the release (`docs/REPRODUCIBLE_BUILD.md` §5).
+
+Limit: the app runs on arm64 only. A universal (arm64 and x86_64) build is
+a Phase 5 item not yet done.
 
 ## 4. Check the signed app before notarizing
 
@@ -240,7 +286,8 @@ If any check fails, do not open the app, and report it (`docs/SECURITY.md`
 What these checks prove: the app was signed by team `AV26DNQ5SC`, Apple
 scanned it, and nobody changed it since. They do not prove that the binary
 was built from the published source. That needs a reproducible build:
-`docs/REPRODUCIBLE_BUILD.md` (not yet usable for a release; its §5).
+`docs/REPRODUCIBLE_BUILD.md`, and §3 above builds the release so that it
+can match.
 
 ## 7. Open for the owner
 

@@ -158,8 +158,7 @@ control and fails if the wipe is left out):
 
 - A decision entry for this review (no `DECISIONS.md` entry was written
   here, by instruction).
-- `docs/SECURITY.md` §7 item 5 still lists "the Swift memory review" as not
-  built.
+- `docs/SECURITY.md` §7 item 5 now lists this review as done (2026-09-29).
 - The bounded case above (a typed address or code lives up to the relay
   timeout if a lock comes during its call) could only be shortened by a
   Rust API that copies the argument before its I/O and returns at once;

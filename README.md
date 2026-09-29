@@ -4,7 +4,7 @@ Brev (Norwegian for "letter") is a native macOS app for private correspondence b
 
 **No backup, by design.** The Touch ID-gated keys that protect everything else live only in this Mac's Secure Enclave, all other keys are stored encrypted under them on this Mac only, and nothing is ever synced to iCloud. Losing the Mac means losing the message history. This is intentional and is explained during setup.
 
-**Status:** On this branch (`claude/phase3`), Phase 3 (real transport) is code-complete except WP6, the two-instance run, which needs the owner. The split of the Rust core into brev-vault and brev-mail is done ([docs/VAULT_SPLIT_PLAN.md](docs/VAULT_SPLIT_PLAN.md); D-0065 to D-0068 in [docs/DECISIONS.md](docs/DECISIONS.md)). The human checks of Phase 2 and Phase 3 are pending ([docs/VERIFY.md](docs/VERIFY.md), with Touch ID; the machine-run rows are in [docs/VERIFY-RESULTS.md](docs/VERIFY-RESULTS.md), and the owner's steps in [docs/USER_SESSION.md](docs/USER_SESSION.md)). The app has onboarding, a Touch ID unlock with the keys in the Secure Enclave and the keychain, the three-pane mail window and the compose sheet, drawn through a capture-protected layer, with auto-lock and blank-on-lock. Letters go through a relay on 127.0.0.1 to contacts added by address, each signed with Touch ID. The phase plan is in CLAUDE.md §5.
+**Status:** On this branch (`claude/phase4`), Phases 3 (real transport) and 4 (anti-noise: contact approval, invite codes, rate limits) are code-complete, and so is the split of the Rust core into brev-vault and brev-mail ([docs/VAULT_SPLIT_PLAN.md](docs/VAULT_SPLIT_PLAN.md)). The Phase 5 items that need no human are done: cargo-deny and CI, Swift warnings as errors, the Swift memory review ([docs/SWIFT_MEMORY_REVIEW.md](docs/SWIFT_MEMORY_REVIEW.md)) and a reproducible build ([docs/REPRODUCIBLE_BUILD.md](docs/REPRODUCIBLE_BUILD.md)). The checks that need a human with Touch ID are pending: the owner's steps are in [docs/USER_SESSION.md](docs/USER_SESSION.md), the rows in [docs/VERIFY.md](docs/VERIFY.md), and the machine-run results in [docs/VERIFY-RESULTS.md](docs/VERIFY-RESULTS.md). Brev holds test letters only and is not released. For reviewers: [docs/SECURITY.md](docs/SECURITY.md) (what Brev promises, how, and what is still open) and [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) (Developer ID signing, notarization, checking a download). The phase plan is in CLAUDE.md §5.
 
 ## Prerequisites
 
@@ -14,7 +14,7 @@ Brev (Norwegian for "letter") is a native macOS app for private correspondence b
 - `python3` (the bindings patch step, `scripts/patch-bindings.py`)
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
 - An Apple Development certificate of team `AV26DNQ5SC`, with this Mac registered to the team: the app is team-signed so that its keys can live in the keychain ([docs/DECISIONS.md](docs/DECISIONS.md) D-0035). `scripts/build.sh` and the last step of `scripts/test.sh` pass `-allowProvisioningUpdates`
-- Optional: `cargo install cargo-audit` (`scripts/test.sh` warns and skips the audit without it)
+- Optional: `cargo install cargo-audit` and `cargo install cargo-deny --locked` (`scripts/test.sh` warns and skips each check without it)
 
 ## Build and test
 
@@ -22,9 +22,9 @@ Brev (Norwegian for "letter") is a native macOS app for private correspondence b
     scripts/build.sh --open   # same, then launch it (add --debug for a Debug build)
     scripts/test.sh           # every automated check; see below
 
-`scripts/test.sh` first generates the patched bindings and the Xcode project itself. It then runs cargo fmt, clippy, the Rust tests (also the stack-scrub tests in release), the zeroize and allocator checks, the FFI surface checks, the forbidden-API grep, cargo audit, the Swift heap-scan harness (`app/Tests`), the lock probe (`app/Tests/Lock`), a compile check of the view host (`tools/viewhost`), a type-check of the verification tools (`tools/verify`) and an Xcode Debug build. None of it opens a window on screen or asks for Touch ID.
+`scripts/test.sh` first generates the patched bindings and the Xcode project itself. It then runs cargo fmt, clippy, the Rust tests (also the stack-scrub tests in release), the zeroize and allocator checks, the FFI surface checks, the forbidden-API grep, cargo audit, cargo deny (`core/deny.toml`), the Swift heap-scan harness (`app/Tests`), the lock probe (`app/Tests/Lock`), a compile check of the view host (`tools/viewhost`), a type-check of the verification tools (`tools/verify`) and an Xcode Debug build. None of it opens a window on screen or asks for Touch ID.
 
-`scripts/test.sh` and `scripts/gen-bindings.sh` also run on Linux (Rust side only), so CI without Xcode can still check the core.
+`scripts/test.sh` and `scripts/gen-bindings.sh` also run on Linux (Rust side only), so CI without Xcode can still check the core; `.github/workflows/ci.yml` does that on Linux.
 
 ## Layout
 

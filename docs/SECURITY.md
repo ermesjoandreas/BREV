@@ -5,9 +5,10 @@ promises, what it defends against, where each defence lives, how the keys
 work, what the relay sees, how to check the claims, and what is still open.
 It points to the detailed documents instead of copying them.
 
-Status (2026-09-29, branch `claude/phase4`): Phases 0 to 4 are code-complete.
-The checks that need a human at the Mac (Touch ID) have not all been run
-yet (see "Known gaps"). Brev holds **test letters only**. It is not released.
+Status (2026-09-29, branch `claude/phase4`): Phases 0 to 4 are code-complete,
+and the Phase 5 items that need no human are done (§7 item 5). The checks
+that need a human at the Mac (Touch ID) have not all been run yet (see
+"Known gaps"). Brev holds **test letters only**. It is not released.
 
 Where to read more:
 
@@ -20,6 +21,8 @@ Where to read more:
 | `docs/PHASE2_DESIGN.md`, `docs/PHASE3_DESIGN.md`, `docs/PHASE4_DESIGN.md` | the designs of the locked UI, the transport and the anti-noise rules |
 | `docs/VERIFY.md`, `docs/VERIFY-RESULTS.md` | the verification checklist (rows V1 to V81) and the machine-run results |
 | `docs/DISTRIBUTION.md` | Developer ID signing, notarization, and how a user checks a downloaded build |
+| `docs/REPRODUCIBLE_BUILD.md` | how to rebuild Brev from source and compare it byte for byte (`scripts/repro-build.sh`) |
+| `docs/SWIFT_MEMORY_REVIEW.md` | every place Swift holds content or key material, its type, wipe point and check |
 
 ## 1. What Brev promises
 
@@ -244,7 +247,8 @@ wiped before they are freed; the build fails if a patch stops applying.
 Swift: content is `[UInt8]` in wipeable buffers, drawn one line at a time,
 never a lingering `String`. Freed memory inside Apple frameworks is
 overwritten because `MallocScribble=1` is set in `Info.plist`, and Brev
-refuses to unlock without it. D-0039, D-0040, D-0044, D-0045.
+refuses to unlock without it. D-0039, D-0040, D-0044, D-0045. The Swift
+side is inventoried in `docs/SWIFT_MEMORY_REVIEW.md` (no code gap found).
 
 ## 5. What the relay sees
 
@@ -300,11 +304,15 @@ surface and the binding patch markers; the forbidden-API grep over
 `app/Sources` (no `NSTextView` or `NSTextField`, no Services menu, no
 logging calls, no `String` built from content bytes, no `URLSession`, and
 more; each allowed exception is listed with a reason in
-`scripts/allowed-apis.txt`); the pasteboard greps; `cargo audit` (skipped with a loud warning if
-`cargo-audit` is not installed); a local relay with a fresh database; the
-Swift heap-scan harness and the lock probe; type-checks of the verification
-tools; and an Xcode build. It stops at the first failure. On Linux it runs
-the Rust part only.
+`scripts/allowed-apis.txt`); the pasteboard greps; `cargo audit` and
+`cargo deny check` against `core/deny.toml` (each skipped with a loud
+warning if the tool is not installed); a local relay with a fresh database;
+the Swift heap-scan harness and the lock probe; type-checks of the
+verification tools; and an Xcode build. Swift and C warnings are errors in
+the app (`app/project.yml`) and in every build `scripts/test.sh` runs. It
+stops at the first failure. On Linux it runs the Rust part only.
+`.github/workflows/ci.yml` runs the Rust part (fmt, clippy, tests,
+`cargo audit`, `cargo deny`) on Linux.
 
 ### 6.2 Manual: `docs/VERIFY.md`
 
@@ -331,7 +339,8 @@ letters and a software key, for checks that need no keychain. The table in
 ### 6.4 A downloaded build
 
 How a user checks the signature, notarization and entitlements of a
-downloaded Brev is in `docs/DISTRIBUTION.md` §6.
+downloaded Brev is in `docs/DISTRIBUTION.md` §6. How to check that it was
+built from the published source is in `docs/REPRODUCIBLE_BUILD.md`.
 
 ## 7. Known gaps
 
@@ -365,9 +374,13 @@ named here so a reviewer does not have to find it.
    Attest and the BankID/ID-porten `IdentityVerifier` are stubs: any build
    can register, and one person can hold several identities, limited by
    invites.
-5. **Not yet built (Phase 5):** a reproducible build, `cargo audit` and
-   `cargo-deny` in CI, Swift warnings as errors, a universal (arm64 and
-   x86_64) build, and the Swift memory review.
+5. **Phase 5.** Done: `cargo audit` and `cargo-deny` (`core/deny.toml`)
+   in `scripts/test.sh` and in CI (`.github/workflows/ci.yml`, not pushed
+   yet); Swift and C warnings as errors; the Swift memory review
+   (`docs/SWIFT_MEMORY_REVIEW.md`); a reproducible build
+   (`scripts/repro-build.sh`, `docs/REPRODUCIBLE_BUILD.md`; shown on one
+   Mac, not yet on a second one or a Developer ID-signed build). Not done:
+   a universal (arm64 and x86_64) build; Brev is built for arm64 only.
 6. **Design limits** listed in the phase designs: no forward secrecy; the
    relay can drop or reorder letters undetected; an invite code is a
    bearer secret while it sits on the pasteboard (at most 60 s) or in

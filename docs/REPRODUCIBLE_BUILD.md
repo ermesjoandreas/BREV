@@ -127,21 +127,14 @@ defaults the archive came out identical anyway.
 ## 5. For the owner: making a release verifiable
 
 A user can only match a release whose executable was built the way this
-script builds. Today `scripts/build.sh` and the archive command in
-`docs/DISTRIBUTION.md` §3 do not pass the path mappings above, so their
-executables name the build folder and will not match a user's rebuild.
-The §3 archive command also lacks `ARCHS`: run as written on this Mac it
-would try to link x86_64 as well and fail on the arm64-only Rust archive
-(the script hit exactly that before it set `ARCHS`). Two ways to close
-this, not chosen yet:
+script builds. `scripts/build.sh` does not pass the path mappings above, so
+its executables name the build folder and will not match a user's rebuild;
+it is for development only. `docs/DISTRIBUTION.md` §3 builds the release
+with the script's `RUSTFLAGS`, `CFLAGS`, `OTHER_SWIFT_FLAGS`,
+`OTHER_CFLAGS`, `ARCHS=arm64` and folder layout, then checks the signed app
+with `scripts/repro-build.sh --against`.
 
-1. Build the release with `scripts/repro-build.sh --keep`, then sign
-   `a/Brev.xcarchive` with Developer ID and notarize it
-   (`docs/DISTRIBUTION.md` §3–5).
-2. Or give `docs/DISTRIBUTION.md` §3 the same `RUSTFLAGS`, `CFLAGS`,
-   `OTHER_SWIFT_FLAGS`, `OTHER_CFLAGS` and `ARCHS` as the script.
-
-Either way, publish with each release: the commit, the Xcode build, the
+Publish with each release: the commit, the Xcode build, the
 Rust version, the XcodeGen version, and the SHA-256 of the executable after
 the replace-and-remove step in §2.
 
