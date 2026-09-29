@@ -382,7 +382,7 @@ and detail as in §6.
 
 1. `brev-hand`: claims, CBOR, class rule, verify, and the tests above.
 2. Wire: envelope v2, payload with token, `received_at` in the inbox
-   answer, store schema v6 (sealed result, nonce cache).
+   answer, store schema v6 (sealed result; replay stays the message-id rule).
 3. Swift adapter: the samplers and events of §3.1, one-context signing.
 4. Recipient: verification on receive, stored result, badge and detail.
 5. Owner test on the real Mac.
