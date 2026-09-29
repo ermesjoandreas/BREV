@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use brev_proto::body::{self, token_hash, EventKind, INBOX_ANSWER_MAX};
-use brev_proto::{identity_id, invite, Envelope};
+use brev_proto::{identity_id, Envelope};
 use brev_relay::{parse_listen, Clock, Config, Gates, Open, Policy, Relay, Server};
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
@@ -106,14 +106,12 @@ impl Identity {
         sig.to_bytes().into()
     }
 
-    /// A registration v2 body with any address bytes and signing-key field,
-    /// signed by this identity's key (design §3.2).
+    /// A registration v3 body with any address bytes and signing-key field,
+    /// signed by this identity's key (D-XXXX (no invites)).
     pub fn registration_with(
         &self,
         address: &[u8],
         key_field: &[u8],
-        invite: &[u8; 32],
-        tag: &[u8; 32],
         attestation: &[u8],
     ) -> Vec<u8> {
         let mut unsigned = vec![u8::try_from(address.len()).unwrap()];
@@ -121,17 +119,14 @@ impl Identity {
         unsigned.extend_from_slice(key_field);
         unsigned.extend_from_slice(&self.x25519);
         unsigned.extend_from_slice(&token_hash(&self.token));
-        unsigned.extend_from_slice(invite);
-        unsigned.extend_from_slice(tag);
-        let sig = self.sign(&body::register_preimage_v2(&unsigned));
+        let sig = self.sign(&body::register_preimage_v3(&unsigned));
         let len = u16::try_from(attestation.len()).unwrap().to_be_bytes();
         [&unsigned[..], &sig, &len, attestation].concat()
     }
 
-    /// A registration v2 of `address` with the invite key `a` and `tag`,
-    /// with [`ATTESTATION`].
-    pub fn registration(&self, address: &[u8], invite: &[u8; 32], tag: &[u8; 32]) -> Vec<u8> {
-        self.registration_with(address, &self.public, invite, tag, ATTESTATION)
+    /// A registration v3 of `address`, with [`ATTESTATION`].
+    pub fn registration(&self, address: &[u8]) -> Vec<u8> {
+        self.registration_with(address, &self.public, ATTESTATION)
     }
 
     /// A Phase 3 registration body, which the relay refuses.
@@ -160,41 +155,6 @@ impl Identity {
     /// The Phase 4 lookup answer for this identity: bundle ‖ status.
     pub fn reply(&self, approved: bool) -> Vec<u8> {
         body::lookup_reply(&self.public, &self.x25519, approved).to_vec()
-    }
-}
-
-/// An invite secret: the code's `s`, and the values derived from it.
-#[derive(Clone, Copy)]
-pub struct Secret(pub [u8; invite::SECRET_LEN]);
-
-impl Secret {
-    pub fn new(seed: u32) -> Secret {
-        Secret(noise(5000 + seed, invite::SECRET_LEN).try_into().unwrap())
-    }
-
-    /// Parses a code the relay's `invite` command printed.
-    pub fn from_code(code: &[u8]) -> Secret {
-        let mut secret = [0u8; invite::SECRET_LEN];
-        assert!(
-            invite::parse(code, &mut secret).unwrap().is_none(),
-            "a root code"
-        );
-        Secret(secret)
-    }
-
-    /// `a`, what the relay sees.
-    pub fn key(&self) -> [u8; 32] {
-        invite::relay_key(&self.0)
-    }
-
-    /// SHA-256(`a`), what the relay stores.
-    pub fn hash(&self) -> [u8; 32] {
-        invite::stored_hash(&self.key())
-    }
-
-    /// The invitee's tag for the inviter.
-    pub fn tag(&self, invitee: &Identity, inviter: &Identity, address: &str) -> [u8; 32] {
-        invite::tag(&self.0, &invitee.id, &inviter.id, address.as_bytes()).unwrap()
     }
 }
 
@@ -237,7 +197,6 @@ pub struct Seen {
     pub kind: EventKind,
     pub address: String,
     pub bundle: Vec<u8>,
-    pub tag: [u8; 32],
 }
 
 /// The relay in-process on 127.0.0.1:0 with its file in a temp dir and a
@@ -316,60 +275,19 @@ impl Relayed {
         (status, response.bytes().unwrap().to_vec())
     }
 
-    /// A root invite from the operator.
-    pub fn root(&self) -> Secret {
-        Secret::from_code(&self.relay.root_invite().unwrap())
+    /// Registers `who` at `address` (no invite).
+    pub fn register(&self, who: &Identity, address: &str) -> StatusCode {
+        self.post("/v1/register", who.registration(address.as_bytes()))
+            .0
     }
 
-    /// Registers `who` at `address` with the invite `secret` made by
-    /// `inviter` (None: a root invite, zero tag).
-    pub fn register_by(
-        &self,
-        who: &Identity,
-        address: &str,
-        secret: &Secret,
-        inviter: Option<&Identity>,
-    ) -> StatusCode {
-        let tag = inviter.map_or(invite::ROOT_TAG, |inviter| {
-            secret.tag(who, inviter, address)
-        });
-        self.post(
-            "/v1/register",
-            who.registration(address.as_bytes(), &secret.key(), &tag),
-        )
-        .0
-    }
-
-    /// Registers `who` at `address` with a fresh root invite: 201.
+    /// Registers `who` at `address`: 201.
     pub fn join(&self, who: &Identity, address: &str) {
-        let root = self.root();
         assert_eq!(
-            self.register_by(who, address, &root, None),
+            self.register(who, address),
             StatusCode::CREATED,
             "{address}"
         );
-    }
-
-    /// `who` creates the invite `secret` (`POST /v1/invites`).
-    pub fn create_invite(&self, who: &Identity, secret: &Secret) -> StatusCode {
-        self.post("/v1/invites", who.request(&secret.hash())).0
-    }
-
-    /// Opens `secret` (`POST /v1/invites/open`, no token).
-    pub fn open_invite(&self, secret: &Secret) -> (StatusCode, Vec<u8>) {
-        self.post("/v1/invites/open", secret.key().to_vec())
-    }
-
-    /// `who` redeems `secret` of `inviter` with its tag.
-    pub fn redeem(
-        &self,
-        who: &Identity,
-        address: &str,
-        secret: &Secret,
-        inviter: &Identity,
-    ) -> StatusCode {
-        let payload = [secret.key(), secret.tag(who, inviter, address)].concat();
-        self.post("/v1/invites/redeem", who.request(&payload)).0
     }
 
     pub fn lookup(&self, who: &Identity, address: &str) -> (StatusCode, Vec<u8>) {
@@ -397,7 +315,6 @@ impl Relayed {
                 kind: e.kind,
                 address: String::from_utf8(e.peer.address.to_vec()).unwrap(),
                 bundle: body::lookup_answer(e.peer.signing_key, e.peer.x25519).to_vec(),
-                tag: *e.tag,
             })
             .collect()
     }
@@ -462,7 +379,7 @@ impl Relayed {
             .unwrap()
     }
 
-    /// `who`'s count of `kind` (1 letters, 2 requests, 3 invites) today, 0
+    /// `who`'s count of `kind` (1 letters, 2 requests) today, 0
     /// if its row is of another day or missing.
     pub fn count(&self, who: &Identity, kind: i64) -> i64 {
         let today = i64::try_from(self.secs.load(Ordering::SeqCst) / DAY).unwrap();

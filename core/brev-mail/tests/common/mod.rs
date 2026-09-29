@@ -1,7 +1,7 @@
 //! Helpers shared by the integration tests: temp dirs, P-256 test signers,
 //! the Phase 4 relay in-process on 127.0.0.1:0 (docs/PHASE4_DESIGN.md §4),
 //! and sessions driven through the FFI API as the Swift app drives it:
-//! registration with an invite code, contacts by invite or by request.
+//! registration (open, no invite), contacts by request.
 
 // Each test file uses its own part of this module.
 #![allow(dead_code)]
@@ -260,14 +260,9 @@ impl Relayed {
             .any(|bytes| contains(&bytes, needle))
     }
 
-    /// A root invite code from the operator (`brev-relay invite`).
-    pub fn root_code(&self) -> Vec<u8> {
-        self.relay.root_invite().unwrap()
-    }
-
-    /// Registers `u` at `address` with a fresh root invite.
+    /// Registers `u` at `address` (no invite: registration is open).
     pub fn join(&self, u: &User, address: &str) {
-        u.register_with(&self.root_code(), address);
+        u.register(address);
     }
 
     /// A second connection to the relay's file, as a relay that lies (or a
@@ -341,11 +336,10 @@ impl User {
         u
     }
 
-    /// Registers `address` with the invite `code`, as the address page
-    /// does: open the code, request, Touch ID (the test key), register
-    /// (no attestation: the app's `NoAttestor`).
-    pub fn register_with(&self, code: &[u8], address: &str) {
-        self.b.open_invite(code, len32(code.len())).unwrap();
+    /// Registers `address` as the address page does, with no invite:
+    /// request, Touch ID (the test key), register (no attestation: the
+    /// app's `NoAttestor`).
+    pub fn register(&self, address: &str) {
         let digest = self
             .b
             .register_request(address.as_bytes(), len32(address.len()))
@@ -353,11 +347,6 @@ impl User {
         self.b
             .register(self.key.sign_digest(&digest), Vec::new())
             .unwrap();
-    }
-
-    /// A new invite code of this user.
-    pub fn invite(&self) -> Vec<u8> {
-        self.b.create_invite().unwrap()
     }
 
     /// Adds the contact with `address` (a contact request); its local id.
@@ -478,8 +467,9 @@ pub fn read(t: &OpenText) -> Vec<u8> {
 }
 
 /// A ("anna") and B ("bert") at `relay`, each other's contact the Phase 4
-/// way: A registers with a root invite, B with A's invite code, and A's
-/// sync pins B from the relay's invited event. (a, b, b at a, a at b).
+/// way: both register (no invite), B adds A (a contact request), A's sync
+/// fetches it and A approves it with one click, and B's sync learns of the
+/// approval. (a, b, b at a, a at b).
 pub fn pair(relay: &Relayed) -> (User, User, Vec<u8>, Vec<u8>) {
     pair_as(relay, "anna", "bert")
 }
@@ -488,9 +478,12 @@ pub fn pair(relay: &Relayed) -> (User, User, Vec<u8>, Vec<u8>) {
 pub fn pair_as(relay: &Relayed, first: &str, second: &str) -> (User, User, Vec<u8>, Vec<u8>) {
     let (a, b) = (User::new(&relay.url), User::new(&relay.url));
     relay.join(&a, first);
-    b.register_with(&a.invite(), second);
-    let synced = a.b.sync().unwrap();
+    relay.join(&b, second);
+    let a_at_b = b.add(first);
+    assert_eq!(a.b.sync().unwrap().requests, 1);
+    let peer = a.b.requests().unwrap().remove(0).peer;
+    let b_at_a = a.b.answer_request(peer, true).unwrap();
+    let synced = b.b.sync().unwrap();
     assert!(synced.contacts_changed && synced.letters == 0);
-    let (b_at_a, a_at_b) = (a.contact(second), b.contact(first));
     (a, b, b_at_a, a_at_b)
 }

@@ -1,7 +1,6 @@
 //! The relay's SQLite file (docs/PHASE3_DESIGN.md §4.3, docs/PHASE4_DESIGN.md
-//! §4.2): the directory of identities with the invite graph, the waiting
-//! envelopes, the approval graph (`links`), pending events, invites and
-//! daily counts. One connection behind one mutex; every method is one short
+//! §4.2): the directory of identities, the waiting envelopes, the approval
+//! graph (`links`), pending events and daily counts. One connection behind one mutex; every method is one short
 //! hold with no I/O but the file. Phase 4's rules are in `rules.rs`.
 
 use std::fs::{DirBuilder, OpenOptions};
@@ -10,19 +9,18 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use brev_proto::body::{INBOX_MAX, INBOX_MAX_BYTES};
-use brev_proto::invite;
-use rand::rngs::SysRng;
-use rand::TryRng;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 use crate::{Config, Error, Gates, Policy};
 
 /// `application_id` of a relay file: "BRLY".
 const APPLICATION_ID: i32 = 0x4252_4C59;
-/// `user_version` of this schema: 3 since each envelope keeps its
-/// `received_at` (docs/AUTHORSHIP.md §2.5). Phase 3's files (1) and Phase
-/// 4's (2) are refused.
-const USER_VERSION: i32 = 3;
+/// `user_version` of this schema: 4 since registration is open and the
+/// invites, the invite graph and the events' tags are gone
+/// (docs/DECISIONS.md D-XXXX (no invites)); 3 added each envelope's
+/// `received_at` (docs/AUTHORSHIP.md §2.5). Phase 3's files (1), Phase 4's
+/// (2) and those with invites (3) are refused.
+const USER_VERSION: i32 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE identities (
@@ -30,8 +28,7 @@ CREATE TABLE identities (
     address     TEXT NOT NULL UNIQUE,
     signing_key BLOB NOT NULL,
     x25519      BLOB NOT NULL,
-    token_hash  BLOB NOT NULL,
-    invited_by  BLOB
+    token_hash  BLOB NOT NULL
 ) STRICT;
 CREATE TABLE envelopes (
     seq         INTEGER PRIMARY KEY,
@@ -52,14 +49,7 @@ CREATE TABLE events (
     recipient   BLOB NOT NULL,
     peer        BLOB NOT NULL,
     kind        INTEGER NOT NULL,
-    tag         BLOB NOT NULL,
     UNIQUE (recipient, peer)
-) STRICT;
-CREATE TABLE invites (
-    hash        BLOB PRIMARY KEY,
-    inviter     BLOB,
-    day         INTEGER NOT NULL,
-    redeemed_by BLOB
 ) STRICT;
 CREATE TABLE counts (
     identity    BLOB NOT NULL,
@@ -84,7 +74,7 @@ impl Relay {
     /// if needed: the folder 0700, the file 0600. A new file gets the
     /// schema; an existing one must be a relay file of this version. On the
     /// connection: `secure_delete` (freed cells are zeroed, so an
-    /// acknowledged envelope or a used invite leaves no bytes),
+    /// acknowledged envelope leaves no bytes),
     /// `foreign_keys`, and `journal_mode = DELETE` (no `-wal`; a `-journal`
     /// only during a write).
     pub fn open_with(
@@ -219,10 +209,9 @@ impl Relay {
 
     /// Operator command (Phase 3 owner question Q3, design §4.3): deletes
     /// the identity registered with `address`, every envelope waiting for
-    /// it, its links (either side), its events (as recipient or peer), the
-    /// invites it made and its counts, so the address can be registered
-    /// again. Its invitees keep `invited_by` (a dangling id; the graph's
-    /// history is kept). False if no identity has that address.
+    /// it, its links (either side), its events (as recipient or peer) and
+    /// its counts, so the address can be registered again. False if no
+    /// identity has that address.
     pub fn release(&self, address: &str) -> Result<bool, Error> {
         let mut db = self.db();
         let tx = db.transaction()?;
@@ -240,7 +229,6 @@ impl Relay {
             "DELETE FROM envelopes WHERE recipient = ?1",
             "DELETE FROM links WHERE owner = ?1 OR peer = ?1",
             "DELETE FROM events WHERE recipient = ?1 OR peer = ?1",
-            "DELETE FROM invites WHERE inviter = ?1",
             "DELETE FROM counts WHERE identity = ?1",
             "DELETE FROM identities WHERE id = ?1",
         ] {
@@ -248,30 +236,6 @@ impl Relay {
         }
         tx.commit()?;
         Ok(true)
-    }
-
-    /// Operator command (design §4.6): makes a root invite, one that names
-    /// no inviter, and returns its code (`brev1.<secret>`). Only
-    /// SHA-256(`a`) is stored; the secret and `a` are never written. It is
-    /// the only way to bring in the first identity. Root invites count
-    /// against no cap.
-    pub fn root_invite(&self) -> Result<Vec<u8>, Error> {
-        let mut secret = [0u8; invite::SECRET_LEN];
-        SysRng.try_fill_bytes(&mut secret).map_err(|_| Error::Rng)?;
-        let hash = invite::stored_hash(&invite::relay_key(&secret));
-        let Ok(code) = invite::format(None, &secret) else {
-            unreachable!("format refuses only an inviter's address, and a root code has none");
-        };
-        let today = self.day();
-        let mut db = self.db();
-        let tx = db.transaction()?;
-        crate::rules::sweep_invites(&tx, today, self.config.invite_days)?;
-        tx.execute(
-            "INSERT INTO invites (hash, inviter, day, redeemed_by) VALUES (?1, NULL, ?2, NULL)",
-            params![hash, today],
-        )?;
-        tx.commit()?;
-        Ok(code)
     }
 
     /// The number of envelopes waiting, for all recipients.

@@ -1,6 +1,7 @@
 //! Relay tests of Phase 3's properties (docs/PHASE3_DESIGN.md §4.6) on the
-//! Phase 4 relay (docs/PHASE4_DESIGN.md §8): registration rules with an
-//! invite, token checks on every endpoint, envelope checks with the sender's
+//! Phase 4 relay (docs/PHASE4_DESIGN.md §8): open registration rules (no
+//! invite, D-XXXX (no invites)), token checks on every endpoint, no invite
+//! endpoint, envelope checks with the sender's
 //! token, inbox and ack, deletion from the file, no plaintext, the policy
 //! hook, release, and the binary's listen rule, port file and trace. The
 //! relay runs in-process on 127.0.0.1:0
@@ -19,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use brev_proto::body::{self, token_hash, INBOX_MAX, INBOX_MAX_BYTES, SUBMIT_MAX};
-use brev_proto::{invite, pad_into, padded_len, Envelope, MAX_PADDED, MAX_WIRE};
+use brev_proto::{pad_into, padded_len, Envelope, MAX_PADDED, MAX_WIRE};
 use brev_relay::{
     parse_listen, Config, Decision, Endpoint, Error, Gates, Open, Policy, Relay, Server,
 };
@@ -46,38 +47,21 @@ fn register_rules() {
 
     // The test's body builder gives brev-proto's body (RFC 6979 signatures
     // are deterministic).
-    let root = r.root();
-    let unsigned = body::registration_body_v2(
-        b"anna",
-        &a.public,
-        &a.x25519,
-        &token_hash(&a.token),
-        &root.key(),
-        &invite::ROOT_TAG,
-    )
-    .unwrap();
-    let sig = a.sign(&body::register_preimage_v2(&unsigned));
+    let unsigned =
+        body::registration_body(b"anna", &a.public, &a.x25519, &token_hash(&a.token)).unwrap();
+    let sig = a.sign(&body::register_preimage_v3(&unsigned));
     assert_eq!(
-        a.registration(b"anna", &root.key(), &invite::ROOT_TAG),
-        body::signed_registration_v2(&unsigned, &sig, ATTESTATION).unwrap()
+        a.registration(b"anna"),
+        body::signed_registration_v3(&unsigned, &sig, ATTESTATION).unwrap()
     );
 
-    // New, idempotent, taken, one address and one token per identity. A
-    // refused registration does not use its invite.
-    assert_eq!(r.register_by(&a, "anna", &root, None), StatusCode::CREATED);
+    // New with no invite (open registration), idempotent, taken, one
+    // address and one token per identity.
+    assert_eq!(r.register(&a, "anna"), StatusCode::CREATED);
+    assert_eq!(r.register(&a, "anna"), StatusCode::OK, "idempotent");
+    assert_eq!(r.register(&b, "anna"), StatusCode::CONFLICT, "taken");
     assert_eq!(
-        r.register_by(&a, "anna", &root, None),
-        StatusCode::OK,
-        "idempotent, also with the used invite"
-    );
-    let spare = r.root();
-    assert_eq!(
-        r.register_by(&b, "anna", &spare, None),
-        StatusCode::CONFLICT,
-        "taken"
-    );
-    assert_eq!(
-        r.register_by(&a, "anna-2", &spare, None),
+        r.register(&a, "anna-2"),
         StatusCode::CONFLICT,
         "a second address for one identity"
     );
@@ -87,15 +71,12 @@ fn register_rules() {
     };
     assert_eq!(a_again.id, a.id);
     assert_eq!(
-        r.register_by(&a_again, "anna", &spare, None),
+        r.register(&a_again, "anna"),
         StatusCode::CONFLICT,
         "another token"
     );
-    assert_eq!(
-        r.register_by(&a_again, "other", &spare, None),
-        StatusCode::CONFLICT
-    );
-    // Nothing of that changed the first registration or used the invite.
+    assert_eq!(r.register(&a_again, "other"), StatusCode::CONFLICT);
+    // Nothing of that changed the first registration.
     assert_eq!(r.lookup(&a, "anna"), (StatusCode::OK, a.reply(false)));
     assert_eq!(
         r.post("/v1/inbox", a_again.request(&[])).0,
@@ -103,7 +84,9 @@ fn register_rules() {
     );
     assert_eq!(r.lookup(&a, "anna-2").0, StatusCode::NOT_FOUND);
     assert_eq!(r.lookup(&a, "other").0, StatusCode::NOT_FOUND);
-    assert_eq!(r.open_invite(&spare), (StatusCode::OK, vec![0]));
+    // A new identity has no link and no event: it reaches nobody yet.
+    assert_eq!(r.rows("links"), 0);
+    assert_eq!(r.rows("events"), 0);
 
     // Address rules (brev_proto::body::is_valid_address): charset, length,
     // first letter.
@@ -123,7 +106,7 @@ fn register_rules() {
     ];
     for (i, address) in refused.iter().enumerate() {
         let who = Identity::new(10 + u8::try_from(i).unwrap());
-        let body = who.registration(address, &spare.key(), &invite::ROOT_TAG);
+        let body = who.registration(address);
         assert_eq!(
             r.post("/v1/register", body).0,
             StatusCode::BAD_REQUEST,
@@ -141,21 +124,23 @@ fn register_rules() {
     }
 
     // Signatures: a flipped bit, another key, no signing domain, Phase 3's
-    // domain.
-    let good = c.registration(b"carl", &spare.key(), &invite::ROOT_TAG);
+    // domain, the invite era's v2 domain.
+    let good = c.registration(b"carl");
     let signed = good.len() - 2 - ATTESTATION.len();
     let unsigned = &good[..signed - 64];
     let tail = &good[signed..];
     let mut flipped = good.clone();
     flipped[signed - 1] ^= 1;
-    let by_a = a.sign(&body::register_preimage_v2(unsigned));
+    let by_a = a.sign(&body::register_preimage_v3(unsigned));
     let no_domain = c.sign(unsigned);
     let v1_domain = c.sign(&body::register_preimage(unsigned));
+    let v2_domain = c.sign(&[&b"brev/v2/register\0"[..], unsigned].concat());
     for bad in [
         flipped,
         [unsigned, &by_a, tail].concat(),
         [unsigned, &no_domain, tail].concat(),
         [unsigned, &v1_domain, tail].concat(),
+        [unsigned, &v2_domain, tail].concat(),
     ] {
         assert_eq!(r.post("/v1/register", bad).0, StatusCode::UNAUTHORIZED);
     }
@@ -174,17 +159,21 @@ fn register_rules() {
     let mut off_curve = c.public;
     off_curve[64] ^= 1;
     for key in [&compressed[..], &prefixed, &off_curve] {
-        let body = c.registration_with(b"carl", key, &spare.key(), &invite::ROOT_TAG, ATTESTATION);
+        let body = c.registration_with(b"carl", key, ATTESTATION);
         assert_eq!(r.post("/v1/register", body).0, StatusCode::BAD_REQUEST);
     }
 
     // Bodies: empty, one byte short, one byte more, Phase 3's registration,
-    // over the 16 KiB limit.
+    // the invite era's v2 layout (an invite key and a tag after the token
+    // hash), over the 16 KiB limit.
+    let v2_unsigned = [unsigned, &[0xA1; 32], &[0x7A; 32]].concat();
+    let v2_sig = c.sign(&[&b"brev/v2/register\0"[..], &v2_unsigned].concat());
     for bad in [
         Vec::new(),
         good[..good.len() - 1].to_vec(),
         [&good[..], &[0]].concat(),
         c.registration_v1(b"carl"),
+        [&v2_unsigned[..], &v2_sig, tail].concat(),
     ] {
         assert_eq!(r.post("/v1/register", bad).0, StatusCode::BAD_REQUEST);
     }
@@ -208,8 +197,7 @@ fn requests_need_the_token() {
 
     // Every token endpoint but /v1/envelopes (submit_checks), in an order
     // where each valid request is answered by its rules.
-    let secret = Secret::new(1);
-    let cases: [(&str, Vec<u8>, StatusCode); 9] = [
+    let cases: [(&str, Vec<u8>, StatusCode); 7] = [
         ("/v1/lookup", b"bob".to_vec(), StatusCode::OK),
         ("/v1/inbox", Vec::new(), StatusCode::OK),
         ("/v1/inbox/ack", vec![7; 32], StatusCode::NO_CONTENT),
@@ -218,12 +206,6 @@ fn requests_need_the_token() {
         (
             "/v1/events/answer",
             [&b.id[..], &[1]].concat(),
-            StatusCode::NOT_FOUND,
-        ),
-        ("/v1/invites", secret.hash().to_vec(), StatusCode::CREATED),
-        (
-            "/v1/invites/redeem",
-            [Secret::new(2).key(), [0; 32]].concat(),
             StatusCode::NOT_FOUND,
         ),
         ("/v1/block", b.id.to_vec(), StatusCode::NO_CONTENT),
@@ -259,8 +241,6 @@ fn requests_need_the_token() {
         ("/v1/events/answer", [&b.id[..], &[2]].concat()),
         ("/v1/events/answer", b.id.to_vec()),
         ("/v1/block", b.id[..31].to_vec()),
-        ("/v1/invites", vec![0; 33]),
-        ("/v1/invites/redeem", vec![0; 63]),
     ] {
         assert_eq!(
             r.post(path, a.request(&payload)).0,
@@ -269,11 +249,36 @@ fn requests_need_the_token() {
             payload.len()
         );
     }
-    // Opening an invite takes no token: exactly `a`, 32 bytes.
-    assert_eq!(r.open_invite(&secret).0, StatusCode::OK);
-    for bad in [Vec::new(), vec![0; 31], a.request(&secret.key())] {
-        assert_eq!(r.post("/v1/invites/open", bad).0, StatusCode::BAD_REQUEST);
+}
+
+/// The invite endpoints are gone (D-XXXX (no invites)): each answers 404
+/// to any body, with a valid token or none, and writes nothing.
+#[test]
+fn no_invite_endpoint_answers() {
+    let r = Relayed::new();
+    let a = Identity::new(1);
+    r.join(&a, "anna");
+    let before = r.rows("identities");
+    for path in ["/v1/invites", "/v1/invites/open", "/v1/invites/redeem"] {
+        for body in [
+            Vec::new(),
+            vec![0; 32],
+            a.request(&[0; 32]),
+            a.request(&[0; 64]),
+        ] {
+            assert_eq!(r.post(path, body).0, StatusCode::NOT_FOUND, "{path}");
+        }
     }
+    assert_eq!(r.rows("identities"), before);
+    let tables: i64 = r
+        .read()
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name = 'invites'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0, "no invites table");
 }
 
 #[test]
@@ -685,28 +690,18 @@ fn policy_hook_denies_before_writing() {
     let (a, b) = (Identity::new(1), Identity::new(2));
     r.join(&b, "bob");
 
-    // Registration: 429 and nothing written, the invite not used. It is
-    // asked last: a bad signature, a missing invite and a taken address are
-    // refused before it.
-    let root = r.root();
+    // Registration: 429 and nothing written. It is asked last: a bad
+    // signature and a taken address are refused before it.
     deny(true);
-    assert_eq!(
-        r.register_by(&a, "anna", &root, None),
-        StatusCode::TOO_MANY_REQUESTS
-    );
-    let mut unsigned = a.registration(b"anna", &root.key(), &invite::ROOT_TAG);
+    assert_eq!(r.register(&a, "anna"), StatusCode::TOO_MANY_REQUESTS);
+    let mut unsigned = a.registration(b"anna");
     unsigned[80] ^= 1; // in the X25519 key
     assert_eq!(r.post("/v1/register", unsigned).0, StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        r.register_by(&a, "anna", &Secret::new(9), None),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(r.register_by(&a, "bob", &root, None), StatusCode::CONFLICT);
+    assert_eq!(r.register(&a, "bob"), StatusCode::CONFLICT);
     deny(false);
     assert_eq!(r.lookup(&b, "anna").0, StatusCode::NOT_FOUND);
-    assert_eq!(r.open_invite(&root).0, StatusCode::OK, "not used");
     assert_eq!(
-        r.register_by(&a, "anna", &root, None),
+        r.register(&a, "anna"),
         StatusCode::CREATED,
         "not 200: nothing was there"
     );

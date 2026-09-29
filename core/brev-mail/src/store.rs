@@ -13,8 +13,9 @@
 //! so the file holds neither a contact's identity id nor its address.
 //!
 //! Schema v5 (docs/PHASE4_DESIGN.md §5.1) adds each contact's sealed flags
-//! (they take my letters, key verified by an invite, blocked) and the user's
-//! open invites, each a sealed secret and the day it was made.
+//! (they take my letters, blocked). Schema v8 (docs/DECISIONS.md D-XXXX (no
+//! invites)) drops the user's open invites and the flag "key verified by an
+//! invite".
 //!
 //! Schema v6 (docs/AUTHORSHIP.md §6) adds `messages.proof`: a received
 //! letter's Hand result (brev-hand's `Verification::encode`, the checks that
@@ -33,7 +34,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use brev_hand::token::MAX_TOKEN;
 use brev_hand::{Rule, Verification};
 use brev_proto::body::{self, is_valid_address};
-use brev_proto::{identity_code, invite, sig, IDENTITY_CODE_LEN, SIG_LEN};
+use brev_proto::{identity_code, sig, IDENTITY_CODE_LEN, SIG_LEN};
 use brev_vault::{check_path, Clock, DekSlot, Text, Vault, VaultConfig};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use zeroize::Zeroizing;
@@ -43,14 +44,15 @@ use crate::{Envelope, Error};
 
 /// "BREV" in the SQLite header's application_id field.
 const APPLICATION_ID: i32 = 0x4252_4556;
-/// 7: version 3 (local contact ids, the keyed contact tag, sealed
+/// 8: version 3 (local contact ids, the keyed contact tag, sealed
 /// addresses and `pending`, the relay token in `identity.keys`;
-/// docs/PHASE3_DESIGN.md §6.1), `contacts.flags` and `invites` (version 5,
+/// docs/PHASE3_DESIGN.md §6.1), `contacts.flags` (version 5,
 /// docs/PHASE4_DESIGN.md §5.1), `messages.proof` (version 6,
-/// docs/AUTHORSHIP.md §6), and no `messages.env_class` (version 4 added
-/// it, version 7 drops it; D-0115). A version 2 to 6 store opens as
-/// `Corrupt`; there is no migration.
-const SCHEMA_VERSION: i32 = 7;
+/// docs/AUTHORSHIP.md §6), no `messages.env_class` (version 4 added it,
+/// version 7 drops it; D-0115), and no `invites` (version 5 added it,
+/// version 8 drops it; D-XXXX (no invites)). A version 2 to 7 store opens
+/// as `Corrupt`; there is no migration.
+const SCHEMA_VERSION: i32 = 8;
 
 /// The requirements a letter must meet, sent and received (brev-hand's
 /// `requirements`): all of them. A test archive built with the cargo
@@ -78,11 +80,7 @@ CREATE TABLE contacts (
     bundle     BLOB NOT NULL,              -- ct: pinned bundle
     address    BLOB NOT NULL,              -- ct: the address, also shown as the name
     pending    BLOB NOT NULL,              -- ct: empty, or the other bundle the relay returned
-    flags      BLOB NOT NULL               -- ct: one byte: 1 takes my letters, 2 key verified by an invite, 4 blocked, 8 relay not yet told of the block
-) STRICT;
-CREATE TABLE invites (
-    id         BLOB PRIMARY KEY,           -- pt: 16 random bytes, local
-    body       BLOB NOT NULL               -- ct: the invite's secret (16) || UTC day it was made (u64 BE)
+    flags      BLOB NOT NULL               -- ct: one byte: 1 takes my letters, 4 blocked, 8 relay not yet told of the block
 ) STRICT;
 CREATE TABLE threads (
     id         BLOB PRIMARY KEY,           -- pt: 16 random bytes, shared with peer
@@ -119,11 +117,10 @@ const KEY_SIGNING: std::ops::Range<usize> = 64..64 + sig::KEY_LEN;
 const KEY_TOKEN: std::ops::Range<usize> = 64 + sig::KEY_LEN..96 + sig::KEY_LEN;
 
 /// `contacts.flags`: the contact takes the user's letters (it approved the
-/// user, asked the user, or came in through an invite).
+/// user, or asked the user).
 pub(crate) const APPROVED_ME: u8 = 1;
-/// `contacts.flags`: the contact's key was checked through an invite code,
-/// against its fingerprint or its tag (docs/PHASE4_DESIGN.md §3.4).
-pub(crate) const VERIFIED: u8 = 2;
+// 2 was "key verified by an invite" (D-XXXX (no invites)); it is not
+// reused.
 /// `contacts.flags`: the user blocked the contact (*Blokker*): nothing is
 /// sent to it and its letters are dropped.
 pub(crate) const BLOCKED: u8 = 4;
@@ -131,16 +128,6 @@ pub(crate) const BLOCKED: u8 = 4;
 /// block (`/v1/block`), so every sync tells it again until it does. Sealed,
 /// so a lock does not forget it (WP5 review).
 pub(crate) const BLOCK_UNTOLD: u8 = 8;
-
-/// Days a local invite is kept after the day it was made: the relay's
-/// default life (docs/PHASE4_DESIGN.md §4.4).
-const INVITE_DAYS: u64 = 7;
-
-/// A decrypted `invites.body`: the secret and the day (u64 BE).
-const INVITE_BODY: usize = invite::SECRET_LEN + 8;
-
-/// Seconds in a UTC day.
-const DAY: u64 = 86_400;
 
 /// An identity id: SHA-256 over a [`PublicBundle`]. Used as the envelope
 /// sender and recipient; the store keeps only the own one in plaintext.
@@ -219,19 +206,8 @@ pub struct Contact {
     pub key_changed: bool,
     /// The contact takes the user's letters, as far as the user knows.
     pub approved_me: bool,
-    /// The contact's key was checked through an invite code.
-    pub verified: bool,
     /// The user blocked the contact.
     pub blocked: bool,
-}
-
-/// One of the user's open invites (`invites`, docs/PHASE4_DESIGN.md §5.1):
-/// its local id, its secret in a buffer that wipes itself, and the UTC day
-/// it was made. No `Debug`: the secret is a bearer secret.
-pub(crate) struct LocalInvite {
-    pub id: [u8; 16],
-    pub secret: Zeroizing<[u8; invite::SECRET_LEN]>,
-    pub day: u64,
 }
 
 /// A thread with one contact. No `Debug`: the subject is content.
@@ -469,17 +445,10 @@ impl Core {
         Ok(())
     }
 
-    /// The registration v2 body without its signature
-    /// (docs/PHASE4_DESIGN.md §3.2): `address`, both public keys, SHA-256 of
-    /// the relay token, the invite's relay key `invite` and the invitee's
-    /// `tag` (zeros for a root invite). The identity key signs
-    /// `body::register_preimage_v2` of it.
-    pub fn registration(
-        &self,
-        address: &[u8],
-        invite: &[u8; 32],
-        tag: &[u8; 32],
-    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+    /// The registration v3 body without its signature (D-XXXX (no
+    /// invites)): `address`, both public keys and SHA-256 of the relay
+    /// token. The identity key signs `body::register_preimage_v3` of it.
+    pub fn registration(&self, address: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
         let (_, keys) = self.identity_keys()?;
         let x25519: &[u8; 32] = keys
             .get(KEY_X25519)
@@ -491,7 +460,7 @@ impl Core {
             .ok_or(Error::Crypto)?;
         let signing_key = keys.get(KEY_SIGNING).ok_or(Error::Crypto)?;
         let hash = body::token_hash(token);
-        body::registration_body_v2(address, signing_key, x25519, &hash, invite, tag)
+        body::registration_body(address, signing_key, x25519, &hash)
             .map(Zeroizing::new)
             .map_err(|_| Error::Malformed)
     }
@@ -639,7 +608,6 @@ impl Core {
                 address,
                 key_changed,
                 approved_me: flags & APPROVED_ME != 0,
-                verified: flags & VERIFIED != 0,
                 blocked: flags & BLOCKED != 0,
             });
         }
@@ -713,8 +681,7 @@ impl Core {
     }
 
     /// Pins `bundle` as the contact at `address` with `flags` added, for a
-    /// peer the user approved or verified through an invite
-    /// (docs/PHASE4_DESIGN.md §5.3). A contact already at `address` keeps
+    /// peer the user approved (docs/PHASE4_DESIGN.md §5.3). A contact already at `address` keeps
     /// its row: the pinned key gains the flags (and a pending change is
     /// cleared); another key is sealed into `pending` (Phase 3's warning)
     /// and gives `None`, with nothing else changed. A new address gets a
@@ -835,8 +802,7 @@ impl Core {
     /// the code the app is showing (`KeyChanged` otherwise, also when no key
     /// change is pending). One statement sets the tag and the bundle,
     /// empties `pending`, and clears the flags that were about the old key
-    /// (it took the user's letters, it was verified by an invite; a block
-    /// stays), sealed under the new tag, so the old flags no longer open;
+    /// (it took the user's letters; a block stays), sealed under the new tag, so the old flags no longer open;
     /// a key that belongs to another contact gives `Duplicate`. The
     /// contact keeps its local id and its threads.
     pub fn accept_new_key(&mut self, contact: ContactId, code: &[u8]) -> Result<(), Error> {
@@ -1121,74 +1087,6 @@ impl Core {
         )?;
         if n == 0 {
             return Err(Error::NotFound);
-        }
-        Ok(())
-    }
-
-    /// Keeps an invite the user made: its secret and the UTC day, sealed
-    /// under the DEK with the row's random local id in the AD
-    /// (docs/PHASE4_DESIGN.md §5.1). The file shows only how many there are.
-    pub(crate) fn store_invite(
-        &mut self,
-        secret: &[u8; invite::SECRET_LEN],
-        day: u64,
-    ) -> Result<(), Error> {
-        let dek = self.dek()?;
-        let id: [u8; 16] = crypto::random()?;
-        let mut body = Zeroizing::new([0u8; INVITE_BODY]);
-        body[..invite::SECRET_LEN].copy_from_slice(secret);
-        body[invite::SECRET_LEN..].copy_from_slice(&day.to_be_bytes());
-        let sealed = crypto::seal_column(dek, &column_ad("invites.body", &[&id]), &body[..])?;
-        self.db().execute(
-            "INSERT INTO invites (id, body) VALUES (?1, ?2)",
-            params![&id[..], sealed],
-        )?;
-        Ok(())
-    }
-
-    /// The user's open invites, opened (`Crypto` for a row that does not
-    /// open under its AD, `Corrupt` for one of the wrong length).
-    pub(crate) fn local_invites(&self) -> Result<Vec<LocalInvite>, Error> {
-        let dek = self.dek()?;
-        let mut stmt = self.db().prepare("SELECT id, body FROM invites")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, [u8; 16]>(0)?, r.get::<_, Vec<u8>>(1)?))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, sealed) = row?;
-            let body = crypto::open_column(dek, &column_ad("invites.body", &[&id]), &sealed)?;
-            if body.len() != INVITE_BODY {
-                return Err(Error::Corrupt);
-            }
-            let (secret, day) = body.split_at(invite::SECRET_LEN);
-            let mut local = LocalInvite {
-                id,
-                secret: Zeroizing::new([0u8; invite::SECRET_LEN]),
-                day: u64::from_be_bytes(day.try_into().map_err(|_| Error::Corrupt)?),
-            };
-            local.secret.copy_from_slice(secret);
-            out.push(local);
-        }
-        Ok(out)
-    }
-
-    /// Deletes the local invite `id` (redeemed, or past its life).
-    pub(crate) fn delete_invite(&mut self, id: &[u8; 16]) -> Result<(), Error> {
-        self.dek()?;
-        self.db()
-            .execute("DELETE FROM invites WHERE id = ?1", [&id[..]])?;
-        Ok(())
-    }
-
-    /// Deletes the local invites past their life on day `today`: made
-    /// before day `today - 7`, as the relay counts (docs/PHASE4_DESIGN.md
-    /// §5.1).
-    pub(crate) fn sweep_invites(&mut self, today: u64) -> Result<(), Error> {
-        for old in self.local_invites()? {
-            if old.day.saturating_add(INVITE_DAYS) < today {
-                self.delete_invite(&old.id)?;
-            }
         }
         Ok(())
     }
@@ -1584,12 +1482,6 @@ fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-}
-
-/// Today's UTC day number (unix seconds / 86 400), as the relay counts
-/// days.
-pub(crate) fn today() -> u64 {
-    now().unsigned_abs() / DAY
 }
 
 #[cfg(test)]

@@ -7,9 +7,10 @@
 //! registration, else the caller's token), then the rest of the body, and
 //! only then reads or writes the store, where Phase 4's rules (`rules.rs`)
 //! answer 403, 404, 409, 428 or 429 before any write. An envelope's
-//! recipient is looked up only after its signature is verified, and a
-//! registration learns whether an address is taken only with a valid
-//! invite, so neither can probe the directory without a key and an invite.
+//! recipient is looked up only after its signature is verified. A
+//! registration with a valid signature learns whether an address is taken
+//! (409): registration is open (docs/DECISIONS.md D-XXXX (no invites)), and
+//! any registered identity can look an address up anyway.
 
 use std::future::IntoFuture;
 use std::io::{self, Write};
@@ -26,7 +27,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
-use brev_proto::body::{self, token_hash, RegistrationV2, SUBMIT_MAX};
+use brev_proto::body::{self, token_hash, RegistrationV3, SUBMIT_MAX};
 use brev_proto::{identity_id, sig, Envelope, SIG_LEN};
 
 use crate::rules::{Fail, NewIdentity};
@@ -34,7 +35,7 @@ use crate::store::Relay;
 use crate::{Decision, Endpoint, Error};
 
 /// Body limit of every endpoint but `/v1/envelopes` ([`SUBMIT_MAX`]). The
-/// largest registration v2 (8 484 bytes) fits.
+/// largest registration v3 (8 420 bytes) fits.
 const SMALL_BODY: usize = 16 * 1024;
 
 /// What `GET /v1/health` answers.
@@ -82,12 +83,12 @@ fn authenticate<'a>(relay: &Relay, body: &'a [u8]) -> Result<body::Request<'a>, 
     Ok(request)
 }
 
-/// `POST /v1/register` (registration v2): 201 new; 200 the same identity,
-/// address and token hash again; 400; 401 bad signature; 428 attestation
-/// (feature `app-attest`) or identity verification failed; then the rules'
-/// 403 (no valid invite), 409 (taken) and 429 (policy).
+/// `POST /v1/register` (registration v3, no invite): 201 new; 200 the same
+/// identity, address and token hash again; 400; 401 bad signature; 428
+/// attestation (feature `app-attest`) or identity verification failed; then
+/// the rules' 409 (taken) and 429 (policy).
 fn register(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
-    let reg = RegistrationV2::parse(body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let reg = RegistrationV3::parse(body).map_err(|_| StatusCode::BAD_REQUEST)?;
     reg.verify().map_err(|_| StatusCode::UNAUTHORIZED)?;
     #[cfg(feature = "app-attest")]
     if !relay.gates.attest.verify(reg.attestation, &reg.digest()) {
@@ -99,10 +100,8 @@ fn register(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
         signing_key: reg.signing_key,
         x25519: reg.x25519,
         token_hash: reg.token_hash,
-        invite: reg.invite,
-        tag: reg.tag,
     };
-    relay.register_v2(&new).map_err(failed)
+    relay.register(&new).map_err(failed)
 }
 
 /// `POST /v1/lookup`: the 97-byte bundle registered with the address and a
@@ -216,38 +215,6 @@ fn block(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
     relay.block(request.caller, peer).map_err(failed)
 }
 
-/// `POST /v1/invites` (prefix ‖ SHA-256(a)): 201; 200 the same hash again;
-/// 409 a hash another holds; 429 at the open cap or the daily cap.
-fn invite_create(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
-    let request = authenticate(relay, body)?;
-    let hash = request
-        .invite_create()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    allow(relay.policy.request(request.caller, Endpoint::InviteCreate))?;
-    relay.invite_create(request.caller, hash).map_err(failed)
-}
-
-/// `POST /v1/invites/open` (`a`, no prefix): the inviter's address and
-/// bundle, or `00` for a root invite; 404 unknown, used or expired.
-fn invite_open(relay: &Relay, body: &[u8]) -> Result<Vec<u8>, StatusCode> {
-    let relay_key = body::parse_invite_open(body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    relay.invite_open(relay_key).map_err(failed)
-}
-
-/// `POST /v1/invites/redeem` (prefix ‖ a ‖ tag): 200, also again by the
-/// same caller; 404 unknown, used by another, expired; 400 a root invite
-/// or the caller's own.
-fn invite_redeem(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
-    let request = authenticate(relay, body)?;
-    let (relay_key, tag) = request
-        .invite_redeem()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    allow(relay.policy.request(request.caller, Endpoint::InviteRedeem))?;
-    relay
-        .invite_redeem(request.caller, relay_key, tag)
-        .map_err(failed)
-}
-
 /// `POST /v1/inbox`: the caller's waiting envelopes, oldest first, each
 /// with its `received_at`, framed (brev_proto::body::inbox_answer). Deletes
 /// nothing.
@@ -301,9 +268,6 @@ status_route!(request_route, contact_request);
 body_route!(events_route, events);
 status_route!(answer_route, answer);
 status_route!(block_route, block);
-status_route!(invite_create_route, invite_create);
-body_route!(invite_open_route, invite_open);
-status_route!(invite_redeem_route, invite_redeem);
 body_route!(inbox_route, inbox);
 status_route!(ack_route, ack);
 
@@ -344,9 +308,6 @@ fn router(relay: Arc<Relay>, tally_state: Tally) -> Router {
         .route("/v1/events", post(events_route))
         .route("/v1/events/answer", post(answer_route))
         .route("/v1/block", post(block_route))
-        .route("/v1/invites", post(invite_create_route))
-        .route("/v1/invites/open", post(invite_open_route))
-        .route("/v1/invites/redeem", post(invite_redeem_route))
         .layer(DefaultBodyLimit::max(SMALL_BODY))
         .layer(middleware::from_fn_with_state(tally_state, tally))
         .with_state(relay)

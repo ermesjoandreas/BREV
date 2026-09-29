@@ -2,8 +2,8 @@
 //! surface (docs/PHASE4_DESIGN.md §5): two `Brev` sessions in temp dirs, the
 //! relay in-process on 127.0.0.1:0, P-256 test keys standing in for the
 //! Secure Enclave, and the FFI API exactly as the Swift app uses it.
-//! Identities register with invite codes and become contacts by invite or
-//! by request. Includes both definition-of-done tests of CLAUDE.md §5
+//! Identities register with no invite (open registration, D-XXXX (no
+//! invites)) and become contacts by request. Includes both definition-of-done tests of CLAUDE.md §5
 //! Phase 3: `relay_file_holds_no_plaintext` and
 //! `changed_key_warns_and_blocks_sending`.
 
@@ -182,7 +182,7 @@ fn changed_key_warns_and_blocks_sending() {
     let old_code = b.b.me().unwrap().code;
 
     // B loses its keys; the operator releases the address and a fresh B'
-    // registers it with a root invite.
+    // registers it.
     assert!(relay.relay.release("bert").unwrap());
     let b2 = User::new(&relay.url);
     relay.join(&b2, "bert");
@@ -348,8 +348,6 @@ fn submit_retry_is_idempotent() {
 
     // Registration keeps its body over `Network` the same way.
     let c = User::new(&relay.url);
-    let code = relay.root_code();
-    c.b.open_invite(&code, len32(code.len())).unwrap();
     let digest = c.b.register_request(b"carl", 4).unwrap();
     let signature = c.key.sign_digest(&digest);
     relay.stop();
@@ -374,7 +372,6 @@ fn locked_session_makes_no_request() {
     let digest = a.sign(&b_at_a, b"s", 1, b"x", 1).unwrap();
     let signature = a.key.sign_digest(&digest);
 
-    let code = relay.root_code();
     a.b.lock();
     let requests = relay.requests();
     let locked = |r: Result<(), BrevError>| assert!(matches!(r, Err(BrevError::Locked)));
@@ -386,9 +383,6 @@ fn locked_session_makes_no_request() {
     locked(a.b.attach_token_signature(signature.clone()).map(drop));
     locked(a.b.attach_signature(signature));
     locked(a.b.submit().map(drop));
-    locked(a.b.create_invite().map(drop));
-    locked(a.b.open_invite(&code, len32(code.len())).map(drop));
-    locked(a.b.redeem_invite().map(drop));
     locked(a.b.requests().map(drop));
     locked(a.b.answer_request(vec![0; 32], true).map(drop));
     locked(a.b.block_contact(b_at_a.clone()));
@@ -450,25 +444,20 @@ fn strangers_are_dropped_and_acked() {
     assert_eq!(b.letters(&a_at_b), [(b"s".to_vec(), b"accepted".to_vec())]);
 }
 
-/// Addresses (owner question Q3, brev-proto's rules) with Phase 4's invite
-/// (docs/PHASE4_DESIGN.md §5.3): typed upper case is folded; the rules,
-/// taken addresses (the invite is kept for another try), one address per
-/// identity; contacts by address; nothing is asked of the relay before an
-/// invite is opened.
+/// Addresses (owner question Q3, brev-proto's rules), registered with no
+/// invite (open registration, D-XXXX (no invites)): typed upper case is
+/// folded; the rules, taken addresses (another address goes through), one
+/// address per identity; contacts by address; nothing is asked of the
+/// relay before the signed registration.
 #[test]
 fn registration_and_contacts_by_address() {
     let relay = Relayed::new();
     let a = User::new(&relay.url);
-    // Before registration: no sync, no lookup, no invite, and no request.
+    // Before registration: no sync, no lookup, and no request.
     assert!(matches!(a.b.sync(), Err(BrevError::NotFound)));
     assert!(matches!(
         a.b.add_contact(b"bert", 4),
         Err(BrevError::NotFound)
-    ));
-    assert!(matches!(a.b.create_invite(), Err(BrevError::NotFound)));
-    assert!(matches!(
-        a.b.register_request(b"anna", 4),
-        Err(BrevError::InviteInvalid)
     ));
     assert_eq!(relay.requests(), 0);
 
@@ -494,9 +483,6 @@ fn registration_and_contacts_by_address() {
         a.b.register_request(b"anna", 5),
         Err(BrevError::Malformed)
     ));
-    let code = relay.root_code();
-    a.b.open_invite(&code, len32(code.len())).unwrap();
-    assert_eq!(relay.requests(), 1, "the invite open");
     // No request, then a signature by another key.
     assert!(matches!(
         a.b.register(vec![0x30], Vec::new()),
@@ -517,19 +503,19 @@ fn registration_and_contacts_by_address() {
         a.b.register(a.key.sign_digest(&digest), vec![0; 8193]),
         Err(BrevError::Malformed)
     ));
-    assert_eq!(relay.requests(), 1);
+    assert_eq!(relay.requests(), 0, "nothing asked before a good signature");
+    // Registered with no invite: one request.
     a.b.register(a.key.sign_digest(&digest), Vec::new())
         .unwrap();
+    assert_eq!(relay.requests(), 1);
     assert_eq!(read(&a.b.me().unwrap().address), b"anna");
     assert!(matches!(
         a.b.register_request(b"anna2", 5),
         Err(BrevError::Duplicate)
     ));
 
-    // Taken: the invite is not used, and another address goes through.
+    // Taken, and another address goes through.
     let b = User::new(&relay.url);
-    let code = relay.root_code();
-    b.b.open_invite(&code, len32(code.len())).unwrap();
     let digest = b.b.register_request(b"anna", 4).unwrap();
     assert!(matches!(
         b.b.register(b.key.sign_digest(&digest), Vec::new()),
@@ -539,12 +525,9 @@ fn registration_and_contacts_by_address() {
     let digest = b.b.register_request(b"bert", 4).unwrap();
     b.b.register(b.key.sign_digest(&digest), Vec::new())
         .unwrap();
-    // The invite is used up: a third identity cannot register with it.
-    let c = User::new(&relay.url);
-    assert!(matches!(
-        c.b.open_invite(&code, len32(code.len())),
-        Err(BrevError::InviteInvalid)
-    ));
+    assert!(b.b.me().unwrap().registered);
+    // A new identity has no contact: registration approves no one.
+    assert!(b.b.contacts().unwrap().is_empty());
 
     // Contacts by address.
     assert!(matches!(
@@ -567,7 +550,7 @@ fn registration_and_contacts_by_address() {
     ));
     let rows = a.b.contacts().unwrap();
     assert_eq!(read(&rows[0].name), b"bert");
-    assert!(rows[0].waiting && !rows[0].verified && !rows[0].blocked);
+    assert!(rows[0].waiting && !rows[0].blocked);
     drop(rows);
     // A contact id that is not 16 bytes.
     assert!(matches!(a.prepare(&[0; 32]), Err(BrevError::Malformed)));

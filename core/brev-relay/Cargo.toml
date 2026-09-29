@@ -1,6 +1,6 @@
 [package]
 name = "brev-relay"
-description = "Brev relay server: stores ciphertext envelopes and routing metadata only, with invites, approvals and rate limits (Phases 3 and 4)"
+description = "Brev relay server: stores ciphertext envelopes and routing metadata only, with approvals and rate limits (Phases 3 and 4)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,8 +22,6 @@ axum = { workspace = true }
 tokio = { workspace = true }
 rusqlite = { workspace = true }
 thiserror = { workspace = true }
-# The secret of a root invite (`brev-relay invite`), from the OS RNG.
-rand = { workspace = true }
 
 [features]
 # App Attest at registration (docs/PHASE4_DESIGN.md §7.1): refuse a

@@ -9,20 +9,19 @@
 //! process names of a [`Sample`] and the fixed names of facts and checks),
 //! errors are unit variants but `Environment` (the names of facts), and
 //! records carry ids, codes, metadata, the app's raw samples and a letter's
-//! [`Proof`] only. Invite codes cross as ASCII bytes, addresses as
-//! [`OpenText`].
+//! [`Proof`] only. Addresses cross as [`OpenText`].
 //!
 //! No call that takes content does network I/O, and no network call takes
 //! content (§3.2). Every network call runs with the session mutex released,
 //! so `lock()` never waits for the relay; the session's lock epoch tells the
 //! second half of a call that a lock came in between (§5.2).
 //!
-//! Phase 4 (docs/PHASE4_DESIGN.md §5.3): a new identity registers with an
-//! invite code that `open_invite` checked; contacts are the peers the user
-//! added (which always sends a contact request), approved, or verified by
-//! an invite; `sync` handles the relay's events first, then the letters;
-//! *Blokker* sets a sealed flag and tells the relay. Requests and an opened
-//! invite live only in the session, and a lock forgets them.
+//! Phase 4 (docs/PHASE4_DESIGN.md §5.3): a new identity registers its
+//! address with no invite (docs/DECISIONS.md D-XXXX (no invites)); contacts
+//! are the peers the user added (which always sends a contact request) or
+//! approved; `sync` handles the relay's events first, then the letters;
+//! *Blokker* sets a sealed flag and tells the relay. Requests live only in
+//! the session, and a lock forgets them.
 //!
 //! An unlock takes effect only with `confirm_active`, and the session locks
 //! itself when idle (docs/VAULT_SPLIT_PLAN.md §5d, §5e): its timer thread,
@@ -52,7 +51,6 @@ use brev_hand::{
     lock_reasons, requirements, token, Claims, Env, FactLog, LockReason, Verification,
 };
 use brev_proto::body::{self, is_valid_address, EventKind, ADDRESS_MAX};
-use brev_proto::invite::{self, MAX_CODE, SECRET_LEN};
 use brev_proto::SIG_LEN;
 use brev_vault::{Holder, Text, Timer};
 use sha2::{Digest, Sha256};
@@ -61,8 +59,7 @@ use zeroize::Zeroizing;
 use crate::crypto::{self, Plaintext};
 use crate::relay::{Incoming, Mailbox, RelayTransport};
 use crate::store::{
-    is_permanent, today, Draft, Letter, APPROVED_ME, BLOCKED, BLOCK_UNTOLD, KEY_RULE, MAIL,
-    VERIFIED,
+    is_permanent, Draft, Letter, APPROVED_ME, BLOCKED, BLOCK_UNTOLD, KEY_RULE, MAIL,
 };
 use crate::transport::{NetError, Transport};
 use crate::{ContactId, Core, Error, IdentityId, MessageId, PublicBundle, ThreadId};
@@ -76,10 +73,6 @@ pub const MAX_SUBJECT: usize = 256;
 pub const MAX_BODY: usize = 64 * 1024;
 /// Longest idle time `unlock` takes, in seconds.
 const MAX_IDLE_SECS: u32 = 3600;
-/// Longest used length `open_invite` takes: what the contact field reads
-/// from the pasteboard (docs/PHASE4_DESIGN.md §6.2). The code itself is at
-/// most [`MAX_CODE`] bytes once trimmed.
-const MAX_PASTE: usize = 256;
 
 /// The mark of allow-software-keys (the store's `KEY_RULE`) in the archive,
 /// for the release checks: scripts/gen-bindings.sh and the build phase in
@@ -172,18 +165,9 @@ pub enum BrevError {
     /// Nothing was signed or sent.
     #[error("not approved")]
     NotApproved,
-    /// The relay's daily limit for letters, requests or invites is reached.
+    /// The relay's daily limit for letters or requests is reached.
     #[error("rate limited")]
     RateLimited,
-    /// The invite code does not parse, or the relay does not know it
-    /// (unknown, used or expired), or no opened invite where one is needed.
-    #[error("invite invalid")]
-    InviteInvalid,
-    /// The relay's answer does not match the invite code (its form, the
-    /// inviter's address or the key fingerprint). Nothing was stored or
-    /// sent.
-    #[error("invite mismatch")]
-    InviteMismatch,
 }
 
 impl From<Error> for BrevError {
@@ -208,8 +192,6 @@ impl From<Error> for BrevError {
             Error::Unsafe => BrevError::Unsafe,
             Error::NotApproved => BrevError::NotApproved,
             Error::RateLimited => BrevError::RateLimited,
-            Error::InviteInvalid => BrevError::InviteInvalid,
-            Error::InviteMismatch => BrevError::InviteMismatch,
         }
     }
 }
@@ -417,8 +399,6 @@ pub struct Limits {
     pub chunk: u32,
     /// The longest address (brev-proto's `ADDRESS_MAX`).
     pub max_address: u32,
-    /// The longest invite code (brev-proto's `MAX_CODE`, 96 ASCII bytes).
-    pub max_invite: u32,
 }
 
 /// The content limits and chunk size.
@@ -429,7 +409,6 @@ pub fn limits() -> Limits {
         max_body: MAX_BODY as u32,
         chunk: CHUNK as u32,
         max_address: ADDRESS_MAX as u32,
-        max_invite: MAX_CODE as u32,
     }
 }
 
@@ -446,9 +425,6 @@ pub struct ContactRow {
     pub key_changed: bool,
     /// The contact has not approved the user yet: «Venter på svar».
     pub waiting: bool,
-    /// The contact's key was checked through an invite code: «Bekreftet
-    /// med invitasjon».
-    pub verified: bool,
     /// The user blocked the contact (*Blokker*): nothing is sent to it and
     /// its letters are dropped.
     pub blocked: bool,
@@ -466,8 +442,6 @@ pub struct ContactInfo {
     pub new_code: Vec<u8>,
     /// As [`ContactRow::waiting`].
     pub waiting: bool,
-    /// As [`ContactRow::verified`].
-    pub verified: bool,
     /// As [`ContactRow::blocked`].
     pub blocked: bool,
 }
@@ -481,18 +455,6 @@ pub struct RequestRow {
     /// The asker's address, drawn only in the protected layer.
     pub address: Arc<OpenText>,
     /// The asker's identity code: 35 ASCII bytes.
-    pub code: Vec<u8>,
-}
-
-/// An invite code that `open_invite` checked.
-#[derive(uniffi::Record)]
-pub struct InviteInfo {
-    /// A root invite, from the relay's operator: no inviter.
-    pub root: bool,
-    /// The inviter's address; empty for a root invite.
-    pub address: Arc<OpenText>,
-    /// The inviter's identity code: 35 ASCII bytes, or empty for a root
-    /// invite.
     pub code: Vec<u8>,
 }
 
@@ -605,8 +567,6 @@ struct Session {
     /// The contact requests of the last sync from addresses that are not
     /// contacts (docs/PHASE4_DESIGN.md §5.1).
     requests: Vec<Peer>,
-    /// The invite code `open_invite` checked last, until it is used.
-    invite: Option<Opened>,
 }
 
 /// A compose session: the fact log, the monotonic clock its times (ms) are
@@ -640,9 +600,6 @@ struct Pending {
 struct Registering {
     body: Zeroizing<Vec<u8>>,
     address: Zeroizing<Vec<u8>>,
-    /// The inviter whose invite the body names (checked at `open_invite`);
-    /// `None` for a root invite.
-    inviter: Option<Peer>,
 }
 
 /// Another identity as the relay named it: its bundle and address.
@@ -650,15 +607,6 @@ struct Registering {
 struct Peer {
     bundle: PublicBundle,
     address: Zeroizing<Vec<u8>>,
-}
-
-/// An invite code checked against the relay's answer (design §3.4).
-struct Opened {
-    /// The code's secret `s`.
-    secret: Zeroizing<[u8; SECRET_LEN]>,
-    /// The inviter, whose address and fingerprint matched the code; `None`
-    /// for a root invite.
-    inviter: Option<Peer>,
 }
 
 #[uniffi::export]
@@ -840,11 +788,9 @@ impl Brev {
 
     /// Starts a registration of the typed address `address[..address_len]`
     /// (ASCII upper case is folded; then 3 to 32 of `a-z 0-9 -`, a letter
-    /// first, `Malformed` otherwise) with the invite `open_invite` checked
-    /// (`InviteInvalid` without one). Builds registration v2
-    /// (docs/PHASE4_DESIGN.md §3.2) with the invite's relay key and the
-    /// tag that proves the code to the inviter (zeros for a root invite).
-    /// Returns the SHA-256 digest the identity key signs. No I/O.
+    /// first, `Malformed` otherwise). Registration is open: no invite
+    /// (docs/DECISIONS.md D-XXXX (no invites)). Builds registration v3 and
+    /// returns the SHA-256 digest the identity key signs. No I/O.
     /// `Duplicate` once registered.
     pub fn register_request(&self, address: &[u8], address_len: u32) -> Result<Vec<u8>, BrevError> {
         let address = typed_address(address, address_len)?;
@@ -853,22 +799,10 @@ impl Brev {
         if s.me.is_registered()? {
             return Err(BrevError::Duplicate);
         }
-        let own = s.me.bundle()?.id();
-        let opened = s.invite.as_ref().ok_or(BrevError::InviteInvalid)?;
-        let key = relay_key(&opened.secret);
-        let tag = match &opened.inviter {
-            None => invite::ROOT_TAG,
-            Some(inviter) => proof(&opened.secret, &own, &inviter.bundle.id(), &address)?,
-        };
-        let inviter = opened.inviter.clone();
-        let body = s.me.registration(&address, &key, &tag)?;
+        let body = s.me.registration(&address)?;
         let digest: [u8; 32] =
-            Sha256::digest(&*Zeroizing::new(body::register_preimage_v2(&body))).into();
-        s.registration = Some(Registering {
-            body,
-            address,
-            inviter,
-        });
+            Sha256::digest(&*Zeroizing::new(body::register_preimage_v3(&body))).into();
+        s.registration = Some(Registering { body, address });
         Ok(digest.to_vec())
     }
 
@@ -876,12 +810,10 @@ impl Brev {
     /// the app's attestation (empty until App Attest, at most 8 192 bytes,
     /// `Malformed` otherwise; docs/PHASE4_DESIGN.md §7.1): the signature is
     /// checked with the own key (`Signing` otherwise, and the registration
-    /// is forgotten), then the body is posted. Success stores the address,
-    /// pins the inviter as approved and verified (the key `open_invite`
-    /// checked against the code) and uses up the opened invite.
-    /// `InviteInvalid` (the relay knows no such unused invite), `AddressTaken`
-    /// (the invite is kept for another address) and `Refused` (among them
-    /// 428, attestation or identity check) forget the registration;
+    /// is forgotten), then the body is posted. Success stores the address;
+    /// the new identity has no contact yet. `AddressTaken` and `Refused`
+    /// (among them 428, attestation or identity check) forget the
+    /// registration;
     /// `Network` keeps it, so calling this again with the same signature
     /// retries without a second prompt. `NotFound` without a
     /// `register_request`.
@@ -892,7 +824,7 @@ impl Brev {
                 return Err(BrevError::Locked);
             }
             let reg = s.registration.as_ref().ok_or(BrevError::NotFound)?;
-            let preimage = Zeroizing::new(body::register_preimage_v2(&reg.body));
+            let preimage = Zeroizing::new(body::register_preimage_v3(&reg.body));
             let raw = match s.me.verify_own(&preimage, &signature) {
                 Ok(raw) => raw,
                 Err(e) => {
@@ -900,7 +832,7 @@ impl Brev {
                     return Err(e.into());
                 }
             };
-            let signed = body::signed_registration_v2(&reg.body, &raw, &attestation)
+            let signed = body::signed_registration_v3(&reg.body, &raw, &attestation)
                 .map_err(|_| BrevError::Malformed)?;
             (Zeroizing::new(signed), s.epoch)
         };
@@ -917,12 +849,7 @@ impl Brev {
                     return Err(BrevError::NotFound);
                 }
                 let reg = s.registration.take().ok_or(BrevError::NotFound)?;
-                s.invite = None;
                 s.me.set_address(&reg.address)?;
-                if let Some(inviter) = reg.inviter {
-                    let flags = APPROVED_ME | VERIFIED;
-                    pinned(s.me.pin(&inviter.bundle, &inviter.address, flags)?)?;
-                }
                 Ok(())
             }
             Err(NetError::Network) => Err(BrevError::Network),
@@ -931,12 +858,6 @@ impl Brev {
                     s.registration = None;
                 }
                 Err(match status {
-                    403 => {
-                        if same {
-                            s.invite = None;
-                        }
-                        BrevError::InviteInvalid
-                    }
                     409 => BrevError::AddressTaken,
                     _ => BrevError::Refused,
                 })
@@ -1036,136 +957,6 @@ impl Brev {
         Ok(contact.0.to_vec())
     }
 
-    /// Makes a one-time invite code (docs/PHASE4_DESIGN.md §3.1, §5.3): a
-    /// fresh secret from the OS RNG, registered at the relay by SHA-256 of
-    /// its relay key, then kept sealed in the store so the invitee's tag
-    /// can be checked. One human click, no Touch ID. Returns the code,
-    /// `brev1.<address>.<fingerprint>.<secret>`, as at most 96 ASCII bytes.
-    /// `NotFound` before registration; `RateLimited` at the relay's caps.
-    pub fn create_invite(&self) -> Result<Vec<u8>, BrevError> {
-        let (caller, token, epoch, address) = {
-            let s = self.session()?;
-            let (caller, token) = s.credentials()?;
-            let address = Zeroizing::new(s.me.address()?.to_vec());
-            (caller, token, s.epoch, address)
-        };
-        let mut secret = Zeroizing::new([0u8; SECRET_LEN]);
-        crypto::fill(&mut secret[..])?;
-        let hash = invite::stored_hash(&relay_key(&secret));
-        let made = self.net.invite_create(&caller, &token, &hash);
-        drop(token);
-        match made {
-            Ok(()) => {}
-            Err(NetError::Refused(429)) => return Err(BrevError::RateLimited),
-            Err(e) => return Err(e.into()),
-        }
-        let mut s = self.resume(epoch)?;
-        s.me.store_invite(&secret, today())?;
-        invite::format(Some((&address[..], &caller)), &secret).map_err(|_| BrevError::Malformed)
-    }
-
-    /// Opens the invite code `code[..code_len]` (at most 256 bytes; it is
-    /// trimmed and folded, docs/PHASE4_DESIGN.md §3.1) and checks it
-    /// against the relay's answer, which needs no token, so it works before
-    /// registration too. A code that does not parse, or that the relay does
-    /// not know, is `InviteInvalid`. The answer must have the code's form
-    /// (root or not), the code's address and a key with the code's
-    /// fingerprint, else `InviteMismatch` and nothing is kept or sent. The
-    /// own identity is `Malformed`. An inviter who is already a contact must
-    /// have the pinned key; another key goes into that contact's `pending`
-    /// (Phase 3's warning) and gives `KeyChanged`. The checked invite is
-    /// kept for `register_request` or `redeem_invite` until it is used or
-    /// the session locks. The code is copied out of the borrowed buffer
-    /// before the request.
-    pub fn open_invite(&self, code: &[u8], code_len: u32) -> Result<InviteInfo, BrevError> {
-        let code = Zeroizing::new(used(code, code_len, MAX_PASTE)?.to_vec());
-        let (own, epoch) = {
-            let mut s = self.session()?;
-            s.invite = None;
-            (s.me.bundle()?.id(), s.epoch)
-        };
-        let mut secret = Zeroizing::new([0u8; SECRET_LEN]);
-        let named = invite::parse(&code, &mut secret).map_err(|_| BrevError::InviteInvalid)?;
-        drop(code);
-        let answer = self.net.invite_open(&relay_key(&secret));
-        let inviter = match answer {
-            Ok(inviter) => inviter,
-            Err(NetError::Refused(_)) => return Err(BrevError::InviteInvalid),
-            Err(e) => return Err(e.into()),
-        };
-        // Design §3.4: the form, the address and the fingerprint.
-        let inviter = match (named, inviter) {
-            (None, None) => None,
-            (Some(named), Some((bundle, address)))
-                if named.address[..] == address[..] && named.matches(&bundle.id().0) =>
-            {
-                Some(Peer { bundle, address })
-            }
-            _ => return Err(BrevError::InviteMismatch),
-        };
-        let mut s = self.resume(epoch)?;
-        let info = match &inviter {
-            None => InviteInfo {
-                root: true,
-                address: s.register(Plaintext::new(Zeroizing::new(Vec::new()))),
-                code: Vec::new(),
-            },
-            Some(peer) => {
-                if peer.bundle.id() == own {
-                    return Err(BrevError::Malformed);
-                }
-                if let Some(contact) = s.me.contact_at(&peer.address)? {
-                    s.me.check_key(contact, &peer.bundle)?;
-                }
-                InviteInfo {
-                    root: false,
-                    address: s.register(Plaintext::new(peer.address.clone())),
-                    code: peer.bundle.code().to_vec(),
-                }
-            }
-        };
-        s.invite = Some(Opened { secret, inviter });
-        Ok(info)
-    }
-
-    /// Redeems the invite `open_invite` checked, once registered
-    /// (`NotFound` before; `InviteInvalid` without an opened invite, for a
-    /// root invite, and when the relay knows no such unused invite). The
-    /// relay makes both approved contacts and tells the inviter, with the
-    /// user's tag as proof of the code. The inviter is pinned (or its
-    /// contact flagged) as approved and verified; returns its local id.
-    pub fn redeem_invite(&self) -> Result<Vec<u8>, BrevError> {
-        let (caller, token, epoch, key, tag, inviter) = {
-            let s = self.session()?;
-            let (caller, token) = s.credentials()?;
-            let opened = s.invite.as_ref().ok_or(BrevError::InviteInvalid)?;
-            let inviter = opened.inviter.clone().ok_or(BrevError::InviteInvalid)?;
-            let address = Zeroizing::new(s.me.address()?.to_vec());
-            let key = relay_key(&opened.secret);
-            let own = IdentityId(caller);
-            let tag = proof(&opened.secret, &own, &inviter.bundle.id(), &address)?;
-            (caller, token, s.epoch, key, tag, inviter)
-        };
-        let sent = self.net.invite_redeem(&caller, &token, &key, &tag);
-        drop((token, key));
-        match sent {
-            Ok(()) => {}
-            Err(NetError::Refused(400 | 404)) => {
-                if let Ok(mut s) = self.resume(epoch) {
-                    s.invite = None;
-                }
-                return Err(BrevError::InviteInvalid);
-            }
-            Err(e) => return Err(e.into()),
-        }
-        let mut s = self.resume(epoch)?;
-        s.invite = None;
-        let flags = APPROVED_ME | VERIFIED;
-        let contact = pinned(s.me.pin(&inviter.bundle, &inviter.address, flags)?)?;
-        s.requests.retain(|r| r.bundle != inviter.bundle);
-        Ok(contact.0.to_vec())
-    }
-
     /// *Blokker* (docs/PHASE4_DESIGN.md owner answer 6): one click undoes
     /// the approval of `contact`. First the sealed local flag, which stops
     /// sending to it and drops its letters, and forgets a ticket or letter
@@ -1215,7 +1006,6 @@ impl Brev {
                 name: s.register(c.address),
                 key_changed: c.key_changed,
                 waiting: !c.approved_me,
-                verified: c.verified,
                 blocked: c.blocked,
             });
         }
@@ -1238,7 +1028,6 @@ impl Brev {
             code,
             new_code,
             waiting: flags & APPROVED_ME == 0,
-            verified: flags & VERIFIED != 0,
             blocked: flags & BLOCKED != 0,
         })
     }
@@ -1514,22 +1303,20 @@ impl Brev {
         s.letter = None;
     }
 
-    /// Deletes the local invites past their life, tells the relay again of
-    /// each block it has not answered yet (`block_contact`), then handles
-    /// the events waiting at the relay (docs/PHASE4_DESIGN.md §5.3: requests,
-    /// redeemed invites, approvals) and answers them, then fetches the
-    /// letters waiting at the relay, stores each, and acknowledges the
-    /// stored ones and the ones refused for good (docs/PHASE3_DESIGN.md
-    /// §5.3). The events come first, so a letter from an invitee or an
-    /// approver arrives in the same sync that pins its sender. Never sends a
+    /// Tells the relay again of each block it has not answered yet
+    /// (`block_contact`), then handles the events waiting at the relay
+    /// (docs/PHASE4_DESIGN.md §5.3: requests, approvals) and answers them,
+    /// then fetches the letters waiting at the relay, stores each, and
+    /// acknowledges the stored ones and the ones refused for good
+    /// (docs/PHASE3_DESIGN.md §5.3). The events come first, so a letter from
+    /// an approver arrives in the same sync that marks its sender. Never sends a
     /// letter. `NotFound` before registration (no request); `Locked` if a
     /// lock comes in between (nothing more is stored and nothing is
     /// acknowledged, so the letters and events come again).
     pub fn sync(&self) -> Result<SyncResult, BrevError> {
         let (caller, token, epoch, untold) = {
-            let mut s = self.session()?;
+            let s = self.session()?;
             let (caller, token) = s.credentials()?;
-            s.me.sweep_invites(today())?;
             let untold = s.me.untold_blocks()?;
             (caller, token, s.epoch, untold)
         };
@@ -1574,7 +1361,6 @@ impl Brev {
             letter: None,
             registration: None,
             requests: Vec::new(),
-            invite: None,
         }));
         match Timer::spawn(Arc::downgrade(&s), clock) {
             Ok(timer) => Ok(Brev { timer, s, net }),
@@ -1799,7 +1585,6 @@ impl Session {
         self.letter = None;
         self.registration = None;
         self.requests.clear();
-        self.invite = None;
         self.epoch = self.epoch.wrapping_add(1);
         self.me.lock();
     }
@@ -1814,11 +1599,6 @@ impl Session {
     ///   contact is blocked: declined); another key goes into `pending`
     ///   (Phase 3's warning) with no answer, so after `accept_new_key` the
     ///   next sync approves it.
-    /// - An invited event is checked against the local invites with the
-    ///   tag only a holder of the secret can make (design §3.4). A match
-    ///   pins the invitee as approved and verified and deletes that invite;
-    ///   a changed key goes into `pending` with no answer and the invite
-    ///   kept. No match: seen, and nothing pinned.
     /// - An approved event marks the contact with that key as taking the
     ///   user's letters; seen either way.
     fn take_event(
@@ -1849,28 +1629,6 @@ impl Session {
                 }
                 let flagged = self.me.change_flags(contact, APPROVED_ME, 0)?;
                 Ok((Some(true), wrote || flagged))
-            }
-            EventKind::Invited => {
-                let invites = self.me.local_invites()?;
-                let matched = invites
-                    .iter()
-                    .find(|i| {
-                        invite::tag(&i.secret, &peer.0, &own.0, &event.address)
-                            .is_ok_and(|tag| tag == event.tag)
-                    })
-                    .map(|i| i.id);
-                drop(invites);
-                crypto::scrub_stack();
-                let Some(id) = matched else {
-                    return Ok((Some(true), false));
-                };
-                let flags = APPROVED_ME | VERIFIED;
-                let (contact, changed) = self.me.pin(&event.bundle, &event.address, flags)?;
-                if contact.is_none() {
-                    return Ok((None, changed));
-                }
-                self.me.delete_invite(&id)?;
-                Ok((Some(true), changed))
             }
             EventKind::Approved => {
                 let mut changed = false;
@@ -1994,29 +1752,6 @@ fn typed_address(buf: &[u8], len: u32) -> Result<Zeroizing<Vec<u8>>, BrevError> 
 /// identity id).
 fn id<const N: usize>(b: &[u8]) -> Result<[u8; N], BrevError> {
     b.try_into().map_err(|_| BrevError::Malformed)
-}
-
-/// The relay key `a` of an invite's secret (brev-proto's
-/// `invite::relay_key`), in a buffer that wipes itself; then a stack scrub,
-/// since SHA-256 ran over the secret.
-fn relay_key(secret: &[u8; SECRET_LEN]) -> Zeroizing<[u8; 32]> {
-    let key = Zeroizing::new(invite::relay_key(secret));
-    crypto::scrub_stack();
-    key
-}
-
-/// The invitee's tag for the inviter (brev-proto's `invite::tag`); then a
-/// stack scrub, since HKDF ran on the secret. An address that breaks the
-/// rules is `Malformed`.
-fn proof(
-    secret: &[u8; SECRET_LEN],
-    invitee: &IdentityId,
-    inviter: &IdentityId,
-    invitee_address: &[u8],
-) -> Result<[u8; 32], BrevError> {
-    let tag = invite::tag(secret, &invitee.0, &inviter.0, invitee_address);
-    crypto::scrub_stack();
-    tag.map_err(|_| BrevError::Malformed)
 }
 
 /// The contact `Core::pin` pinned, or `KeyChanged` when the address is a
