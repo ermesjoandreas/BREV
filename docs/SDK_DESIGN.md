@@ -12,8 +12,8 @@ sjekker nøkkelen mot sitt eget register. I dag kan bare Mac lage bevis;
 Windows og Linux kan ikke før de kan lese alle kravene. Ett åpent spørsmål
 og én ja/nei-sjekk til deg står nederst.
 
-Status: design only, for the owner to read before any code. Nothing here is
-built. Base: branch `claude/laughing-knuth-yhp8ji`, code as at 444934b
+Status: design, for the owner to read before any code. §12 step 1 (no
+classes) is built (D-0115); nothing else here is. Base: branch `claude/laughing-knuth-yhp8ji`, code as at 444934b
 (Hand done on Mac, D-0112). Revised 2026-09-29 with the owner's answers:
 no classes, a generic host app and verifier, a key registry, sealing in
 Rust, no C# or Linux yet. Paths are relative to the repo root.
@@ -50,10 +50,10 @@ only who names the content and who receives it.
 | Part | Where | Reusable as is | Mail-specific | Swift-only |
 |---|---|---|---|---|
 | Encrypted store, DEK, lock state, two-step unlock, idle timer, column AEAD, padding, `Plaintext`/`Text`, stack scrubs, zeroing allocator, launch guard | `core/brev-vault` | yes, through `VaultConfig` (docs/ARCHITECTURE-REUSE.md §4) | no; but the column label `brev/v0/column/`, `CHUNK` = 960 and the buckets carry Brev's format (§5 item 3 there) | no |
-| Key origin and the class of a report (`KeyOrigin`, `EnvironmentClass`, `classify`: A, B, C) | `core/brev-vault/src/platform.rs` | `KeyOrigin` yes; the classes go (§12 step 1) | no | no |
-| Facts from raw samples (`FactLog`, `Sample`, `Design`), lock rule (sudo, SIP), class rule, token (COSE_Sign1, fixed CBOR, with a `class` claim), `verify` | `core/brev-hand` | mostly: the facts, the lock rule and the token are generic; the class rule becomes the requirement check (§5) | the profile string, the content-hash domain `brev/v1/hand/content\0`, and `"platform"` fixed to 1 (macOS; decode refuses anything else) | no |
+| Key origin and the defences that fail in a report (`KeyOrigin`, `EnvironmentReport`, `failed_fields`) | `core/brev-vault/src/platform.rs` | yes (the classes went in §12 step 1, D-0115) | no | no |
+| Facts from raw samples (`FactLog`, `Sample`, `Design`), lock rule (sudo, SIP), requirements (`requirements::unmet`, §5), token (COSE_Sign1, fixed CBOR, profile `hand-v2`, no `class` claim), `verify` | `core/brev-hand` | mostly: the facts, the lock rule, the requirements and the token are generic | the profile string, the content-hash domain `brev/v1/hand/content\0`, and `"platform"` fixed to 1 (macOS; decode refuses anything else) | no |
 | P-256 verification (`sig::verify`, `der_to_raw`) | `core/brev-proto/src/sig.rs` | yes | the rest of brev-proto is Brev's wire format | no |
-| Identity, contacts, threads, letters, schema v6 (a sent letter's `env_class`), X25519 + HKDF message crypto, relay client, the whole UniFFI surface (`Brev`, `OpenText`, `BrevError`, `Proof` with its `class`) | `core/brev-mail` (lib `brev_core`) | the FFI *glue pattern* (session mutex, `Finish` guard, `used`/`dek32`, `OpenText`, epoch) by copying; the sealing construction | yes | no |
+| Identity, contacts, threads, letters, schema v7, X25519 + HKDF message crypto, relay client, the whole UniFFI surface (`Brev`, `OpenText`, `BrevError`, `Proof`) | `core/brev-mail` (lib `brev_core`) | the FFI *glue pattern* (session mutex, `Finish` guard, `used`/`dek32`, `OpenText`, epoch) by copying; the sealing construction | yes | no |
 | Relay server | `core/brev-relay` | no | yes | no |
 | Bindings build: `gen-bindings.sh`, `patch-bindings.py` (wipes byte buffers), `ffi-surface.txt`, release markers | `scripts/` | by copying and renaming (written for `brev_core`, uniffi 0.32.2) | names only | no |
 | Protected capture layer (`ContentView`/`OpaqueView`, `preventsCapture`), `SecureTextView`, `SecureListView`, `TextLayout` | `app/Sources/UI`, `Shared` | yes | no | **yes** |
@@ -88,9 +88,10 @@ loose files.
 
 **The crate plan (smallest thing that works):**
 
-1. **`brev-vault`**: `EnvironmentClass` and `classify` go; `KeyOrigin`
-   stays. That is part of removing the classes (§12 step 1), not of the
-   SDK itself.
+1. **`brev-vault`** (done, D-0115): `EnvironmentClass`, `classify` and
+   the unused `Platform` trait went; `KeyOrigin`, `EnvironmentReport` and
+   `failed_fields` stay. That was part of removing the classes (§12 step
+   1), not of the SDK itself.
 2. **`brev-hand`**: after step 1, a `HandProfile` value carries the
    constants: the `eat_profile` string, the content-hash domain and the
    allowed platform codes. `BREV` gives Brev's bytes exactly as step 1
@@ -303,7 +304,7 @@ brev-hand, used by the sender and by the verifier.
 **The requirements.** All of these must hold:
 
 - **Hardware key**: `"key"` is 1 (Secure Enclave) or 2 (TPM), never 3
-  (software) or 4 (unknown), as in class A's rule (AUTHORSHIP §4.1). The
+  (software) or 4 (unknown), as in AUTHORSHIP §4.1. The
   key must also ask for biometric presence on every signature; that is set
   by the adapter's key flags and is not in the token (§11). On Mac: the
   Secure Enclave with Touch ID.
@@ -331,11 +332,12 @@ the facts.
 `seconds` are shown as numbers. Their values never fail the rule; only an
 unreadable one does (AUTHORSHIP §4.2).
 
-**Brev's code today.** brev-vault, brev-hand and brev-mail still have
-classes A, B and C: `classify`, the `class` claim, `SEND_THRESHOLD`, the
-stored `env_class`, `Proof.class` and the badge «klasse A». Brev behaves as
-this rule already, because it sends only in class A. Removing the classes
-is its own step, first in the work order (§12 step 1).
+**Brev's code today.** Since §12 step 1 (D-0115) Brev has this rule and no
+classes: brev-hand's `requirements::unmet` names the failed facts, the
+token has no `class` claim (profile `hand-v2`), brev-mail sends only when
+the list is empty, and the badge says «Skrevet i Brev» or «Ikke
+verifisert». Brev's test archives (`allow-software-keys`) skip only the
+hardware-key requirement, on both sides.
 
 ### 5.1 The platform adapter contract: facts, not flags
 
@@ -618,18 +620,21 @@ read as "the app":
 Mac and Swift first. Each step is one commit with its tests. Brev's
 `scripts/test.sh` must stay green at every step.
 
-1. **Remove the classes (Brev).** A token profile change, since the `class`
-   claim goes away. brev-vault's `EnvironmentClass`/`classify` become the
-   requirement check of §5, returning the failed facts; brev-hand's class
-   check becomes a requirements check; brev-mail drops `SEND_THRESHOLD`,
-   `may_send`, the stored `env_class` and `Proof.class`; the app's badge
-   says «Skrevet i Brev» or «Ikke verifisert»; `allow-software-keys` skips
-   the requirement check in test archives instead of lowering the class,
-   and its release check stays. Brev's letters are test letters only, so
-   Brev starts blank. AUTHORSHIP.md and a DECISIONS entry follow. Test:
-   each failed requirement is refused and named; a token whose facts miss
-   one fails verification with that fact; a token with a `class` claim
-   fails form; an old-profile token fails; V82–V84 rerun by the owner.
+1. **Remove the classes (Brev).** **Done 2026-09-29 (D-0115)**, with one
+   change by the owner: `allow-software-keys` skips only the hardware-key
+   requirement, not the whole check. V82–V84 still need the owner's rerun.
+   A token profile change, since the `class` claim goes away. brev-vault's
+   `EnvironmentClass`/`classify` become the requirement check of §5,
+   returning the failed facts; brev-hand's class check becomes a
+   requirements check; brev-mail drops `SEND_THRESHOLD`, `may_send`, the
+   stored `env_class` and `Proof.class`; the app's badge says «Skrevet i
+   Brev» or «Ikke verifisert»; `allow-software-keys` skips the requirement
+   check in test archives instead of lowering the class, and its release
+   check stays. Brev's letters are test letters only, so Brev starts blank.
+   AUTHORSHIP.md and a DECISIONS entry follow. Test: each failed
+   requirement is refused and named; a token whose facts miss one fails
+   verification with that fact; a token with a `class` claim fails form; an
+   old-profile token fails; V82–V84 rerun by the owner.
 2. **brev-hand `HandProfile`.** `content_hash`, `Claims::new` and `verify`
    take the profile; brev-mail's call sites follow (§3 item 2). Test:
    `BREV`'s content hash equals `SHA-256("brev/v1/hand/content\0" ||

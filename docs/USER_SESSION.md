@@ -141,9 +141,9 @@ Radene uten menneske (V1, V2, V45, V50, V53, V66, V69, og halvparten av V3 og V2
 
 ## Hand-test (ca. 15 min)
 
-Brevene har nå et bevis på hvordan de ble skrevet (D-0111). Radene er V82 til V84 i `docs/VERIFY.md`. Noter pass eller feil for hver.
+Brevene har et bevis på hvordan de ble skrevet (D-0111). Nå sendes et brev bare når alle kravene holder, og merket sier bare «Skrevet i Brev» eller «Ikke verifisert» (D-0115). Radene er V82 til V84 i `docs/VERIFY.md`. Noter pass eller feil for hver.
 
-Brevformatet er nytt (versjon 2, lager v6, relé-fil v3). Lagrene og reléet fra Runde 1 kan ikke åpnes. Testen starter derfor blankt:
+Beviset og lageret er nye (profil hand-v2, lager v7). Gamle lagre kan ikke åpnes. Testen starter derfor blankt:
 
 0. **Klargjør (10 min).**
    - Bygg: `scripts/build.sh && scripts/build.sh --instance b && (cd core && cargo build --release -p brev-relay)`
@@ -156,7 +156,7 @@ Brevformatet er nytt (versjon 2, lager v6, relé-fil v3). Lagrene og reléet fra
 
 1. **Ett brev, én Touch ID (V84).** I Brev: nytt brev til Brev B, skriv noe, «Send». Forventet: nøyaktig én dialog, «… sende brevet», ingen passordknapp. Brevet kommer frem hos Brev B.
    - Et nytt brev, «Send», og «Avbryt» i dialogen. Forventet: tilbake til utkastet, ingenting sendt, ingen ny dialog.
-2. **Merket (V83).** Lås opp Brev B og åpne brevet. Øverst i brevet står «Skrevet i Brev · klasse A». Ditt eget brev i Brev har ikke noe merke.
+2. **Merket (V83).** Lås opp Brev B. Brevet har et lite segl i listen. Åpne brevet. Øverst i brevet står «Skrevet i Brev». Ditt eget brev i Brev har ikke noe merke.
    - Klikk på merket. Et ark viser tallene: nøkkel i maskinvare, andre vinduer, AI-programmer, admin, blokkerte forsøk, skrivetid, SIP og sudo. Siste linje: «Appen er ikke bekreftet av Apple (støttes ikke på Mac)». «Lukk» eller Escape lukker arket.
 3. **sudo låser Brev (V82).** Brev låser seg når Terminal kommer foran, så sudo må starte forsinket. I Terminal: `sudo -v && sleep 15 && sudo sleep 20`, skriv passordet, og lås opp Brev innen 15 sekunder.
    - Når sudo starter, låser Brev seg innen et par sekunder og skriver «Brev låste seg fordi sudo kjører.».

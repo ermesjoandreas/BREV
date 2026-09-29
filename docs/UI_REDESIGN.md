@@ -3,7 +3,10 @@
 Status: built 2026-09-29 on branch `claude/ui-redesign`, with the review of
 2026-09-29 applied (below); DECISIONS.md D-0114 lists what
 the build settled that this spec did not. `tools/snapshot` draws every scene
-of §5.4 (light and dark) and runs §5.6's checks in scripts/test.sh.
+of §5.4 (light and dark) and runs §5.6's checks in scripts/test.sh. Since
+D-0115 there are no classes: the badge says «Skrevet i Brev» or «Ikke
+verifisert», and the list shows a seal or the chip «Ikke verifisert»; the
+drawings below are updated.
 Scope: the Swift app only (`app/Sources/App`, `app/Sources/UI`, one file in
 `app/Sources/Shared`), plus a new offscreen tool under `tools/`.
 No change to the Rust core or the FFI (`scripts/ffi-surface.txt` stays as it is).
@@ -107,10 +110,10 @@ Words used below:
 ├───────────────┬───────────────────────────┬──────────────────────────────────┤
 │ ▢ Innboks     │ (ContactBar, only when a  │  Emne i stor skrift              │
 │ ➤ Sendt       │  contact/request is       │  Fra: ekko            12. sep.   │
-│               │  selected)                │  [✓ Skrevet i Brev · klasse A]   │
+│               │  selected)                │  [✓ Skrevet i Brev]              │
 │ FORESPØRSLER  ├───────────────────────────┤  ─────────────────────────────── │
 │   asker-adr   │ ekko             12:04    │                                  │
-│               │ Emnet her         [A]     │  Brødtekst i New York 15 pt,     │
+│               │ Emnet her          ✓      │  Brødtekst i New York 15 pt,     │
 │ KONTAKTER     │───────────────────────────│  med god linjeavstand, venstre-  │
 │ ◯ ekko      • │ speil            i går    │  stilt, høyst 680 pt bred.       │
 │ ◯ speil       │ Et annet emne     [A]     │                                  │
@@ -261,16 +264,17 @@ go later):
 ```
 x=16                                               right edge −16
 │ ekko (13 semibold, labelColor)            12:04 (11, secondary) │  baseline 10 + ascent
-│ Emnet her (13 regular, labelColor)      [Klasse A] (chip)     │  baseline 30 + ascent
+│ Emnet her (13 regular, labelColor)             ✓ (seal)       │  baseline 30 + ascent
 ─────────────────────────────────────────────── hairline, inset 16
 ```
 
 - Date: today → time («12:04»); this week → weekday («tirsdag»); older →
   «12.09.2026». `nb_NO` formatter. Metadata.
-- Chip (received letters only): «Klasse A/B/C» for a verified letter in
-  `secondaryLabelColor` inside a 1 pt `separatorColor` rounded rect;
-  «Ikke verifisert» in `systemOrange`. Drawn with `drawMeta` in the list's
-  protected layer (meta, not content; not AX-visible, the list is opaque).
+- Mark (received letters only, D-0115): a verified letter gets the symbol
+  `checkmark.seal` (15 pt, `secondaryLabelColor`), meaning «Skrevet i
+  Brev»; a failed one the chip «Ikke verifisert» in `systemOrange` inside a
+  1 pt rounded rect. Drawn in the list's protected layer (meta, not
+  content; not AX-visible, the list is opaque).
 - Selection: rounded rect (radius 6) inset 8 × 2; colours as the sidebar.
   Text turns `alternateSelectedControlTextColor` only while focused.
 - ↑/↓ move the selection (as today); Tab moves sidebar → list.
@@ -333,7 +337,7 @@ With a letter selected, a header, then the letter:
  24 ┌─────────────────────────────────────────────────────────────┐
     │ Emnet her (17 semibold)                                      │ ReadingHeaderView
   8 │ Fra: (13, secondary)  ekko (13 semibold)   12. sep. 2026 12:04│
-  8 │ [✓ Skrevet i Brev · klasse A]   (HumanButton, inline, small) │
+  8 │ [✓ Skrevet i Brev]              (HumanButton, inline, small) │
  16 ├───────────────────────────── hairline ───────────────────────┤
  24 │ Brødtekst …                                                  │ SecureTextView
     └─────────────────────────────────────────────────────────────┘
@@ -484,7 +488,6 @@ Quick Look, drag, Services, tooltips.
 "list.empty.contact" = "Ingen brev med denne kontakten";
 "list.received" = "Mottatt";
 "list.sent" = "Sendt";
-"chip.class" = "Klasse %@";
 "reading.none" = "Ingen brev valgt";
 "reading.from" = "Fra:";
 "reading.to" = "Til:";
@@ -657,8 +660,8 @@ fake subjects and bodies (long and short), a sent letter, a contact with no
 letters, a key change and two requests (the relay tricks ViewHost's
 `--contacts` run already uses).
 
-States the fixture cannot reach (a not-verified letter; with software keys
-every letter is class C) are drawn as view-level scenes: the tool builds a
+States the fixture cannot reach (a not-verified letter) are drawn as
+view-level scenes: the tool builds a
 SecureListView / ReadingHeaderView / ProofSheet directly with fake
 `SecretText`s and a hand-made `Proof`.
 

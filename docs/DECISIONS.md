@@ -4606,3 +4606,92 @@ WP5 and their reviews record.
   owner does not test this by hand). VERIFY's GUI rows (capture, AX
   Inspector, V57) still apply to the new layout; see the note at the top of
   docs/VERIFY.md.
+
+### D-0115 — Dev flag BREV_DEV in Debug; no classes in the code (hand-v2, schema v7)
+
+- **Date:** 2026-09-29
+- **Decision (owner, binding):**
+  1. **Dev flag** (the owner: "keep it small, don't spend long; no trivial
+     obstacles while we develop"). A Swift compilation condition
+     `BREV_DEV`, set only in the Debug configuration (app/project.yml).
+     Under it: no capture protection (windows keep the default
+     `sharingType`, the protected layer does not set `preventsCapture`),
+     and no lock on resign active, screen lock or Brev's own idle clock;
+     the manual Lås, sleep, user switch and Rust's own idle deadline stay.
+     The main window's title bar shows «UTVIKLER» (chrome, not content).
+     `scripts/check-dev-flag.sh`, run by `scripts/build.sh` after every
+     build and by `scripts/test.sh` after its Debug compile, fails if
+     Release or Verify sets `BREV_DEV`, or if a Release app holds the
+     marker `BREV-DEV-BUILD-MARKER-1` (compiled only under `BREV_DEV`);
+     Debug is the control. Recorded in CLAUDE.md §2 as an accepted
+     residual risk (THREAT_MODEL.md follows).
+  2. **No classes** (D-0113), in brev-vault, brev-hand, brev-mail, the FFI,
+     the app and the docs. One rule: every requirement of
+     docs/AUTHORSHIP.md §4.1 (the old class-A conditions) holds, or the
+     letter is not sent and `Environment` names the facts. The token loses
+     its `"class"` claim, and its profile becomes
+     `tag:ermesjoandreas.github.io,2026:hand-v2`; a v1 token fails its
+     form. `verify`'s Class check becomes Requirements. `messages.env_class`
+     and `Proof.class` go; the store schema is v7, and older stores open as
+     `Corrupt` (test letters only; no migration). The badge says
+     «Skrevet i Brev» or «Ikke verifisert»; the message list shows a small
+     seal or the chip «Ikke verifisert»; ProofSheet says «Kravene er ikke
+     oppfylt: …». `allow-software-keys` (test archives only) skips only
+     the hardware-key requirement, when sending and when checking a
+     received token; its release guard is unchanged.
+- **Reasoning:** the owner's. A pass/fail rule cannot be misread as "B is
+  almost as good" (D-0113). The dev flag removes the obstacles of daily
+  work (no screenshots, a lock at every switch to the terminal) without
+  weakening Release, which a build check proves.
+- **Built:**
+  - brev-vault: `EnvironmentClass`, `classify`, `rank`, `code` and the
+    unused `Platform` trait removed; `KeyOrigin`, `EnvironmentReport`,
+    `ReportField` and `failed_fields` stay.
+    `scripts/check-vault-deps.sh` passes.
+  - brev-hand: `requirements::unmet(key, env, rule)` returns the names
+    not met, in token order (`"key"` first), for `Rule::All` or
+    `Rule::AnyKey`; `verify` and `Verification::decode` take the rule.
+    New tests: each requirement alone, under both rules; a v1 token (class
+    claim or old profile) fails its form; a fixed token byte for byte
+    (for SDK_DESIGN §12 step 2); `AnyKey` skips the key and nothing else.
+  - brev-mail: `KEY_RULE` in store.rs (the one `cfg!` of
+    `allow-software-keys` there; test.sh still counts three sites), the
+    send check `allowed`, schema v7 with a test that a v6 store is
+    refused; `scripts/ffi-surface.txt` without `Proof.class` and the UInt8
+    converters; padcheck expects version 7.
+  - Swift: the dev flag (Hardening, ContentView, LockController,
+    DevBuild.swift, L10n), the badge, the list's mark, ProofSheet.
+- **Settled here (the decision left them open):**
+  1. (3) of the dev flag, skipping Touch ID with software keys, is not
+     built: the Debug app links the app's Rust archive, which refuses
+     software keys and the test archive's marker, and the software keys
+     would need keeping somewhere. Not small.
+  2. A dev build reports its own capture state truthfully, so its samples
+     say `capture-off` is false and it cannot send letters
+     (`Environment`, «opptaksvernet var av»). Faking the fact would make
+     tokens lie.
+  3. A Debug build has the same bundle id, container and keychain items
+     as the Release build of its instance, so it opens the same store;
+     CLAUDE.md §2 says so.
+  4. Only the three named triggers are off in a dev build: sleep, the
+     displays sleeping and a user switch still lock.
+  5. The «UTVIKLER» label is red 11 pt semibold text at the trailing end of
+     the title bar (`NSTitlebarAccessoryViewController`), on the main
+     window only; its sheets sit under it. It is not drawn by the
+     snapshot tool, which builds without `BREV_DEV`.
+  6. The requirement names come from `requirements::unmet` in token order
+     with `"key"` first, and a software key now also names the other
+     facts that fail (before, class C named only `"key"`).
+  7. The list's seal has no accessibility element: the message list is a
+     ContentView and exposes nothing (§1.2), so the fixed text «Skrevet i
+     Brev» is read from the reading header's badge, as before.
+  8. ProofSheet's key line says «ja» for every verified letter, since a
+     verified letter met the hardware-key requirement; in a test archive
+     (`AnyKey`) it says «ja» for a software key too.
+  9. The test tools (harness, lock probe, fixture, snapshot) now report
+     `admin: false` instead of an unread admin fact, and the harness
+     states Brev's design facts, because the test archive keeps every
+     requirement but the key.
+- **Verified:** scripts/test.sh, scripts/build.sh (both instances),
+  tools/snapshot `--check` and its PNGs (no «Klasse» anywhere). Not run on
+  screen or with Touch ID; V82–V84 need the owner's rerun.

@@ -397,7 +397,7 @@ CREATE TABLE messages (
     outgoing   INTEGER NOT NULL,           -- pt: 1 = sent by me
     read       INTEGER NOT NULL,           -- pt
     body       BLOB NOT NULL,              -- ct
-    env_class  INTEGER                     -- pt: environment class a sent letter went out in (1 = A); NULL otherwise
+    env_class  INTEGER                     -- pt: a sent letter's environment class (1 = A); NULL otherwise
 ) STRICT;
 CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
 ";
@@ -432,8 +432,8 @@ CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
 /// The `messages.proof` line of the schema, and the `env_class` lines of
 /// versions 4 and 5 (the last column) and of version 6 (before `proof`).
 const PROOF_LINE: &str = "    proof      BLOB NOT NULL               -- ct: a received letter's Hand result (pass bits || token); empty for a sent one";
-const ENV_CLASS_LAST: &str = "    env_class  INTEGER                     -- pt: environment class a sent letter went out in (1 = A); NULL otherwise";
-const ENV_CLASS_V6: &str = "    env_class  INTEGER,                    -- pt: environment class a sent letter went out in (1 = A); NULL otherwise";
+const ENV_CLASS_LAST: &str = "    env_class  INTEGER                     -- pt: a sent letter's environment class (1 = A); NULL otherwise";
+const ENV_CLASS_V6: &str = "    env_class  INTEGER,                    -- pt: a sent letter's environment class (1 = A); NULL otherwise";
 
 /// A store with `schema` labelled `version` is refused, unchanged; so is
 /// the same file labelled version 7 (the check is the schema, not only the

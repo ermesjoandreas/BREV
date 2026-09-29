@@ -24,7 +24,7 @@ thiserror, zeroize and zeroizing-alloc as direct dependencies.
 | `Plaintext` (read-only, wiped on drop, no Debug, Clone or DerefMut) and `Text` (read in `CHUNK` = 960-byte chunks; the vault's lock closes every open one) | `brev-vault/src/crypto.rs`, `text.rs` |
 | Stack scrubs `scrub_stack` (16 KiB) and `scrub_stack_deep` (64 KiB) | `brev-vault/src/crypto.rs` |
 | Padding: `padded_len`, `is_padded_len`, `pad_into`, `unpad`, `MAX_PADDED`, `BUCKETS`, `PadError` (brev-proto re-exports them) | `brev-vault/src/padding.rs` |
-| Environment class: `KeyOrigin`, `EnvironmentReport`, `EnvironmentClass` (A, B, C), `Platform`, `classify`, `failed_fields`, `ReportField` | `brev-vault/src/platform.rs` |
+| Environment report: `KeyOrigin`, `EnvironmentReport`, `failed_fields`, `ReportField` (the classes went in D-0115) | `brev-vault/src/platform.rs` |
 | Zeroing global allocator (feature `zeroing-allocator`, on by default) | `brev-vault/src/lib.rs` |
 | Errors: `Locked`, `WrongKey`, `Crypto`, `NotFound`, `Malformed`, `Corrupt`, `Rng`, `Io`, `Storage`, `Busy`, `Unsafe` | `brev-vault/src/error.rs` |
 | Test counters and accessors (feature `test-hooks`, never in the app's archive) | `brev-vault/src/lib.rs` (`test_hooks`), `store.rs` |
@@ -35,7 +35,7 @@ thiserror, zeroize and zeroizing-alloc as direct dependencies.
   "BREV", schema v4); `IdentityId`, `ContactId`, `ThreadId`, `MessageId`,
   `PublicBundle`, `Contact`, `Thread`, `Message`, `Letter`; the identity row
   and the key check `open_identity`; contacts, threads, letters, the sealed
-  addresses and `pending`, `env_class` on sent letters (`store.rs`).
+  addresses and `pending` (`store.rs`; `env_class` went in D-0115).
 - **Crypto:** `seal_message`, `open_message`, `message_key` (HKDF),
   `contact_tag`, `static_secret`, `public_key`, `Secret` (`crypto.rs`).
 - **Transport:** `Transport`, `NetError`, `RelayTransport` (`relay.rs`,
@@ -76,7 +76,7 @@ thiserror, zeroize and zeroizing-alloc as direct dependencies.
 | Post-unlock rule (show mail only if still active) | `Shared/LockState.swift`, `App/LockController.swift` | enforced: an unlock is `Armed`, and content stays `Locked` unless `confirm_active` comes within 2 s |
 | Launch guard (arguments, debug defaults and environment, `MallocScribble` re-exec, `DYLD_*` stripped) | `Shared/LaunchGuard.swift` | enforced in part: `create`, `open` and `unlock` refuse a `DYLD_*` variable or `MallocScribble` other than `1`. Arguments and defaults stay Swift's |
 | Single instance, folder 0700, backup exclusion | `Keys/KeyStore.swift` | enforced: one open store per folder (`Busy`), folder 0700 and file 0600 (`Unsafe`). Backup exclusion stays Swift's |
-| Environment report (the seven fields) | `App/EnvironmentProbe.swift`, `UI/ComposeSheet.swift` | enforced: no letter below class A; the sent row keeps its class. The report itself is not attested |
+| Environment report (the seven fields) | `App/EnvironmentProbe.swift`, `UI/ComposeSheet.swift` | enforced: no letter unless every requirement holds (D-0115). The report itself is not attested |
 
 Rust enforces on its own: DEK correctness, a non-zero DEK, signatures (its
 own against the identity key, received ones against the contact's pinned
@@ -104,8 +104,9 @@ changes:
    the chunked `Text`, the stack scrubs and the OS RNG.
 5. The launch guard (feature `launch-guard`) and the zeroing allocator
    (feature `zeroing-allocator`), each on or off by feature.
-6. The environment class: its platform layer fills an `EnvironmentReport`,
-   and `classify` and `failed_fields` say what the report is short of.
+6. The environment report: its platform layer fills an
+   `EnvironmentReport`, and `failed_fields` says what the report is short
+   of.
 7. The dependency whitelist, which already holds for the vault itself.
 
 ## 5. What still blocks, or must be copied

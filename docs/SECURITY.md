@@ -65,8 +65,10 @@ mitigation, is `docs/THREAT_MODEL.md` §2. In one line each:
   inside Apple frameworks; file substitution of `brev.db`; the developer
   Mac that holds Brev's signing key; the local relay (Phases 3 and 4);
   keystrokes in macOS event objects; pixels in backing stores until lock;
-  freed memory in Apple frameworks (handled by `MallocScribble=1`); and the
-  self-reported environment class.
+  freed memory in Apple frameworks (handled by `MallocScribble=1`); the
+  self-reported facts behind the send rule; and Debug builds with the dev
+  flag `BREV_DEV`, which have no capture protection and no automatic locks
+  (never distributed; a build check proves Release has none of it).
 
 ## 3. Architecture and where each defence lives
 
@@ -96,7 +98,7 @@ keychain and Touch ID.
 | Component | Language | Role |
 |---|---|---|
 | `core/brev-vault` | Rust (rlib, no UniFFI, no network) | The SQLite store and its hardening (absolute path, 0700 folder held with a flock, 0600 file, exact schema check), the DEK in one buffer with the `Locked`/`Unlocked` gate, the two-step unlock and the idle deadline, column encryption, padding, `Plaintext` and chunked `Text`, stack scrubs, the OS RNG, the zeroing global allocator, the launch guard, and the environment class. `scripts/check-vault-deps.sh` fails on any dependency outside its whitelist. |
-| `core/brev-mail` | Rust (library `brev_core`) | Mail on top of the vault: the schema (`brev.db`, v5), identity, contacts and their sealed flags, invites, threads, letters; message crypto; the relay client; the whole UniFFI surface (`ffi.rs`). The send rule (environment class A) lives here. |
+| `core/brev-mail` | Rust (library `brev_core`) | Mail on top of the vault: the schema (`brev.db`, v5), identity, contacts and their sealed flags, invites, threads, letters; message crypto; the relay client; the whole UniFFI surface (`ffi.rs`). The send rule (every requirement of docs/AUTHORSHIP.md §4) lives here. |
 | `core/brev-proto` | Rust | The wire format shared by app and relay: envelope, bodies, identity id and code, invite codes, P-256 signature verification (`sig`). Re-exports the vault's padding so both sides use one implementation. |
 | `core/brev-relay` | Rust (axum binary) | The relay: registration, lookup, envelopes, inbox and ack, requests, events, invites, *Blokker*, rate limits. Listens on `127.0.0.1` only. Stores ciphertext and routing metadata. |
 | `app/` | Swift + AppKit | Onboarding, unlock, the three-pane window, the compose sheet, the contact screen. Draws content only into capture-protected pixel buffers. Holds the keychain and Touch ID code. |
@@ -130,10 +132,11 @@ This is the most important table for a reviewer. It is condensed from
 
 **Rust enforces, but on Swift's word** (the environment report, see §7):
 
-- A letter goes out only in environment class A. The class comes from
-  seven fields Swift reports: key origin (Secure Enclave), Touch ID used,
-  capture exclusion, secure input, synthetic-input rejection, AX opacity,
-  no pasteboard. Rust cannot check these facts. Until attestation, this rule
+- A letter goes out only when every requirement of docs/AUTHORSHIP.md §4
+  holds (there are no classes, D-0115). The facts come from Swift: the key
+  origin, the design facts and raw samples (secure input, capture
+  exclusion, processes, windows, SIP). Rust counts them and checks the
+  requirements, but cannot check the facts. Until attestation, this rule
   catches Swift bugs, not attackers.
 
 **Swift only** (Rust knows nothing):
@@ -377,8 +380,8 @@ named here so a reviewer does not have to find it.
    built and tested but protect only once the relay runs elsewhere, with
    TLS. The inviter-side invite check and the app's own approval flags hold
    even against the relay.
-4. **Self-reported environment class.** Sending needs class A, but the
-   class comes from Swift's own report. Until App Attest (per-letter
+4. **Self-reported facts.** Sending needs every requirement, but the
+   facts come from Swift's own samples. Until App Attest (per-letter
    assertions) lands, the rule catches Swift bugs, not attackers. App
    Attest and the BankID/ID-porten `IdentityVerifier` are stubs: any build
    can register, and one person can hold several identities, limited by
