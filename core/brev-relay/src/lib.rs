@@ -10,9 +10,13 @@
 //! The relay stores public keys, addresses (the directory), SHA-256 of each
 //! relay token, envelopes as they arrived (ciphertext and routing metadata),
 //! and from Phase 4 the invite graph, the approval graph, pending events,
-//! SHA-256 of each invite's relay key and daily counts (design §4.5). No
-//! timestamps (days only), no IP addresses, no request log. `--trace` prints
-//! path and status per request to stdout and stores nothing.
+//! SHA-256 of each invite's relay key and daily counts (design §4.5). The
+//! only time of day it keeps is each waiting envelope's `received_at`, the
+//! Unix second it was first stored, which the inbox answer hands the
+//! recipient for the authorship token's time check (docs/AUTHORSHIP.md
+//! §2.5, §6) and which goes with the envelope's ack; everything else is
+//! days only. No IP addresses, no request log. `--trace` prints path and
+//! status per request to stdout and stores nothing.
 //!
 //! This library holds everything; `main.rs` only parses arguments. brev-core's
 //! end-to-end tests run the relay in-process through [`Server`].
@@ -46,8 +50,9 @@ pub enum Error {
     #[error("the database path must be absolute")]
     Path,
     /// A database file that is not a brev-relay database of this version.
-    /// A Phase 3 file (version 1) is refused too: no migration.
-    #[error("not a brev-relay database (version 2)")]
+    /// A Phase 3 file (version 1) and a Phase 4 file (version 2, no
+    /// `received_at`) are refused too: no migration.
+    #[error("not a brev-relay database (version 3)")]
     NotRelay,
     /// The system's random number generator failed.
     #[error("the system random number generator failed")]
@@ -76,8 +81,9 @@ pub fn parse_listen(listen: &str) -> Result<SocketAddr, Error> {
 /// Seconds in a UTC day.
 const DAY: u64 = 86_400;
 
-/// Where the relay reads the time. It keeps only the UTC day,
-/// `unix seconds / 86 400` (design §4.4), never a time of day.
+/// Where the relay reads the time. It keeps the UTC day,
+/// `unix seconds / 86 400` (design §4.4), and a waiting envelope's
+/// `received_at` (docs/AUTHORSHIP.md §2.5), no other time of day.
 #[derive(Clone, Debug, Default)]
 pub enum Clock {
     /// The system clock.
@@ -88,15 +94,19 @@ pub enum Clock {
 }
 
 impl Clock {
-    /// Today's UTC day number.
-    pub fn today(&self) -> u64 {
-        let secs = match self {
+    /// Now, in Unix seconds.
+    pub fn now(&self) -> u64 {
+        match self {
             Clock::System => SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
             Clock::Manual(secs) => secs.load(Ordering::SeqCst),
-        };
-        secs / DAY
+        }
+    }
+
+    /// Today's UTC day number.
+    pub fn today(&self) -> u64 {
+        self.now() / DAY
     }
 }
 

@@ -262,20 +262,25 @@ impl RelayTransport {
             .map(drop)
     }
 
-    /// `POST /v1/inbox`: the envelopes waiting for `caller`, oldest first.
+    /// `POST /v1/inbox`: the envelopes waiting for `caller`, oldest first,
+    /// each with the relay's `received_at` (docs/AUTHORSHIP.md §2.5).
     /// Deletes nothing. One malformed envelope makes the whole answer
     /// malformed (the relay checks each before storing it).
     pub(crate) fn inbox(
         &self,
         caller: &[u8; 32],
         token: &[u8; 32],
-    ) -> Result<Vec<Envelope>, NetError> {
+    ) -> Result<Vec<(u64, Envelope)>, NetError> {
         let request = Zeroizing::new(body::inbox_body(caller, token));
         let (_, answer) = self.post("/v1/inbox", &request, &[200], INBOX_CAP)?;
-        let wires = body::parse_inbox_answer(&answer).map_err(|_| NetError::Network)?;
-        wires
+        let waiting = body::parse_inbox_answer(&answer).map_err(|_| NetError::Network)?;
+        waiting
             .into_iter()
-            .map(|w| Envelope::from_wire(w).map_err(|_| NetError::Network))
+            .map(|(at, w)| {
+                Envelope::from_wire(w)
+                    .map(|e| (at, e))
+                    .map_err(|_| NetError::Network)
+            })
             .collect()
     }
 
@@ -374,7 +379,7 @@ impl Transport for Mailbox<'_> {
         self.relay.submit(&self.caller, &self.token, envelope)
     }
 
-    fn poll(&self) -> Result<Vec<Envelope>, NetError> {
+    fn poll(&self) -> Result<Vec<(u64, Envelope)>, NetError> {
         self.relay.inbox(&self.caller, &self.token)
     }
 

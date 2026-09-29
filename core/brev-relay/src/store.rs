@@ -19,8 +19,10 @@ use crate::{Config, Error, Gates, Policy};
 
 /// `application_id` of a relay file: "BRLY".
 const APPLICATION_ID: i32 = 0x4252_4C59;
-/// `user_version` of this schema. Phase 3's files (1) are refused.
-const USER_VERSION: i32 = 2;
+/// `user_version` of this schema: 3 since each envelope keeps its
+/// `received_at` (docs/AUTHORSHIP.md §2.5). Phase 3's files (1) and Phase
+/// 4's (2) are refused.
+const USER_VERSION: i32 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE identities (
@@ -35,7 +37,8 @@ CREATE TABLE envelopes (
     seq         INTEGER PRIMARY KEY,
     id          BLOB NOT NULL UNIQUE,
     recipient   BLOB NOT NULL,
-    wire        BLOB NOT NULL
+    wire        BLOB NOT NULL,
+    received_at INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX inbox ON envelopes(recipient, seq);
 CREATE TABLE links (
@@ -176,22 +179,25 @@ impl Relay {
         Ok(self.signing_key(id)?.is_some())
     }
 
-    /// `recipient`'s waiting envelopes, oldest first: at most
-    /// [`INBOX_MAX`] and [`INBOX_MAX_BYTES`] in all. Deletes nothing.
-    pub(crate) fn inbox(&self, recipient: &[u8; 32]) -> Result<Vec<Vec<u8>>, Error> {
+    /// `recipient`'s waiting envelopes, oldest first, each with its
+    /// `received_at`: at most [`INBOX_MAX`] and [`INBOX_MAX_BYTES`] in all.
+    /// Deletes nothing.
+    pub(crate) fn inbox(&self, recipient: &[u8; 32]) -> Result<Vec<(u64, Vec<u8>)>, Error> {
         let db = self.db();
-        let mut stmt =
-            db.prepare("SELECT wire FROM envelopes WHERE recipient = ?1 ORDER BY seq")?;
+        let mut stmt = db
+            .prepare("SELECT received_at, wire FROM envelopes WHERE recipient = ?1 ORDER BY seq")?;
         let mut rows = stmt.query([recipient])?;
         let mut out = Vec::new();
         let mut bytes = 0;
         while let Some(row) = rows.next()? {
-            let wire: Vec<u8> = row.get(0)?;
+            let received_at: i64 = row.get(0)?;
+            let wire: Vec<u8> = row.get(1)?;
             if out.len() == INBOX_MAX || bytes + wire.len() > INBOX_MAX_BYTES {
                 break;
             }
             bytes += wire.len();
-            out.push(wire);
+            // Written from a u64 below, so never negative.
+            out.push((received_at.unsigned_abs(), wire));
         }
         Ok(out)
     }
@@ -280,5 +286,11 @@ impl Relay {
     pub(crate) fn day(&self) -> i64 {
         // Day numbers are about 20 000; saturate rather than wrap.
         i64::try_from(self.config.clock.today()).unwrap_or(i64::MAX)
+    }
+
+    /// Now, in Unix seconds as SQLite stores them: a new envelope's
+    /// `received_at`.
+    pub(crate) fn now(&self) -> i64 {
+        i64::try_from(self.config.clock.now()).unwrap_or(i64::MAX)
     }
 }

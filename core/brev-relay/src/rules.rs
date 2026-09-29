@@ -297,9 +297,10 @@ impl Relay {
 
     /// Submit, after the server's checks (token, caller = sender,
     /// signature, recipient registered): the recipient must take letters
-    /// from the sender → else 409; the same envelope already waiting → 200
-    /// and not counted; the sender's letters today under the limit → else
-    /// 429; the policy → 429; then stored and counted, 202.
+    /// from the sender → else 409; the same envelope already waiting → 200,
+    /// not counted, and its first `received_at` kept; the sender's letters
+    /// today under the limit → else 429; the policy → 429; then stored with
+    /// `received_at` = now and counted, 202.
     pub(crate) fn submit_letter(
         &self,
         sender: &[u8; 32],
@@ -307,7 +308,7 @@ impl Relay {
         id: &[u8; 32],
         wire: &[u8],
     ) -> Result<StatusCode, Fail> {
-        let today = self.day();
+        let (today, now) = (self.day(), self.now());
         let mut db = self.db();
         let tx = db.transaction()?;
         if link(&tx, recipient, sender)? != Some(APPROVED) {
@@ -326,8 +327,8 @@ impl Relay {
             return refuse(StatusCode::TOO_MANY_REQUESTS);
         }
         tx.execute(
-            "INSERT INTO envelopes (id, recipient, wire) VALUES (?1, ?2, ?3)",
-            params![id, recipient, wire],
+            "INSERT INTO envelopes (id, recipient, wire, received_at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, recipient, wire, now],
         )?;
         bump(&tx, sender, LETTERS, today)?;
         tx.commit()?;

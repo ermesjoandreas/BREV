@@ -2,11 +2,32 @@
 //! under `src/` that may name `SigningKey` (docs/PHASE3_DESIGN.md §3.3);
 //! `lib.rs` compiles it only for tests.
 
+use brev_hand::{token, Claims, Env, KeyOrigin};
 use p256::ecdsa::signature::hazmat::PrehashSigner;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{DerSignature, Signature, SigningKey};
 
 use crate::crypto;
+
+/// Every fact of a class-A letter (docs/AUTHORSHIP.md §4.1).
+pub(crate) fn clean_env() -> Env {
+    Env {
+        sip: Some(true),
+        sudo: Some(0),
+        admin: Some(true),
+        agents: Some(0),
+        pastes: 0,
+        max_gap: 2,
+        seconds: 30,
+        windows: Some(1),
+        ax_opaque: true,
+        capture_off: Some(true),
+        input_filter: true,
+        secure_input: Some(true),
+        blocked_input: 0,
+        pasteboard_off: true,
+    }
+}
 
 /// A random P-256 test identity key and its SEC1 uncompressed public key.
 pub(crate) struct TestKey {
@@ -52,5 +73,13 @@ impl TestKey {
     pub(crate) fn sign_raw(&self, msg: &[u8]) -> [u8; 64] {
         let sig: Signature = self.key.sign(msg);
         sig.to_bytes().into()
+    }
+
+    /// A class-A authorship token for `letter` at `iat`, signed by this
+    /// key, as the Secure Enclave signs the digest `sign_request` returns.
+    pub(crate) fn token(&self, letter: &[u8], iat: u64) -> Vec<u8> {
+        let claims = Claims::new(letter, iat, KeyOrigin::SecureEnclave, clean_env()).unwrap();
+        let payload = claims.encode();
+        token::assemble(&payload, &self.sign_raw(&token::signed_bytes(&payload)))
     }
 }

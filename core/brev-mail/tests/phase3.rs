@@ -190,10 +190,7 @@ fn changed_key_warns_and_blocks_sending() {
     assert_ne!(new_code, old_code);
 
     // Detected at Send: warning state, both codes, nothing made or sent.
-    assert!(matches!(
-        a.b.prepare_send(b_at_a.clone()),
-        Err(BrevError::KeyChanged)
-    ));
+    assert!(matches!(a.prepare(&b_at_a), Err(BrevError::KeyChanged)));
     let rows = a.b.contacts().unwrap();
     assert!(rows[0].key_changed);
     drop(rows);
@@ -202,16 +199,13 @@ fn changed_key_warns_and_blocks_sending() {
     assert_eq!(info.new_code, new_code, "the code B' shows as its own");
     let waiting = relay.waiting();
     assert!(matches!(
-        a.b.sign_request(b_at_a.clone(), b"s", 1, b"x", 1),
+        a.sign(&b_at_a, b"s", 1, b"x", 1),
         Err(BrevError::KeyChanged)
     ));
     assert!(matches!(a.b.submit(), Err(BrevError::NotFound)));
     assert_eq!(relay.waiting(), waiting, "no envelope was sent");
     // Still blocked on the next try.
-    assert!(matches!(
-        a.b.prepare_send(b_at_a.clone()),
-        Err(BrevError::KeyChanged)
-    ));
+    assert!(matches!(a.prepare(&b_at_a), Err(BrevError::KeyChanged)));
 
     // Acceptance needs the shown new code.
     for wrong in [old_code.clone(), vec![b'A'; 35], Vec::new()] {
@@ -324,11 +318,9 @@ fn ack_after_store() {
 fn submit_retry_is_idempotent() {
     let mut relay = Relayed::new();
     let (a, b, b_at_a, a_at_b) = pair(&relay);
-    a.b.prepare_send(b_at_a.clone()).unwrap();
-    let digest =
-        a.b.sign_request(b_at_a.clone(), b"s", 1, b"retry", 5)
-            .unwrap();
-    a.b.attach_signature(a.key.sign_digest(&digest)).unwrap();
+    a.prepare(&b_at_a).unwrap();
+    let digest = a.sign(&b_at_a, b"s", 1, b"retry", 5).unwrap();
+    a.seal(&digest).unwrap();
 
     relay.stop();
     for _ in 0..2 {
@@ -378,8 +370,8 @@ fn locked_session_makes_no_request() {
     let (relay, hooks) = hooked();
     let (a, b, b_at_a, a_at_b) = pair(&relay);
     b.send(&a_at_b, b"s", b"waiting");
-    a.b.prepare_send(b_at_a.clone()).unwrap();
-    let digest = a.b.sign_request(b_at_a.clone(), b"s", 1, b"x", 1).unwrap();
+    a.prepare(&b_at_a).unwrap();
+    let digest = a.sign(&b_at_a, b"s", 1, b"x", 1).unwrap();
     let signature = a.key.sign_digest(&digest);
 
     let code = relay.root_code();
@@ -387,10 +379,11 @@ fn locked_session_makes_no_request() {
     let requests = relay.requests();
     let locked = |r: Result<(), BrevError>| assert!(matches!(r, Err(BrevError::Locked)));
     locked(a.b.sync().map(drop));
-    locked(a.b.prepare_send(b_at_a.clone()));
+    locked(a.b.prepare_send(b_at_a.clone(), common::clean()));
     locked(a.b.add_contact(b"carl", 4).map(drop));
     locked(a.b.register_request(b"carl", 4).map(drop));
     locked(a.b.register(signature.clone(), Vec::new()));
+    locked(a.b.attach_token_signature(signature.clone()).map(drop));
     locked(a.b.attach_signature(signature));
     locked(a.b.submit().map(drop));
     locked(a.b.create_invite().map(drop));
@@ -449,10 +442,7 @@ fn strangers_are_dropped_and_acked() {
     assert_eq!(relay.waiting(), 0, "acknowledged");
     assert!(b.b.threads(a_at_b.clone()).unwrap().is_empty());
     // Control: once B accepts the new key, its letters arrive.
-    assert!(matches!(
-        b.b.prepare_send(a_at_b.clone()),
-        Err(BrevError::KeyChanged)
-    ));
+    assert!(matches!(b.prepare(&a_at_b), Err(BrevError::KeyChanged)));
     let new_code = b.b.contact_info(a_at_b.clone()).unwrap().new_code;
     b.b.accept_new_key(a_at_b.clone(), new_code).unwrap();
     a2.send(&b_at_a2, b"s", b"accepted");
@@ -580,16 +570,10 @@ fn registration_and_contacts_by_address() {
     assert!(rows[0].waiting && !rows[0].verified && !rows[0].blocked);
     drop(rows);
     // A contact id that is not 16 bytes.
-    assert!(matches!(
-        a.b.prepare_send(vec![0; 32]),
-        Err(BrevError::Malformed)
-    ));
+    assert!(matches!(a.prepare(&[0; 32]), Err(BrevError::Malformed)));
     // Until B approves, a letter to B is not made at all (Phase 3 sent it
     // and B dropped it).
-    assert!(matches!(
-        a.b.prepare_send(b_at_a.clone()),
-        Err(BrevError::NotApproved)
-    ));
+    assert!(matches!(a.prepare(&b_at_a), Err(BrevError::NotApproved)));
     assert!(a.b.threads(b_at_a).unwrap().is_empty());
     assert_eq!(relay.waiting(), 0);
 }

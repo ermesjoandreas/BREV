@@ -87,11 +87,9 @@ fn send_uses_only_the_length_prefix() {
     let (a, b, b_at_a, a_at_b) = pair(&relay);
     let subject = [&b"Emne"[..], MARKER].concat();
     let body = [&b"Hei"[..], MARKER].concat();
-    a.b.prepare_send(b_at_a.clone()).unwrap();
-    let digest =
-        a.b.sign_request(b_at_a.clone(), &subject, 4, &body, 3)
-            .unwrap();
-    a.b.attach_signature(a.key.sign_digest(&digest)).unwrap();
+    a.prepare(&b_at_a).unwrap();
+    let digest = a.sign(&b_at_a, &subject, 4, &body, 3).unwrap();
+    a.seal(&digest).unwrap();
     a.b.submit().unwrap();
     assert_eq!(b.b.sync().unwrap().letters, 1);
     assert_eq!(a.letters(&b_at_a), [(b"Emne".to_vec(), b"Hei".to_vec())]);
@@ -107,28 +105,28 @@ fn send_uses_only_the_length_prefix() {
         (&long_subject[..], len32(MAX_SUBJECT + 1), &body[..], 3),
         (&subject[..], 4, &long_body[..], len32(MAX_BODY + 1)),
     ];
-    a.b.prepare_send(b_at_a.clone()).unwrap();
+    a.prepare(&b_at_a).unwrap();
     for (s, sl, bd, bl) in refused {
         assert!(matches!(
-            a.b.sign_request(b_at_a.clone(), s, sl, bd, bl),
+            a.sign(&b_at_a, s, sl, bd, bl),
             Err(BrevError::Malformed)
         ));
     }
     assert!(matches!(
-        a.b.sign_request(vec![0; 15], &subject, 4, &body, 3),
+        a.sign(&[0; 15], &subject, 4, &body, 3),
         Err(BrevError::Malformed)
     ));
     assert_eq!(a.b.threads(b_at_a.clone()).unwrap().len(), 1);
-    let digest =
-        a.b.sign_request(
-            b_at_a.clone(),
+    let digest = a
+        .sign(
+            &b_at_a,
             &long_subject,
             len32(MAX_SUBJECT),
             &long_body,
             len32(MAX_BODY),
         )
         .unwrap();
-    a.b.attach_signature(a.key.sign_digest(&digest)).unwrap();
+    a.seal(&digest).unwrap();
     a.b.submit().unwrap();
     assert_eq!(a.b.threads(b_at_a).unwrap().len(), 2);
     assert_eq!(relay.waiting(), 1);
@@ -275,9 +273,9 @@ fn no_plaintext_in_any_file() {
     assert_eq!(b.dir.files(), FILES, "no journal left behind");
 }
 
-/// The sealed content columns of a Phase 4 store (`invites` is empty here:
-/// A's invite was used when B registered).
-const SEALED: [(&str, &str); 9] = [
+/// The sealed content columns of a Hand store, schema v6 (`invites` is
+/// empty here: A's invite was used when B registered).
+const SEALED: [(&str, &str); 10] = [
     ("identity", "keys"),
     ("identity", "address"),
     ("contacts", "bundle"),
@@ -287,6 +285,7 @@ const SEALED: [(&str, &str); 9] = [
     ("invites", "body"),
     ("threads", "subject"),
     ("messages", "body"),
+    ("messages", "proof"),
 ];
 
 #[test]
@@ -320,10 +319,10 @@ fn column_lengths_are_bucketed() {
             }
         }
         // Every row was checked, and the buckets differ as the sizes do:
-        // 256 for keys, addresses, bundles, an empty `pending` and the
-        // one-byte flags, 1 KiB
-        // for the 256-byte subjects, and 256 B, 1 KiB, 4 KiB, 16 KiB,
-        // 80 KiB for the bodies.
+        // 256 for keys, addresses, bundles, an empty `pending` or `proof`
+        // and the one-byte flags, 1 KiB for the 256-byte subjects and a
+        // received letter's proof (its token), and 256 B, 1 KiB, 4 KiB,
+        // 16 KiB, 80 KiB for the bodies.
         lengths.sort_unstable();
         lengths.dedup();
         assert_eq!(lengths, [256, 1024, 4096, 16384, 81920]);
@@ -337,14 +336,14 @@ fn older_store_is_refused() {
     let dek: [u8; 32] = random();
     drop(Brev::create(dir.arg(), "http://127.0.0.1:9".into(), &dek, &key).unwrap());
     let raw = rusqlite::Connection::open(dir.0.join("brev.db")).unwrap();
-    for old in [1, 2, 3, 4] {
+    for old in [1, 2, 3, 4, 5] {
         raw.pragma_update(None, "user_version", old).unwrap();
         assert!(matches!(
             Brev::open(dir.arg(), "http://127.0.0.1:9".into()).map(drop),
             Err(BrevError::Corrupt)
         ));
     }
-    raw.pragma_update(None, "user_version", 5).unwrap();
+    raw.pragma_update(None, "user_version", 6).unwrap();
     Brev::open(dir.arg(), "http://127.0.0.1:9".into())
         .unwrap()
         .unlock(&dek, TEST_IDLE)
@@ -360,7 +359,8 @@ fn thread_of_is_gated_metadata() {
     a.confirm_active().unwrap();
     b.confirm_active().unwrap();
     let b_at_a = a.add_contact(&b.bundle().unwrap(), b"bob").unwrap();
-    let mut letter = a.seal_letter(b_at_a, b"s", b"x").unwrap();
+    let draft = a.draft(b_at_a, b"s", b"x").unwrap();
+    let mut letter = a.seal_letter(&draft, &key.token(draft.letter())).unwrap();
     let der = key.sign_digest(&letter.digest());
     a.attach_signature(&mut letter, &der).unwrap();
     let t = a.store_sent(&letter).unwrap();

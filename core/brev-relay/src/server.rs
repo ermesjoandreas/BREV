@@ -248,14 +248,15 @@ fn invite_redeem(relay: &Relay, body: &[u8]) -> Result<StatusCode, StatusCode> {
         .map_err(failed)
 }
 
-/// `POST /v1/inbox`: the caller's waiting envelopes, oldest first, framed
-/// (brev_proto::body::inbox_answer). Deletes nothing.
+/// `POST /v1/inbox`: the caller's waiting envelopes, oldest first, each
+/// with its `received_at`, framed (brev_proto::body::inbox_answer). Deletes
+/// nothing.
 fn inbox(relay: &Relay, body: &[u8]) -> Result<Vec<u8>, StatusCode> {
     let request = authenticate(relay, body)?;
     request.inbox().map_err(|_| StatusCode::BAD_REQUEST)?;
     allow(relay.policy.request(request.caller, Endpoint::Inbox))?;
-    let wires = relay.inbox(request.caller).map_err(internal)?;
-    body::inbox_answer(&wires).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let waiting = relay.inbox(request.caller).map_err(internal)?;
+    body::inbox_answer(&waiting).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// `POST /v1/inbox/ack`: deletes the listed envelopes that wait for the

@@ -67,20 +67,36 @@ fn befriend(a: &mut Party, b: &mut Party) -> (ContactId, ContactId) {
     (b_at_a, a_at_b)
 }
 
-/// The whole send path at the core: seal, sign the digest, attach, store
-/// the own copy. Returns the signed envelope.
+/// Now, as the relay stamps `received_at`.
+fn at() -> u64 {
+    now().unsigned_abs()
+}
+
+/// The whole send path at the core: a draft, its class-A token (the test
+/// key signs), seal, sign the digest, attach, store the own copy. Returns
+/// the signed envelope.
 fn send(from: &mut Party, to: ContactId, subject: &[u8], body: &[u8]) -> Envelope {
-    let mut letter = from.core.seal_letter(to, subject, body).unwrap();
+    let draft = from.core.draft(to, subject, body).unwrap();
+    let token = from.key.token(draft.letter(), at());
+    let mut letter = from.core.seal_letter(&draft, &token).unwrap();
     let der = from.key.sign_digest(&letter.digest());
     from.core.attach_signature(&mut letter, &der).unwrap();
     from.core.store_sent(&letter).unwrap();
     letter.envelope().clone()
 }
 
-/// An envelope from `from` to `to` with a hand-built payload, signed.
-fn seal_from(from: &Party, to: &PublicBundle, payload: &[u8]) -> Envelope {
+/// A sealed letter to `to` with no token (it fails verification).
+fn unsigned(from: &Party, to: ContactId, subject: &[u8], body: &[u8]) -> Letter {
+    let draft = from.core.draft(to, subject, body).unwrap();
+    from.core.seal_letter(&draft, &[]).unwrap()
+}
+
+/// An envelope from `from` to `to` with a hand-built letter and no token,
+/// signed.
+fn seal_from(from: &Party, to: &PublicBundle, letter: &[u8]) -> Envelope {
+    let payload = encode_v2(letter, &[]).unwrap();
     let me = from.core.me().unwrap();
-    let mut env = crypto::seal_message(&me.secret, &to.x25519, me.id, to.id().0, payload).unwrap();
+    let mut env = crypto::seal_message(&me.secret, &to.x25519, me.id, to.id().0, &payload).unwrap();
     env.signature = from.key.sign_raw(&env.signed_bytes()).to_vec();
     env
 }
@@ -180,10 +196,10 @@ fn unlock_refuses_all_zero_dek() {
     drop(Cleanup(path));
 }
 
-/// Design §8 brev-mail 7: schema v5, its pragmas and its tables, column by
-/// column.
+/// Design §8 brev-mail 7 and docs/AUTHORSHIP.md §6: schema v6, its
+/// pragmas and its tables, column by column.
 #[test]
-fn schema_v5() {
+fn schema_v6() {
     let p = party();
     drop(p.core);
     let core = Core::open(&p.path).unwrap();
@@ -201,7 +217,7 @@ fn schema_v5() {
     assert_eq!(q("fullfsync"), "Integer(1)");
     assert_eq!(q("trusted_schema"), "Integer(0)");
     assert_eq!(q("application_id"), format!("Integer({APPLICATION_ID})"));
-    assert_eq!(q("user_version"), "Integer(5)");
+    assert_eq!(q("user_version"), "Integer(6)");
     assert!(core
         .db()
         .db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
@@ -235,7 +251,8 @@ fn schema_v5() {
             "outgoing",
             "read",
             "body",
-            "env_class"
+            "env_class",
+            "proof"
         ]
     );
 }
@@ -282,18 +299,18 @@ CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
     assert_eq!(fs::read(&path).unwrap(), before);
     drop(Cleanup(path));
 
-    // A v5 store relabelled as version 2.
+    // A v6 store relabelled as version 2.
     let p = party();
     drop(p.core);
     let raw = Connection::open(&p.path).unwrap();
     raw.pragma_update(None, "user_version", 2).unwrap();
     assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
-    raw.pragma_update(None, "user_version", 5).unwrap();
+    raw.pragma_update(None, "user_version", 6).unwrap();
     drop(Core::open(&p.path).unwrap());
 }
 
 /// A real Phase 3 store before the environment class (schema v3: no
-/// `messages.env_class`) and a v5 store relabelled as version 3 are both
+/// `messages.env_class`) and a v6 store relabelled as version 3 are both
 /// refused, unchanged: there is no migration (docs/VAULT_SPLIT_PLAN.md Q4).
 #[test]
 fn v3_store_is_refused() {
@@ -338,18 +355,18 @@ CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
     assert_eq!(fs::read(&path).unwrap(), before);
     drop(Cleanup(path));
 
-    // A v5 store relabelled as version 3.
+    // A v6 store relabelled as version 3.
     let p = party();
     drop(p.core);
     let raw = Connection::open(&p.path).unwrap();
     raw.pragma_update(None, "user_version", 3).unwrap();
     assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
-    raw.pragma_update(None, "user_version", 5).unwrap();
+    raw.pragma_update(None, "user_version", 6).unwrap();
     drop(Core::open(&p.path).unwrap());
 }
 
 /// Design §8 brev-mail 7: a real Phase 3 store (schema v4: no
-/// `contacts.flags`, no `invites`) and a v5 store relabelled as version 4
+/// `contacts.flags`, no `invites`) and a v6 store relabelled as version 4
 /// are both refused, unchanged: there is no migration
 /// (docs/PHASE4_DESIGN.md §5.1).
 #[test]
@@ -394,21 +411,59 @@ CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
     let before = fs::read(&path).unwrap();
     assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
     assert_eq!(fs::read(&path).unwrap(), before);
-    // Control: the same file labelled version 5 is still refused (its
-    // schema is not v5's), so the check is the schema, not only the label.
+    // Control: the same file labelled version 6 is still refused (its
+    // schema is not v6's), so the check is the schema, not only the label.
     let raw = Connection::open(&path).unwrap();
-    raw.pragma_update(None, "user_version", 5).unwrap();
+    raw.pragma_update(None, "user_version", 6).unwrap();
     drop(raw);
     assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
     drop(Cleanup(path));
 
-    // A v5 store relabelled as version 4.
+    // A v6 store relabelled as version 4.
     let p = party();
     drop(p.core);
     let raw = Connection::open(&p.path).unwrap();
     raw.pragma_update(None, "user_version", 4).unwrap();
     assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
+    raw.pragma_update(None, "user_version", 6).unwrap();
+    drop(Core::open(&p.path).unwrap());
+}
+
+/// docs/AUTHORSHIP.md §6: a real Phase 4 store (schema v5: no
+/// `messages.proof`) and a v6 store relabelled as version 5 are both
+/// refused, unchanged: there is no migration.
+#[test]
+fn v5_store_is_refused() {
+    let v5_schema = SCHEMA.replace(
+        "env_class  INTEGER,                    -- pt: environment class a sent letter went out in (1 = A); NULL otherwise
+    proof      BLOB NOT NULL               -- ct: a received letter's Hand result (pass bits || token); empty for a sent one",
+        "env_class  INTEGER                     -- pt: environment class a sent letter went out in (1 = A); NULL otherwise",
+    );
+    assert_ne!(v5_schema, SCHEMA, "control: the column is cut");
+    let path = temp_path();
+    let raw = Connection::open(&path).unwrap();
+    raw.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    raw.execute_batch(&v5_schema).unwrap();
     raw.pragma_update(None, "user_version", 5).unwrap();
+    drop(raw);
+    let before = fs::read(&path).unwrap();
+    assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
+    assert_eq!(fs::read(&path).unwrap(), before);
+    // Labelled version 6, its schema still is not v6's.
+    let raw = Connection::open(&path).unwrap();
+    raw.pragma_update(None, "user_version", 6).unwrap();
+    drop(raw);
+    assert!(matches!(Core::open(&path).map(drop), Err(Error::Corrupt)));
+    drop(Cleanup(path));
+
+    // A v6 store relabelled as version 5.
+    let p = party();
+    drop(p.core);
+    let raw = Connection::open(&p.path).unwrap();
+    raw.pragma_update(None, "user_version", 5).unwrap();
+    assert!(matches!(Core::open(&p.path).map(drop), Err(Error::Corrupt)));
+    raw.pragma_update(None, "user_version", 6).unwrap();
     drop(Core::open(&p.path).unwrap());
 }
 
@@ -448,7 +503,7 @@ fn sqlite_never_receives_plaintext() {
         .unwrap();
     b.core.add_contact(&a.core.bundle().unwrap(), MINE).unwrap();
     let env = send(&mut a, b_at_a, MARKER, MARKER);
-    let m = b.core.receive(&env).unwrap();
+    let m = b.core.receive(&env, at()).unwrap();
     assert_eq!(&b.core.read_body(m).unwrap()[..], MARKER);
     b.core.mark_read(m).unwrap();
     assert!(b.core.contacts().is_ok() && b.core.threads().is_ok());
@@ -485,18 +540,23 @@ fn receive_rejects_thread_owned_by_another_contact() {
         .unwrap();
     c.core.add_contact(&b_bundle, b"bob").unwrap();
     let env = send(&mut a, b_at_a, b"s", b"x");
-    let first = b.core.receive(&env).unwrap();
+    let first = b.core.receive(&env, at()).unwrap();
     let t = b.core.thread_of(first).unwrap();
 
     // C, a real contact of B, names A's thread id in its payload.
     let payload = encode_payload(&[9; 16], &t.0, b"s", b"hijack").unwrap();
     let from_c = seal_from(&c, &b_bundle, &payload);
-    assert!(matches!(b.core.receive(&from_c), Err(Error::Malformed)));
+    assert!(matches!(
+        b.core.receive(&from_c, at()),
+        Err(Error::Malformed)
+    ));
     assert_eq!(b.core.messages(t).unwrap().len(), 1);
 
     // A letter from A into its own thread is accepted (the owner matches).
     let payload = encode_payload(&[8; 16], &t.0, b"s", b"more").unwrap();
-    b.core.receive(&seal_from(&a, &b_bundle, &payload)).unwrap();
+    b.core
+        .receive(&seal_from(&a, &b_bundle, &payload), at())
+        .unwrap();
     assert_eq!(b.core.messages(t).unwrap().len(), 2);
 
     // An agent re-points the thread at C in B's file: the owner is
@@ -510,7 +570,7 @@ fn receive_rejects_thread_owned_by_another_contact() {
             params![&c_at_b.0[..], &t.0[..]],
         )
         .unwrap();
-    let e = b.core.receive(&from_c).unwrap_err();
+    let e = b.core.receive(&from_c, at()).unwrap_err();
     assert!(matches!(e, Error::Corrupt) && !is_permanent(&e));
     assert_eq!(b.core.messages(t).unwrap().len(), 2);
 }
@@ -522,19 +582,23 @@ fn failed_receive_leaves_no_new_thread() {
     let (mut a, mut b) = (party(), party());
     let b_bundle = b.core.bundle().unwrap();
     let (b_at_a, _) = befriend(&mut a, &mut b);
-    let m = b.core.receive(&send(&mut a, b_at_a, b"s", b"x")).unwrap();
+    let m = b
+        .core
+        .receive(&send(&mut a, b_at_a, b"s", b"x"), at())
+        .unwrap();
     let t = b.core.thread_of(m).unwrap();
 
     let payload = encode_payload(&m.0, &[0x55; 16], b"new", b"x").unwrap();
     let env = seal_from(&a, &b_bundle, &payload);
-    assert!(matches!(b.core.receive(&env), Err(Error::Duplicate)));
+    assert!(matches!(b.core.receive(&env, at()), Err(Error::Duplicate)));
     assert_eq!(b.core.threads().unwrap().len(), 1);
     assert_eq!(b.core.messages(t).unwrap().len(), 1);
 }
 
-/// A sealed letter holds ciphertext only: nothing decrypted and no X25519
-/// secret is alive once `seal_letter` returns, so nothing is while the
-/// letter waits for Touch ID and the relay.
+/// A sealed letter holds ciphertext only: nothing decrypted but the draft
+/// the caller holds, and no X25519 secret, is alive once `seal_letter`
+/// returns, so nothing is once the draft is dropped, while the letter waits
+/// for Touch ID and the relay.
 #[test]
 fn seal_letter_leaves_nothing_decrypted() {
     let (mut a, mut b) = (party(), party());
@@ -551,8 +615,12 @@ fn seal_letter_leaves_nothing_decrypted() {
     assert_eq!(crypto::live_secrets(), 1);
     drop(me);
 
+    let draft = a.core.draft(b_at_a, b"s", b"x").unwrap();
+    assert_eq!(crypto::live_plaintexts(), 1, "the draft");
     let scrubs = crypto::scrubs();
-    let letter = a.core.seal_letter(b_at_a, b"s", b"x").unwrap();
+    let letter = a.core.seal_letter(&draft, b"token").unwrap();
+    assert_eq!((crypto::live_plaintexts(), crypto::live_secrets()), (1, 0));
+    drop(draft);
     assert_eq!((crypto::live_plaintexts(), crypto::live_secrets()), (0, 0));
     assert!(crypto::scrubs() > scrubs);
     assert!(!letter.is_signed());
@@ -582,14 +650,14 @@ fn nothing_decrypted_is_alive_while_receive_commits() {
         .db()
         .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(at_commit));
     // The first letter makes a new thread, the second joins it.
-    let m = b.core.receive(&first).unwrap();
+    let m = b.core.receive(&first, at()).unwrap();
     let t = b.core.thread_of(m).unwrap();
     let second = seal_from(
         &a,
         &b_bundle,
         &encode_payload(&[7; 16], &t.0, b"s", b"y").unwrap(),
     );
-    b.core.receive(&second).unwrap();
+    b.core.receive(&second, at()).unwrap();
     assert_eq!(AT_COMMIT.with(|v| v.take()), [(0, 0), (0, 0)]);
 }
 
@@ -602,6 +670,52 @@ fn payload_round_trip_and_truncation() {
     assert!(matches!(decode_payload(&p[..20]), Err(Error::Malformed)));
 }
 
+/// docs/AUTHORSHIP.md §2.5: protocol version 2's payload is `letter length
+/// (u32 BE) || letter || token length (u16 BE) || token`, parsed strictly:
+/// the lengths must make up the whole payload, and the token is at most
+/// `MAX_TOKEN` bytes.
+#[test]
+fn payload_v2_is_strict() {
+    let letter = encode_payload(&[6; 16], &[7; 16], b"subj", b"body").unwrap();
+    let token = [0xA5u8; 300];
+    let p = encode_v2(&letter, &token).unwrap();
+    assert_eq!(p.len(), 4 + letter.len() + 2 + 300);
+    assert_eq!(&p[..4], &u32::try_from(letter.len()).unwrap().to_be_bytes());
+    assert_eq!(&p[4..4 + letter.len()], &letter[..]);
+    assert_eq!(
+        &p[4 + letter.len()..6 + letter.len()],
+        &300u16.to_be_bytes()
+    );
+    assert_eq!(decode_v2(&p).unwrap(), (&letter[..], &token[..]));
+    // No token is a form the parser takes (the check then fails).
+    let empty = encode_v2(&letter, &[]).unwrap();
+    assert_eq!(decode_v2(&empty).unwrap(), (&letter[..], &[][..]));
+
+    let malformed = |p: &[u8]| matches!(decode_v2(p), Err(Error::Malformed));
+    // Every cut, and a byte more.
+    for cut in 0..p.len() {
+        assert!(malformed(&p[..cut]), "{cut}");
+    }
+    assert!(malformed(&[&p[..], &[0]].concat()));
+    // A letter length one off either way.
+    for len in [letter.len() - 1, letter.len() + 1] {
+        let mut bad = p.to_vec();
+        bad[..4].copy_from_slice(&u32::try_from(len).unwrap().to_be_bytes());
+        assert!(malformed(&bad), "{len}");
+    }
+    // The largest token, and one byte over it, both ways.
+    let max = vec![1u8; MAX_TOKEN];
+    let p = encode_v2(&letter, &max).unwrap();
+    assert_eq!(decode_v2(&p).unwrap().1.len(), MAX_TOKEN);
+    let over = vec![1u8; MAX_TOKEN + 1];
+    assert!(matches!(encode_v2(&letter, &over), Err(Error::Malformed)));
+    let mut raw = p.to_vec();
+    raw.push(1);
+    let at = 4 + letter.len();
+    raw[at..at + 2].copy_from_slice(&u16::try_from(MAX_TOKEN + 1).unwrap().to_be_bytes());
+    assert!(malformed(&raw));
+}
+
 /// Design §8: subject and body sizes within one bucket give ciphertexts of
 /// equal length; each payload size gives its bucket plus the tag; one byte
 /// over the maximum is `Malformed`.
@@ -610,21 +724,27 @@ fn envelope_payload_is_padded() {
     let (mut a, mut b) = (party(), party());
     let (b_at_a, _) = befriend(&mut a, &mut b);
     let len = |subject: usize, body: usize| {
-        a.core
-            .seal_letter(b_at_a, &vec![b's'; subject], &vec![b'b'; body])
-            .unwrap()
+        unsigned(&a, b_at_a, &vec![b's'; subject], &vec![b'b'; body])
             .envelope()
             .ciphertext
             .len()
     };
-    // 34 bytes of ids and length, then subject and body: 256 holds up to
-    // 218 bytes of content with the 4-byte length prefix.
+    // Without a token: 4 + 34 bytes of lengths and ids, 2 for the token's
+    // length, then subject and body: 256 holds up to 212 bytes of content
+    // with the 4-byte padding prefix.
     assert_eq!(len(0, 0), 256 + 16);
     assert_eq!(len(0, 0), len(10, 200));
-    assert_eq!(len(0, 0), len(218, 0));
-    assert_eq!(len(219, 0), 1024 + 16, "control: the next bucket");
-    assert_eq!(len(100, 800), len(256, 700));
+    assert_eq!(len(0, 0), len(212, 0));
+    assert_eq!(len(213, 0), 1024 + 16, "control: the next bucket");
+    assert_eq!(len(100, 800), len(256, 650));
     assert_eq!(len(256, 65_536), 81_920 + 16);
+    // docs/AUTHORSHIP.md §2.5: with a real token, a short letter fills the
+    // 1 KiB bucket.
+    let draft = a.core.draft(b_at_a, b"s", b"x").unwrap();
+    let token = a.key.token(draft.letter(), at());
+    assert!((300..600).contains(&token.len()), "{}", token.len());
+    let sealed = a.core.seal_letter(&draft, &token).unwrap();
+    assert_eq!(sealed.envelope().ciphertext.len(), 1024 + 16);
 
     let me = a.core.me().unwrap();
     let to = b.core.bundle().unwrap();
@@ -674,14 +794,14 @@ fn receive_verifies_before_decrypting() {
         ("63 bytes", short),
     ] {
         let opens = crypto::message_opens();
-        let err = b.core.receive(&e).unwrap_err();
+        let err = b.core.receive(&e, at()).unwrap_err();
         assert!(matches!(err, Error::Crypto) && is_permanent(&err), "{name}");
         assert_eq!(crypto::message_opens(), opens, "{name}: AEAD not called");
     }
     assert!(b.core.threads().unwrap().is_empty(), "nothing stored");
     // Control: the good one opens once and is stored.
     let opens = crypto::message_opens();
-    b.core.receive(&env).unwrap();
+    b.core.receive(&env, at()).unwrap();
     assert_eq!(crypto::message_opens(), opens + 1);
 
     // A valid signature over a tampered ciphertext (made by the sender's
@@ -690,7 +810,10 @@ fn receive_verifies_before_decrypting() {
     resigned.ciphertext[0] ^= 1;
     resigned.signature = a.key.sign_raw(&resigned.signed_bytes()).to_vec();
     let opens = crypto::message_opens();
-    assert!(matches!(b.core.receive(&resigned), Err(Error::Crypto)));
+    assert!(matches!(
+        b.core.receive(&resigned, at()),
+        Err(Error::Crypto)
+    ));
     assert_eq!(crypto::message_opens(), opens + 1);
 }
 
@@ -725,7 +848,7 @@ fn local_row_failures_are_corrupt() {
         .unwrap();
     };
     let corrupt = |core: &mut Core, what: &str| {
-        let e = core.receive(&env).unwrap_err();
+        let e = core.receive(&env, at()).unwrap_err();
         assert!(matches!(e, Error::Corrupt), "{what}: {e:?}");
         assert!(!is_permanent(&e), "{what}");
     };
@@ -763,7 +886,7 @@ fn local_row_failures_are_corrupt() {
         .unwrap();
 
     // Restored: the letter is stored.
-    let m = b.core.receive(&env).unwrap();
+    let m = b.core.receive(&env, at()).unwrap();
     let t = b.core.thread_of(m).unwrap();
 
     // A known thread whose subject no longer opens.
@@ -787,7 +910,7 @@ fn local_row_failures_are_corrupt() {
         .unwrap();
     let payload = encode_payload(&[3; 16], &t.0, b"s", b"y").unwrap();
     let into_t = seal_from(&a, &b_bundle, &payload);
-    let e = b.core.receive(&into_t).unwrap_err();
+    let e = b.core.receive(&into_t, at()).unwrap_err();
     assert!(matches!(e, Error::Corrupt) && !is_permanent(&e));
 }
 
@@ -797,7 +920,7 @@ fn local_row_failures_are_corrupt() {
 fn attach_refuses_foreign_signature() {
     let (mut a, mut b) = (party(), party());
     let (b_at_a, _) = befriend(&mut a, &mut b);
-    let mut letter = a.core.seal_letter(b_at_a, b"s", b"x").unwrap();
+    let mut letter = unsigned(&a, b_at_a, b"s", b"x");
     let digest = letter.digest();
     assert_eq!(digest, letter.envelope().id());
     let other = TestKey::new();
@@ -831,7 +954,7 @@ fn attach_refuses_foreign_signature() {
         "S kept as signed"
     );
     a.core.store_sent(&letter).unwrap();
-    b.core.receive(letter.envelope()).unwrap();
+    b.core.receive(letter.envelope(), at()).unwrap();
 }
 
 /// Accepting a changed key needs the code the app is showing: the code of
@@ -841,7 +964,7 @@ fn accept_is_bound_to_the_shown_code() {
     let (mut a, mut b) = (party(), party());
     let (b_at_a, _) = befriend(&mut a, &mut b);
     let env = send(&mut a, b_at_a, b"s", b"before");
-    b.core.receive(&env).unwrap();
+    b.core.receive(&env, at()).unwrap();
     let pinned = a.core.contact_bundle(b_at_a).unwrap();
     // Nothing pending: every code is refused.
     assert!(matches!(
@@ -860,7 +983,7 @@ fn accept_is_bound_to_the_shown_code() {
     assert!(a.core.contacts().unwrap()[0].key_changed);
     assert_eq!(a.core.pending_bundle(b_at_a).unwrap(), Some(new1.clone()));
     assert!(matches!(
-        a.core.seal_letter(b_at_a, b"s", b"x").map(drop),
+        a.core.draft(b_at_a, b"s", b"x").map(drop),
         Err(Error::KeyChanged)
     ));
     // Shown: new1's code. The relay swaps in new2 before the click.
@@ -924,7 +1047,9 @@ fn store_holds_no_contact_id_or_address() {
     b.core
         .add_contact(&a.core.bundle().unwrap(), b"alice")
         .unwrap();
-    b.core.receive(&send(&mut a, b_at_a, b"s", b"x")).unwrap();
+    b.core
+        .receive(&send(&mut a, b_at_a, b"s", b"x"), at())
+        .unwrap();
     // A key change leaves another identity id in `pending`.
     let b2 = party();
     let b2_id = b2.core.bundle().unwrap().id();

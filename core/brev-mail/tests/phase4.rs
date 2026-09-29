@@ -95,11 +95,13 @@ fn state(u: &User, address: &str) -> (bool, bool, bool) {
     (row.waiting, row.verified, row.blocked)
 }
 
-/// The three steps of a letter after `prepare_send`, when a ticket exists.
+/// The steps of a letter after `prepare_send`, when a ticket exists: the
+/// sign request, the two signatures of one Touch ID, submit. A ticket made
+/// by the test hook comes with no compose session, so one starts here.
 fn sign_and_submit(u: &User, contact: &[u8], body: &[u8]) -> Result<Vec<u8>, BrevError> {
-    let digest =
-        u.b.sign_request(contact.to_vec(), b"s", 1, body, len32(body.len()))?;
-    u.b.attach_signature(u.key.sign_digest(&digest))?;
+    u.compose();
+    let digest = u.sign(contact, b"s", 1, body, len32(body.len()))?;
+    u.seal(&digest)?;
     u.b.submit()
 }
 
@@ -351,13 +353,10 @@ fn a_stranger_cannot_reach_an_inbox() {
     assert_eq!(state(&c, "anna"), (true, false, false));
 
     let requests = relay.requests();
-    assert!(matches!(
-        c.b.prepare_send(a_at_c.clone()),
-        Err(BrevError::NotApproved)
-    ));
+    assert!(matches!(c.prepare(&a_at_c), Err(BrevError::NotApproved)));
     assert_eq!(relay.requests(), requests + 1, "the lookup only");
     assert!(matches!(
-        c.b.sign_request(a_at_c.clone(), b"s", 1, b"x", 1),
+        c.sign(&a_at_c, b"s", 1, b"x", 1),
         Err(BrevError::Malformed)
     ));
 
@@ -424,10 +423,7 @@ fn request_approve_and_decline() {
     assert!(b.b.answer_request(peer, false).unwrap().is_empty());
     assert!(b.b.requests().unwrap().is_empty());
     assert_eq!(b.b.contacts().unwrap().len(), 1);
-    assert!(matches!(
-        c.b.prepare_send(b_at_c),
-        Err(BrevError::NotApproved)
-    ));
+    assert!(matches!(c.prepare(&b_at_c), Err(BrevError::NotApproved)));
     assert_eq!(state(&c, "bert"), (true, false, false));
     assert_eq!(b.b.sync().unwrap().requests, 0, "no new request");
     assert_eq!(events_at(&relay, "bert"), 0);
@@ -562,10 +558,7 @@ fn key_change_through_a_request() {
     assert!(a.b.contacts().unwrap()[0].key_changed);
     assert_eq!(events_at(&relay, "anna"), 1, "not answered");
     assert!(!a.b.sync().unwrap().contacts_changed, "the same again");
-    assert!(matches!(
-        b2.b.prepare_send(a_at_b2.clone()),
-        Err(BrevError::NotApproved)
-    ));
+    assert!(matches!(b2.prepare(&a_at_b2), Err(BrevError::NotApproved)));
 
     let new_code = a.b.contact_info(b_at_a.clone()).unwrap().new_code;
     assert_eq!(new_code, b2.b.me().unwrap().code);
@@ -652,7 +645,7 @@ fn rate_limited_maps_to_error() {
     assert_eq!(local_rows(&a, "invites"), 0, "nothing kept");
 
     a.send(&b_at_a, b"s", b"one");
-    a.b.prepare_send(b_at_a.clone()).unwrap();
+    a.prepare(&b_at_a).unwrap();
     assert!(matches!(
         sign_and_submit(&a, &b_at_a, b"two"),
         Err(BrevError::RateLimited)
@@ -763,11 +756,11 @@ fn blokker_blocks_sending_and_receiving() {
     let relay = Relayed::new();
     let (a, b, b_at_a, a_at_b) = pair(&relay);
     b.send(&a_at_b, b"s", b"before the block");
-    a.b.prepare_send(b_at_a.clone()).unwrap();
-    let digest = a.b.sign_request(b_at_a.clone(), b"s", 1, b"x", 1).unwrap();
-    a.b.attach_signature(a.key.sign_digest(&digest)).unwrap();
+    a.prepare(&b_at_a).unwrap();
+    let digest = a.sign(&b_at_a, b"s", 1, b"x", 1).unwrap();
+    a.seal(&digest).unwrap();
     // And a ticket for the next letter.
-    a.b.prepare_send(b_at_a.clone()).unwrap();
+    a.prepare(&b_at_a).unwrap();
 
     a.b.block_contact(b_at_a.clone()).unwrap();
     a.b.block_contact(b_at_a.clone()).unwrap();
@@ -777,10 +770,7 @@ fn blokker_blocks_sending_and_receiving() {
         "forgotten"
     );
     assert!(
-        matches!(
-            a.b.sign_request(b_at_a.clone(), b"s", 1, b"x", 1),
-            Err(BrevError::Malformed)
-        ),
+        matches!(a.sign(&b_at_a, b"s", 1, b"x", 1), Err(BrevError::Malformed)),
         "the ticket too"
     );
     // A ticket set after the block (a lookup that was in flight).
@@ -790,10 +780,7 @@ fn blokker_blocks_sending_and_receiving() {
         Err(BrevError::NotApproved)
     ));
     let requests = relay.requests();
-    assert!(matches!(
-        a.b.prepare_send(b_at_a.clone()),
-        Err(BrevError::NotApproved)
-    ));
+    assert!(matches!(a.prepare(&b_at_a), Err(BrevError::NotApproved)));
     assert_eq!(
         relay.requests(),
         requests,
@@ -807,10 +794,7 @@ fn blokker_blocks_sending_and_receiving() {
     assert_eq!(relay.waiting(), 0);
 
     // The relay refuses B's new letters, also with a faked ticket.
-    assert!(matches!(
-        b.b.prepare_send(a_at_b.clone()),
-        Err(BrevError::NotApproved)
-    ));
+    assert!(matches!(b.prepare(&a_at_b), Err(BrevError::NotApproved)));
     b.b.force_ticket_for_test(a_at_b.clone()).unwrap();
     assert!(matches!(
         sign_and_submit(&b, &a_at_b, b"after"),
@@ -861,10 +845,7 @@ fn blokker_holds_through_a_key_change() {
         )
         .unwrap();
     assert_eq!(link, 2, "declined");
-    assert!(matches!(
-        b2.b.prepare_send(a_at_b2.clone()),
-        Err(BrevError::NotApproved)
-    ));
+    assert!(matches!(b2.prepare(&a_at_b2), Err(BrevError::NotApproved)));
     b2.b.force_ticket_for_test(a_at_b2.clone()).unwrap();
     assert!(matches!(
         sign_and_submit(&b2, &a_at_b2, b"blocked"),
@@ -895,10 +876,7 @@ fn a_blocked_peer_cannot_reach_the_blockers_queue() {
     assert!(!synced.contacts_changed);
     assert_eq!(synced.requests, 0);
     assert_eq!(state(&a, "bert"), (true, false, true));
-    assert!(matches!(
-        b.b.prepare_send(a_at_b),
-        Err(BrevError::NotApproved)
-    ));
+    assert!(matches!(b.prepare(&a_at_b), Err(BrevError::NotApproved)));
     assert_eq!(events_at(&relay, "anna"), 0);
 
     // Control.
@@ -944,10 +922,7 @@ fn a_block_the_relay_missed_is_told_by_the_next_sync() {
         )
         .unwrap();
     assert_eq!(link, 2, "declined: the sync told the relay");
-    assert!(matches!(
-        b.b.prepare_send(a_at_b.clone()),
-        Err(BrevError::NotApproved)
-    ));
+    assert!(matches!(b.prepare(&a_at_b), Err(BrevError::NotApproved)));
     b.b.force_ticket_for_test(a_at_b.clone()).unwrap();
     assert!(matches!(
         sign_and_submit(&b, &a_at_b, b"after"),

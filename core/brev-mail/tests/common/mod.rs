@@ -12,7 +12,8 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use brev_core::{Brev, EnvironmentReport, KeyOrigin, OpenText, CHUNK};
+use brev_core::{Brev, BrevError, Design, KeyOrigin, OpenText, Sample, CHUNK};
+use brev_hand::{token, Claims, Env};
 use brev_relay::{parse_listen, Config, Gates, Open, Policy, Relay, Server};
 use p256::ecdsa::signature::hazmat::PrehashSigner;
 use p256::ecdsa::signature::Signer;
@@ -38,25 +39,59 @@ pub fn len32(n: usize) -> u32 {
 /// The idle time of the test sessions: long enough that no timer fires.
 pub const TEST_IDLE: u32 = 3600;
 
-/// The report of an app with every defence in place: class A.
-pub fn class_a() -> EnvironmentReport {
-    EnvironmentReport {
-        key_origin: KeyOrigin::SecureEnclave,
-        biometric_used: true,
-        capture_excluded: true,
-        secure_input_active: true,
-        synthetic_input_rejected: true,
-        accessibility_opaque: true,
-        pasteboard_disabled: true,
+/// A sample of a Mac with nothing wrong: secure input, capture excluded,
+/// SIP on, no `sudo`, no agent, no other window.
+pub fn clean() -> Sample {
+    Sample {
+        secure_input: true,
+        sharing_none: true,
+        prevents_capture: true,
+        csr_config: Some(0),
+        processes: Some(vec!["launchd".into(), "Brev".into()]),
+        windows: Some(Vec::new()),
     }
 }
 
-/// Unlocks `b` and confirms it, as the app does once it shows the mail,
-/// and reports class A, as the app does before a letter.
+/// How Brev is built: every defence by design.
+pub const DESIGN: Design = Design {
+    ax_opaque: true,
+    pasteboard_off: true,
+    input_filter: true,
+};
+
+/// Every fact of a class-A letter, for tokens made by hand.
+pub fn clean_env() -> Env {
+    Env {
+        sip: Some(true),
+        sudo: Some(0),
+        admin: Some(true),
+        agents: Some(0),
+        pastes: 0,
+        max_gap: 1,
+        seconds: 20,
+        windows: Some(0),
+        ax_opaque: true,
+        capture_off: Some(true),
+        input_filter: true,
+        secure_input: Some(true),
+        blocked_input: 0,
+        pasteboard_off: true,
+    }
+}
+
+/// Now, in Unix seconds.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// Unlocks `b` and confirms it with a clean sample, as the app does once
+/// it shows the mail.
 pub fn unlock_active(b: &Brev, dek: &[u8]) {
     b.unlock(dek, TEST_IDLE).unwrap();
-    b.confirm_active().unwrap();
-    b.report_environment(class_a()).unwrap();
+    b.confirm_active(clean()).unwrap();
 }
 
 /// A fresh directory with mode 0700 under the system temp dir (a store
@@ -138,6 +173,20 @@ impl TestKey {
     pub fn sign_der(&self, msg: &[u8]) -> Vec<u8> {
         let sig: Signature = self.key.sign(msg);
         sig.to_der().as_bytes().to_vec()
+    }
+
+    /// A class-A authorship token for `letter`, now, signed by this key.
+    pub fn token(&self, letter: &[u8]) -> Vec<u8> {
+        let claims = Claims::new(
+            letter,
+            unix_now(),
+            brev_hand::KeyOrigin::SecureEnclave,
+            clean_env(),
+        )
+        .unwrap();
+        let payload = claims.encode();
+        let sig: Signature = self.key.sign(&token::signed_bytes(&payload));
+        token::assemble(&payload, &sig.to_bytes().into())
     }
 }
 
@@ -339,23 +388,63 @@ impl User {
             .collect()
     }
 
-    /// The letter flow of the compose sheet: prepare, sign request, Touch
-    /// ID (the test key), attach, submit. The new thread's id.
-    pub fn send(&self, contact: &[u8], subject: &[u8], body: &[u8]) -> Vec<u8> {
-        self.b.prepare_send(contact.to_vec()).unwrap();
+    /// Opens a compose session, as the compose sheet does: the Secure
+    /// Enclave key (the test key stands in for it), an admin user.
+    pub fn compose(&self) {
+        self.b
+            .compose_started(DESIGN, Some(true), KeyOrigin::SecureEnclave)
+            .unwrap();
+    }
+
+    /// A compose session, then `prepare_send` with a clean sample.
+    pub fn prepare(&self, contact: &[u8]) -> Result<(), BrevError> {
+        self.compose();
+        self.b.prepare_send(contact.to_vec(), clean())
+    }
+
+    /// `sign_request` with a clean sample.
+    pub fn sign(
+        &self,
+        contact: &[u8],
+        subject: &[u8],
+        subject_len: u32,
+        body: &[u8],
+        body_len: u32,
+    ) -> Result<Vec<u8>, BrevError> {
+        self.b.sign_request(
+            contact.to_vec(),
+            subject,
+            subject_len,
+            body,
+            body_len,
+            clean(),
+        )
+    }
+
+    /// The one Touch ID of a letter: the test key signs the token digest,
+    /// then the envelope digest that answers it.
+    pub fn seal(&self, token_digest: &[u8]) -> Result<(), BrevError> {
         let digest = self
             .b
-            .sign_request(
-                contact.to_vec(),
+            .attach_token_signature(self.key.sign_digest(token_digest))?;
+        self.b.attach_signature(self.key.sign_digest(&digest))
+    }
+
+    /// The letter flow of the compose sheet: compose, prepare, sign request,
+    /// Touch ID (the test key) for both signatures, submit. The new
+    /// thread's id.
+    pub fn send(&self, contact: &[u8], subject: &[u8], body: &[u8]) -> Vec<u8> {
+        self.prepare(contact).unwrap();
+        let digest = self
+            .sign(
+                contact,
                 subject,
                 len32(subject.len()),
                 body,
                 len32(body.len()),
             )
             .unwrap();
-        self.b
-            .attach_signature(self.key.sign_digest(&digest))
-            .unwrap();
+        self.seal(&digest).unwrap();
         self.b.submit().unwrap()
     }
 

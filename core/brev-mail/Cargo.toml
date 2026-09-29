@@ -25,6 +25,9 @@ thiserror = { workspace = true }
 brev-proto = { path = "../brev-proto" }
 # The store, its DEK, column encryption, padding and the zeroing allocator.
 brev-vault = { path = "../brev-vault", default-features = false, features = ["zeroing-allocator"] }
+# Hand (docs/AUTHORSHIP.md): the facts of a letter, its class, the token the
+# identity key signs, and the recipient's checks.
+brev-hand = { path = "../brev-hand" }
 rusqlite = { workspace = true }
 x25519-dalek = { workspace = true }
 hkdf = { workspace = true }

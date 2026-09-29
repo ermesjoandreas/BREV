@@ -12,10 +12,10 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use brev_core::{
-    ContactId, Core, Envelope, Error, MessageId, MockTransport, PublicBundle, Transport,
+    ContactId, Core, Envelope, Error, Letter, MessageId, MockTransport, PublicBundle, Transport,
 };
 use brev_proto::sig;
-use common::{contains, random, TempDir, TestKey};
+use common::{contains, random, unix_now, TempDir, TestKey};
 
 struct Party {
     core: Core,
@@ -66,10 +66,13 @@ fn stranger() -> PublicBundle {
     PublicBundle::new(&TestKey::new().public, random()).unwrap()
 }
 
-/// Seals, signs (the test key stands in for the Enclave), stores the own
-/// copy and hands the envelope to the transport.
+/// Drafts, makes the class-A token and seals, signs (the test key stands in
+/// for the Enclave), stores the own copy and hands the envelope to the
+/// transport.
 fn send(from: &mut Party, to: ContactId, subject: &[u8], body: &[u8]) -> Envelope {
-    let mut letter = from.core.seal_letter(to, subject, body).unwrap();
+    let draft = from.core.draft(to, subject, body).unwrap();
+    let token = from.key.token(draft.letter());
+    let mut letter = from.core.seal_letter(&draft, &token).unwrap();
     let der = from.key.sign_digest(&letter.digest());
     from.core.attach_signature(&mut letter, &der).unwrap();
     from.core.store_sent(&letter).unwrap();
@@ -77,11 +80,18 @@ fn send(from: &mut Party, to: ContactId, subject: &[u8], body: &[u8]) -> Envelop
     letter.envelope().clone()
 }
 
+/// A letter to `to` with no token (its check fails; it is stored anyway).
+fn unsigned(from: &Party, to: ContactId, subject: &[u8], body: &[u8]) -> Letter {
+    let draft = from.core.draft(to, subject, body).unwrap();
+    from.core.seal_letter(&draft, &[]).unwrap()
+}
+
 /// Polls, receives the first waiting envelope and acknowledges it.
 fn receive_one(p: &mut Party) -> MessageId {
     let inbox = p.net.poll().unwrap();
-    let m = p.core.receive(&inbox[0]).unwrap();
-    p.net.ack(&[inbox[0].id()]).unwrap();
+    let (at, env) = &inbox[0];
+    let m = p.core.receive(env, *at).unwrap();
+    p.net.ack(&[env.id()]).unwrap();
     m
 }
 
@@ -99,9 +109,13 @@ fn round_trip_a_encrypts_b_decrypts() {
 
     let inbox = b.net.poll().unwrap();
     assert_eq!(inbox.len(), 1);
-    let m = b.core.receive(&inbox[0]).unwrap();
-    b.net.ack(&[inbox[0].id()]).unwrap();
+    let m = b.core.receive(&inbox[0].1, inbox[0].0).unwrap();
+    b.net.ack(&[inbox[0].1.id()]).unwrap();
     assert!(b.net.poll().unwrap().is_empty());
+    // The token checks out with A's pinned key: class A.
+    let proof = b.core.proof(m).unwrap().unwrap();
+    assert!(proof.passed(), "{proof:?}");
+    assert_eq!(proof.class(), Some(brev_hand::EnvironmentClass::A));
 
     let threads = b.core.threads().unwrap();
     assert_eq!(threads.len(), 1);
@@ -153,18 +167,21 @@ fn tamper_any_flipped_byte_fails() {
         let mut bad = env.clone();
         bad.ciphertext[i] ^= 0x01;
         assert!(
-            matches!(b.core.receive(&bad), Err(Error::Crypto)),
+            matches!(b.core.receive(&bad, unix_now()), Err(Error::Crypto)),
             "ciphertext byte {i}"
         );
     }
     let mut bad = env.clone();
     bad.nonce[0] ^= 0x01;
-    assert!(matches!(b.core.receive(&bad), Err(Error::Crypto)));
+    assert!(matches!(
+        b.core.receive(&bad, unix_now()),
+        Err(Error::Crypto)
+    ));
     for i in [0, 31, 32, 63] {
         let mut bad = env.clone();
         bad.signature[i] ^= 0x01;
         assert!(
-            matches!(b.core.receive(&bad), Err(Error::Crypto)),
+            matches!(b.core.receive(&bad, unix_now()), Err(Error::Crypto)),
             "signature byte {i}"
         );
     }
@@ -172,7 +189,7 @@ fn tamper_any_flipped_byte_fails() {
         b.core.threads().unwrap().is_empty(),
         "nothing stored from a failed check"
     );
-    b.core.receive(&env).unwrap();
+    b.core.receive(&env, unix_now()).unwrap();
 }
 
 #[test]
@@ -247,7 +264,8 @@ fn locked_core_refuses_every_content_call() {
     receive_one(&mut b);
     send(&mut b, a_at_b, b"s", b"y");
     let unread = receive_one(&mut a);
-    let mut letter = a.core.seal_letter(b_at_a, b"s", b"z").unwrap();
+    let draft = a.core.draft(b_at_a, b"s", b"z").unwrap();
+    let mut letter = a.core.seal_letter(&draft, &[]).unwrap();
     let der = a.key.sign_digest(&letter.digest());
 
     a.core.lock();
@@ -268,15 +286,17 @@ fn locked_core_refuses_every_content_call() {
     locked(a.core.pending_bundle(b_at_a).map(drop));
     locked(a.core.check_key(b_at_a, &stranger()));
     locked(a.core.accept_new_key(b_at_a, &[b'A'; 35]));
-    locked(a.core.seal_letter(b_at_a, b"s", b"y").map(drop));
+    locked(a.core.draft(b_at_a, b"s", b"y").map(drop));
+    locked(a.core.seal_letter(&draft, &[]).map(drop));
     locked(a.core.attach_signature(&mut letter, &der));
     locked(a.core.store_sent(&letter).map(drop));
     locked(a.core.threads().map(drop));
     locked(a.core.messages(t).map(drop));
     locked(a.core.read_body(msg).map(drop));
+    locked(a.core.proof(unread).map(drop));
     locked(a.core.thread_of(msg).map(drop));
     locked(a.core.mark_read(unread));
-    locked(a.core.receive(&env).map(drop));
+    locked(a.core.receive(&env, unix_now()).map(drop));
 
     assert!(matches!(a.core.unlock(&mut random()), Err(Error::WrongKey)));
     assert!(matches!(a.core.unlock(&mut [0; 32]), Err(Error::WrongKey)));
@@ -321,7 +341,7 @@ fn signature_is_by_the_identity_key_and_signing_can_fail() {
 
     // A signature from another key (a replaced keychain item), over
     // another message, or not DER: `Signing`, and nothing is stored.
-    let mut letter = a.core.seal_letter(b_at_a, b"s", b"y").unwrap();
+    let mut letter = unsigned(&a, b_at_a, b"s", b"y");
     for der in [
         TestKey::new().sign_digest(&letter.digest()),
         a.key.sign_digest(&[1; 32]),
@@ -354,15 +374,20 @@ fn receive_rejects_strangers_misrouted_self_and_replays() {
         .add_contact(&b.core.bundle().unwrap(), b"bob")
         .unwrap();
     let from_c = send(&mut c, b_at_c, b"s", b"x");
-    assert!(matches!(b.core.receive(&from_c), Err(Error::NotFound)));
+    let now = unix_now();
+    assert!(matches!(b.core.receive(&from_c, now), Err(Error::NotFound)));
 
     // An envelope for B handed to A.
     let env = send(&mut a, b_at_a, b"s", b"x");
-    assert!(matches!(a.core.receive(&env), Err(Error::Malformed)));
+    assert!(matches!(a.core.receive(&env, now), Err(Error::Malformed)));
 
-    // Replay: stored once.
-    let m = b.core.receive(&env).unwrap();
-    assert!(matches!(b.core.receive(&env), Err(Error::Duplicate)));
+    // Replay: stored once, also when the relay stamps it again later.
+    let m = b.core.receive(&env, now).unwrap();
+    assert!(matches!(b.core.receive(&env, now), Err(Error::Duplicate)));
+    assert!(matches!(
+        b.core.receive(&env, now + 3600),
+        Err(Error::Duplicate)
+    ));
     let t = b.core.thread_of(m).unwrap();
     assert_eq!(b.core.messages(t).unwrap().len(), 1);
 
@@ -415,11 +440,11 @@ fn receive_rejects_strangers_misrouted_self_and_replays() {
     // A letter needs a contact; a subject over 65535 bytes is refused and
     // makes nothing; an unknown message cannot be marked read.
     assert!(matches!(
-        a.core.seal_letter(ContactId([9; 16]), b"s", b"x").map(drop),
+        a.core.draft(ContactId([9; 16]), b"s", b"x").map(drop),
         Err(Error::NotFound)
     ));
     assert!(matches!(
-        a.core.seal_letter(b_at_a, &[0; 65536], b"x").map(drop),
+        a.core.draft(b_at_a, &[0; 65536], b"x").map(drop),
         Err(Error::Malformed)
     ));
     assert_eq!(a.core.threads().unwrap().len(), 1);
@@ -429,17 +454,24 @@ fn receive_rejects_strangers_misrouted_self_and_replays() {
     ));
 }
 
-/// `poll` deletes nothing; `ack` deletes exactly the listed envelopes.
+/// `poll` deletes nothing; `ack` deletes exactly the listed envelopes. Like
+/// the relay, the transport stamps each envelope with the time it got it:
+/// the system clock, or the time a test set.
 #[test]
 fn mock_transport_keeps_letters_until_acked() {
     let dir = TempDir::new();
     let (mut a, b, b_at_a, _) = pair(&dir.0);
+    let before = unix_now();
     let first = send(&mut a, b_at_a, b"s", b"1");
+    a.net.set_time(Some(1_790_000_000));
     let second = send(&mut a, b_at_a, b"s", b"2");
-    assert_eq!(b.net.poll().unwrap(), [first.clone(), second.clone()]);
+    let polled = b.net.poll().unwrap();
+    assert_eq!(polled[1], (1_790_000_000, second.clone()));
+    assert_eq!(polled[0].1, first);
+    assert!((before..=unix_now()).contains(&polled[0].0));
     assert_eq!(b.net.poll().unwrap().len(), 2, "poll deletes nothing");
     b.net.ack(&[first.id(), [0; 32]]).unwrap();
-    assert_eq!(b.net.poll().unwrap(), std::slice::from_ref(&second));
+    assert_eq!(b.net.poll().unwrap(), [(1_790_000_000, second.clone())]);
     b.net.ack(&[second.id()]).unwrap();
     assert!(b.net.poll().unwrap().is_empty());
     assert!(
@@ -568,7 +600,7 @@ fn stored_metadata_is_bound_to_ciphertext() {
     // shown as Bob.
     swap("contacts", "bundle", &b_at_a.0, &m_at_a.0);
     assert!(matches!(
-        a.core.seal_letter(b_at_a, b"s", b"secret").map(drop),
+        a.core.draft(b_at_a, b"s", b"secret").map(drop),
         Err(Error::Crypto)
     ));
     swap("contacts", "bundle", &b_at_a.0, &m_at_a.0);
@@ -578,7 +610,7 @@ fn stored_metadata_is_bound_to_ciphertext() {
         Err(Error::Corrupt)
     ));
     assert!(matches!(
-        a.core.seal_letter(b_at_a, b"s", b"secret").map(drop),
+        a.core.draft(b_at_a, b"s", b"secret").map(drop),
         Err(Error::Crypto)
     ));
     swap("contacts", "tag", &b_at_a.0, &m_at_a.0);
@@ -801,6 +833,7 @@ fn core_and_transport_can_move_between_threads() {
     fn send_bound<T: Send>() {}
     fn shared_bound<T: Send + Sync>() {}
     send_bound::<Core>();
+    send_bound::<brev_core::Draft>();
     send_bound::<brev_core::Letter>();
     shared_bound::<MockTransport>();
 }

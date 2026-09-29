@@ -15,6 +15,11 @@
 //! Schema v5 (docs/PHASE4_DESIGN.md §5.1) adds each contact's sealed flags
 //! (they take my letters, key verified by an invite, blocked) and the user's
 //! open invites, each a sealed secret and the day it was made.
+//!
+//! Schema v6 (docs/AUTHORSHIP.md §6) adds `messages.proof`: a received
+//! letter's Hand result (brev-hand's `Verification::encode`, the checks that
+//! passed and the token), sealed beside it; empty for a sent letter. The
+//! envelope payload is protocol version 2: the letter and its token.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -22,6 +27,8 @@ use std::sync::Arc;
 use std::sync::Weak;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use brev_hand::token::MAX_TOKEN;
+use brev_hand::Verification;
 use brev_proto::body::{self, is_valid_address};
 use brev_proto::{identity_code, invite, sig, IDENTITY_CODE_LEN, SIG_LEN};
 use brev_vault::{check_path, Clock, DekSlot, EnvironmentClass, Text, Vault, VaultConfig};
@@ -33,13 +40,14 @@ use crate::{Envelope, Error};
 
 /// "BREV" in the SQLite header's application_id field.
 const APPLICATION_ID: i32 = 0x4252_4556;
-/// 5: version 3 (local contact ids, the keyed contact tag, sealed
+/// 6: version 3 (local contact ids, the keyed contact tag, sealed
 /// addresses and `pending`, the relay token in `identity.keys`;
 /// docs/PHASE3_DESIGN.md §6.1), `messages.env_class` (version 4,
-/// docs/VAULT_SPLIT_PLAN.md §6), and `contacts.flags` and `invites`
-/// (docs/PHASE4_DESIGN.md §5.1). A version 2, 3 or 4 store opens as
-/// `Corrupt`; there is no migration.
-const SCHEMA_VERSION: i32 = 5;
+/// docs/VAULT_SPLIT_PLAN.md §6), `contacts.flags` and `invites` (version 5,
+/// docs/PHASE4_DESIGN.md §5.1), and `messages.proof` (docs/AUTHORSHIP.md
+/// §6). A version 2, 3, 4 or 5 store opens as `Corrupt`; there is no
+/// migration.
+const SCHEMA_VERSION: i32 = 6;
 
 const SCHEMA: &str = "
 CREATE TABLE identity (
@@ -72,7 +80,8 @@ CREATE TABLE messages (
     outgoing   INTEGER NOT NULL,           -- pt: 1 = sent by me
     read       INTEGER NOT NULL,           -- pt
     body       BLOB NOT NULL,              -- ct
-    env_class  INTEGER                     -- pt: environment class a sent letter went out in (1 = A); NULL otherwise
+    env_class  INTEGER,                    -- pt: environment class a sent letter went out in (1 = A); NULL otherwise
+    proof      BLOB NOT NULL               -- ct: a received letter's Hand result (pass bits || token); empty for a sent one
 ) STRICT;
 CREATE INDEX messages_by_thread ON messages(thread_id, created_at);
 ";
@@ -237,6 +246,31 @@ pub struct Message {
     pub read: bool,
 }
 
+/// A letter before its token (docs/AUTHORSHIP.md §3.1), from
+/// [`Core::draft`]: the contact, fresh thread and message ids, the time, and
+/// the letter's plaintext, which the token's content hash covers. The
+/// plaintext is a [`Plaintext`], wiped on drop. No `Debug`: it is content.
+pub struct Draft {
+    contact: [u8; 16],
+    thread: [u8; 16],
+    message: [u8; 16],
+    created_at: i64,
+    letter: Plaintext,
+}
+
+impl Draft {
+    /// The letter: `message id (16) || thread id (16) || subject length
+    /// (u16 BE) || subject || body`.
+    pub fn letter(&self) -> &[u8] {
+        &self.letter
+    }
+
+    /// The contact it goes to.
+    pub fn contact(&self) -> ContactId {
+        ContactId(self.contact)
+    }
+}
+
 /// A letter that starts a new thread, sealed and waiting for its signature
 /// and its delivery ([`Core::seal_letter`]). It holds ciphertext only: the
 /// envelope, and the thread and message rows already sealed under the DEK
@@ -249,9 +283,11 @@ pub struct Letter {
     created_at: i64,
     subject: Vec<u8>,
     body: Vec<u8>,
+    /// The own copy's `messages.proof`: sealed, empty.
+    proof: Vec<u8>,
     envelope: Envelope,
-    /// The environment class the app reported for this letter
-    /// (docs/VAULT_SPLIT_PLAN.md §6): set by the FFI's `sign_request`,
+    /// The environment class the letter's token carries
+    /// (docs/AUTHORSHIP.md §3.3): set by the FFI's `attach_token_signature`,
     /// stored by [`Core::store_sent`]. None from [`Core::seal_letter`].
     pub(crate) class: Option<EnvironmentClass>,
 }
@@ -824,56 +860,82 @@ impl Core {
         Ok(())
     }
 
-    /// Seals a letter to `contact` that starts a new thread: the payload
-    /// (padded) in an envelope without signature, and the subject and body
-    /// under the DEK for the own copy. Every decrypted value and the X25519
-    /// secret are dropped before this returns. `KeyChanged` while the
-    /// contact's key change is pending, `NotApproved` for a blocked
-    /// contact, both before anything is sealed. Subjects are limited to
-    /// 65535 bytes. Stores nothing.
-    pub fn seal_letter(
-        &self,
-        contact: ContactId,
-        subject: &[u8],
-        body: &[u8],
-    ) -> Result<Letter, Error> {
-        let dek = self.dek()?;
-        if self.pending_bundle(contact)?.is_some() {
-            return Err(Error::KeyChanged);
-        }
-        if self.contact_flags(contact)? & BLOCKED != 0 {
-            return Err(Error::NotApproved);
-        }
+    /// Starts a letter to `contact` that starts a new thread
+    /// (docs/AUTHORSHIP.md §3.1): fresh thread and message ids, the time,
+    /// and the letter's plaintext for the token's content hash. Checks what
+    /// [`Core::seal_letter`] checks, so a letter that cannot be sealed is
+    /// refused before the Touch ID prompt: `KeyChanged` while the contact's
+    /// key change is pending, `NotApproved` for a blocked contact, and the
+    /// contact's pinned bundle must open. Subjects are limited to 65535
+    /// bytes. Stores nothing.
+    pub fn draft(&self, contact: ContactId, subject: &[u8], body: &[u8]) -> Result<Draft, Error> {
+        self.sealable(contact)?;
         u16::try_from(subject.len()).map_err(|_| Error::Malformed)?;
-        let bundle = self.contact_bundle(contact)?;
+        self.contact_bundle(contact)?;
         let thread: [u8; 16] = crypto::random()?;
         let message: [u8; 16] = crypto::random()?;
-        let now = now();
+        Ok(Draft {
+            contact: contact.0,
+            thread,
+            message,
+            created_at: now(),
+            letter: encode_payload(&message, &thread, subject, body)?,
+        })
+    }
+
+    /// Seals `draft` with its authorship token `token` (at most
+    /// `MAX_TOKEN` bytes, `Malformed` otherwise): the payload of protocol
+    /// version 2 (docs/AUTHORSHIP.md §2.5), padded, in an envelope without
+    /// signature, and the subject, the body and an empty proof under the
+    /// DEK for the own copy. Every decrypted value and the X25519 secret are
+    /// dropped before this returns. `KeyChanged` while the contact's key
+    /// change is pending, `NotApproved` for a blocked contact, both before
+    /// anything is sealed. Stores nothing.
+    pub fn seal_letter(&self, draft: &Draft, token: &[u8]) -> Result<Letter, Error> {
+        let dek = self.dek()?;
+        let contact = draft.contact();
+        self.sealable(contact)?;
+        let bundle = self.contact_bundle(contact)?;
+        let (message, thread, created_at) = (draft.message, draft.thread, draft.created_at);
         // The payload and the identity secret live only inside this block.
-        let (envelope, subject, body) = {
+        let (envelope, subject, body, proof) = {
+            let (_, _, subject, body) = decode_payload(draft.letter())?;
             let me = self.me()?;
-            let payload = encode_payload(&message, &thread, subject, body)?;
+            let payload = encode_v2(draft.letter(), token)?;
             let env =
                 crypto::seal_message(&me.secret, &bundle.x25519, me.id, bundle.id().0, &payload)?;
-            let subject = crypto::seal_column(dek, &subject_ad(&thread, &contact.0, now), subject)?;
-            let body = crypto::seal_column(
-                dek,
-                &body_ad(&message, &thread, &contact.0, true, now),
-                body,
-            )?;
-            (env, subject, body)
+            let subject =
+                crypto::seal_column(dek, &subject_ad(&thread, &contact.0, created_at), subject)?;
+            let ad = |label| message_ad(label, &message, &thread, &contact.0, true, created_at);
+            let body = crypto::seal_column(dek, &ad("messages.body"), body)?;
+            let proof = crypto::seal_column(dek, &ad("messages.proof"), &[])?;
+            (env, subject, body, proof)
         };
         crypto::scrub_stack();
         Ok(Letter {
             contact: contact.0,
             thread,
             message,
-            created_at: now,
+            created_at,
             subject,
             body,
+            proof,
             envelope,
             class: None,
         })
+    }
+
+    /// The checks before a letter to `contact` is started or sealed:
+    /// `KeyChanged` while its key change is pending, `NotApproved` while it
+    /// is blocked.
+    fn sealable(&self, contact: ContactId) -> Result<(), Error> {
+        if self.pending_bundle(contact)?.is_some() {
+            return Err(Error::KeyChanged);
+        }
+        if self.contact_flags(contact)? & BLOCKED != 0 {
+            return Err(Error::NotApproved);
+        }
+        Ok(())
     }
 
     /// Attaches the Secure Enclave's DER signature over the letter's digest,
@@ -887,7 +949,8 @@ impl Core {
     /// Stores the own copy of a signed letter the relay has accepted: its
     /// thread and message rows, sealed by [`Core::seal_letter`], in one
     /// transaction, with the letter's environment class in `env_class`
-    /// (plaintext; NULL without one). An unsigned letter gives `Malformed`.
+    /// (plaintext; NULL without one) and an empty proof. An unsigned letter
+    /// gives `Malformed`.
     pub fn store_sent(&mut self, letter: &Letter) -> Result<ThreadId, Error> {
         self.dek()?;
         if !letter.is_signed() {
@@ -904,13 +967,14 @@ impl Core {
             ],
         )?;
         tx.execute(
-            "INSERT INTO messages (id, thread_id, created_at, outgoing, read, body, env_class) VALUES (?1, ?2, ?3, 1, 1, ?4, ?5)",
+            "INSERT INTO messages (id, thread_id, created_at, outgoing, read, body, env_class, proof) VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6)",
             params![
                 &letter.message[..],
                 &letter.thread[..],
                 letter.created_at,
                 letter.body,
-                letter.class.map(EnvironmentClass::code)
+                letter.class.map(EnvironmentClass::code),
+                letter.proof
             ],
         )?;
         tx.commit()?;
@@ -979,8 +1043,51 @@ impl Core {
             [&message.0[..]],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
-        let ad = body_ad(&message.0, &thread, &contact, outgoing, created_at);
+        let ad = message_ad(
+            "messages.body",
+            &message.0,
+            &thread,
+            &contact,
+            outgoing,
+            created_at,
+        );
         Ok(crypto::open_column(dek, &ad, &body)?)
+    }
+
+    /// The Hand result of a received letter (docs/AUTHORSHIP.md §6): what
+    /// [`Core::receive`] stored, rebuilt by brev-hand's
+    /// `Verification::decode`. `None` for a sent letter, whose proof is
+    /// empty (its own class is in `env_class`). The proof must open under
+    /// the row's AD, which holds the direction (`Crypto` otherwise), and
+    /// decode (`Corrupt` otherwise).
+    pub fn proof(&self, message: MessageId) -> Result<Option<Verification>, Error> {
+        let dek = self.dek()?;
+        let (thread, contact, outgoing, created_at, sealed): (
+            [u8; 16],
+            [u8; 16],
+            bool,
+            i64,
+            Vec<u8>,
+        ) = self.db().query_row(
+            "SELECT m.thread_id, t.contact_id, m.outgoing, m.created_at, m.proof
+                 FROM messages m JOIN threads t ON t.id = m.thread_id WHERE m.id = ?1",
+            [&message.0[..]],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?;
+        let ad = message_ad(
+            "messages.proof",
+            &message.0,
+            &thread,
+            &contact,
+            outgoing,
+            created_at,
+        );
+        let proof = crypto::open_column(dek, &ad, &sealed)?;
+        match (outgoing, proof.is_empty()) {
+            (true, true) => Ok(None),
+            (false, false) => Verification::decode(&proof).map(Some).ok_or(Error::Corrupt),
+            _ => Err(Error::Corrupt),
+        }
     }
 
     /// The thread a message belongs to. Metadata only: decrypts nothing, but
@@ -1089,16 +1196,25 @@ impl Core {
     ///    like a stranger; docs/PHASE4_DESIGN.md owner answer 6);
     /// 4. the signature over the signed bytes, with the pinned signing key
     ///    (`Crypto`), before anything is decrypted;
-    /// 5. the AEAD (`Crypto`), then padding and payload shape (`Malformed`);
+    /// 5. the AEAD (`Crypto`), then padding and the payload's shape
+    ///    (`Malformed`): protocol version 2's letter and token, strictly
+    ///    framed, the token at most `MAX_TOKEN` bytes;
     /// 6. for a known thread, its subject opens (`Corrupt`) and its owner is
     ///    the sender (`Malformed`);
-    /// 7. the insert (`Duplicate` for a stored message id).
-    pub fn receive(&mut self, env: &Envelope) -> Result<MessageId, Error> {
+    /// 7. the insert (`Duplicate` for a stored message id: a replayed letter,
+    ///    docs/AUTHORSHIP.md §6 step 5).
+    ///
+    /// The token is checked (brev-hand's `verify`, with the pinned signing
+    /// key that verified the envelope and the relay's `received_at`, Unix
+    /// seconds) and its result is sealed beside the letter. A token that
+    /// fails does not refuse the letter: the letter is stored with its
+    /// failed result, and the app shows «Ikke verifisert».
+    pub fn receive(&mut self, env: &Envelope, received_at: u64) -> Result<MessageId, Error> {
         let dek = self.dek()?;
         let now = now();
         // The identity secret and the decrypted letter live only inside this
         // block, so neither is alive during the commit (a full fsync).
-        let (id, thread, contact, new_subject, body) = {
+        let (id, thread, contact, new_subject, body, proof) = {
             if env.recipient != self.my_id().map_err(local)? {
                 return Err(Error::Malformed);
             }
@@ -1126,7 +1242,10 @@ impl Core {
                 let me = self.me().map_err(local)?;
                 crypto::open_message(&me.secret, &bundle.x25519, env)?
             };
-            let (id, thread, subject, body) = decode_payload(&payload)?;
+            let (letter, token) = decode_v2(&payload)?;
+            let (id, thread, subject, body) = decode_payload(letter)?;
+            let proof =
+                brev_hand::verify(letter, token, &bundle.signing_key, received_at).encode(token);
 
             let existing: Option<([u8; 16], i64, Vec<u8>)> = self
                 .db()
@@ -1152,13 +1271,14 @@ impl Core {
                     subject,
                 )?),
             };
-            let ad = body_ad(&id, &thread, &contact, false, now);
+            let ad = |label| message_ad(label, &id, &thread, &contact, false, now);
             (
                 id,
                 thread,
                 contact,
                 new_subject,
-                crypto::seal_column(dek, &ad, body)?,
+                crypto::seal_column(dek, &ad("messages.body"), body)?,
+                crypto::seal_column(dek, &ad("messages.proof"), &proof)?,
             )
         };
 
@@ -1170,9 +1290,9 @@ impl Core {
             )?;
         }
         let n = tx.execute(
-            "INSERT INTO messages (id, thread_id, created_at, outgoing, read, body) VALUES (?1, ?2, ?3, 0, 0, ?4)
+            "INSERT INTO messages (id, thread_id, created_at, outgoing, read, body, proof) VALUES (?1, ?2, ?3, 0, 0, ?4, ?5)
              ON CONFLICT (id) DO NOTHING",
-            params![&id[..], &thread[..], now, body],
+            params![&id[..], &thread[..], now, body, proof],
         )?;
         if n == 0 {
             return Err(Error::Duplicate); // dropping `tx` rolls back
@@ -1345,9 +1465,10 @@ fn subject_ad(id: &[u8; 16], contact: &[u8; 16], created_at: i64) -> Vec<u8> {
     column_ad("threads.subject", &[id, contact, &created_at.to_be_bytes()])
 }
 
-/// AD for `messages.body`: message id, thread id, the thread's local contact
-/// id, direction, created_at.
-fn body_ad(
+/// AD for `messages.body` and `messages.proof` (`label`): message id,
+/// thread id, the thread's local contact id, direction, created_at.
+fn message_ad(
+    label: &str,
     id: &[u8; 16],
     thread: &[u8; 16],
     contact: &[u8; 16],
@@ -1355,7 +1476,7 @@ fn body_ad(
     created_at: i64,
 ) -> Vec<u8> {
     column_ad(
-        "messages.body",
+        label,
         &[
             id,
             thread,
@@ -1416,6 +1537,41 @@ fn decode_payload(p: &[u8]) -> Result<Decoded<'_>, Error> {
     let len: [u8; 2] = field(32..34)?.try_into().map_err(|_| Error::Malformed)?;
     let end = 34 + usize::from(u16::from_be_bytes(len));
     Ok((id, thread, field(34..end)?, &p[end..]))
+}
+
+/// The payload inside the message AEAD, protocol version 2
+/// (docs/AUTHORSHIP.md §2.5): `letter length (u32 BE) || letter || token
+/// length (u16 BE) || token`, where `letter` is [`encode_payload`]'s
+/// layout. A token over `MAX_TOKEN` bytes is `Malformed`. Returned as a
+/// [`Plaintext`], so the tests' live counter sees it.
+fn encode_v2(letter: &[u8], token: &[u8]) -> Result<Plaintext, Error> {
+    let letter_len = u32::try_from(letter.len()).map_err(|_| Error::Malformed)?;
+    if token.len() > MAX_TOKEN {
+        return Err(Error::Malformed);
+    }
+    let token_len = u16::try_from(token.len()).map_err(|_| Error::Malformed)?;
+    let cap = 6 + letter.len() + token.len();
+    let mut p = Zeroizing::new(Vec::with_capacity(cap));
+    p.extend_from_slice(&letter_len.to_be_bytes());
+    p.extend_from_slice(letter);
+    p.extend_from_slice(&token_len.to_be_bytes());
+    p.extend_from_slice(token);
+    debug_assert_eq!(p.capacity(), cap, "payload buffer reallocated");
+    Ok(Plaintext::new(p))
+}
+
+/// The letter and the token of a protocol version 2 payload, borrowed from
+/// it. Strict: the two lengths and their bytes make up the whole payload,
+/// and the token is at most `MAX_TOKEN` bytes; `Malformed` otherwise.
+fn decode_v2(p: &[u8]) -> Result<(&[u8], &[u8]), Error> {
+    let (len, rest) = p.split_first_chunk::<4>().ok_or(Error::Malformed)?;
+    let len = usize::try_from(u32::from_be_bytes(*len)).map_err(|_| Error::Malformed)?;
+    let (letter, rest) = rest.split_at_checked(len).ok_or(Error::Malformed)?;
+    let (len, token) = rest.split_first_chunk::<2>().ok_or(Error::Malformed)?;
+    if usize::from(u16::from_be_bytes(*len)) != token.len() || token.len() > MAX_TOKEN {
+        return Err(Error::Malformed);
+    }
+    Ok((letter, token))
 }
 
 fn now() -> i64 {

@@ -348,11 +348,17 @@ fn submit_checks() {
         assert_eq!(submit(&bad), StatusCode::FORBIDDEN);
     }
 
-    // Wire rules (Envelope::from_wire): version 0, magic, a ciphertext that
-    // is not bucket + 16, too short, empty.
+    // Wire rules (Envelope::from_wire): version 0 and version 1 (Phase 3's
+    // payload, without the authorship token), magic, a ciphertext that is
+    // not bucket + 16, too short, empty.
     let good = wire(&envelope(&a, &b.id, 256, 11));
     let mut version0 = good.clone();
     version0[4..6].copy_from_slice(&[0, 0]);
+    let mut version1 = envelope(&a, &b.id, 256, 14);
+    let mut signed = version1.signed_bytes();
+    signed[4..6].copy_from_slice(&[0, 1]);
+    version1.signature = a.sign(&signed).to_vec();
+    let version1 = [&signed[..], &version1.signature].concat();
     let mut magic = good.clone();
     magic[0] = b'b';
     let mut unbucketed = envelope(&a, &b.id, 256, 12);
@@ -360,6 +366,7 @@ fn submit_checks() {
     unbucketed.signature = a.sign(&unbucketed.signed_bytes()).to_vec();
     for bad in [
         version0,
+        version1,
         magic,
         wire(&unbucketed),
         good[..429].to_vec(),
@@ -465,6 +472,57 @@ fn inbox_and_ack() {
     let first: Vec<[u8; 32]> = big[..3].iter().map(|w| id(w)).collect();
     assert_eq!(r.ack(&e, &first), StatusCode::NO_CONTENT);
     assert_eq!(r.inbox(&e), big[3..]);
+}
+
+/// docs/AUTHORSHIP.md §2.5: the relay stamps an envelope with its own clock
+/// (Unix seconds) when it first stores it; a resubmit of the same envelope
+/// keeps the first stamp, and the inbox answer hands each envelope over with
+/// its stamp. Another envelope gets its own; an acked one takes it along.
+#[test]
+fn received_at_is_kept_on_resubmit_and_delivered() {
+    let r = Relayed::new();
+    let (a, b) = (Identity::new(1), Identity::new(2));
+    r.join(&a, "anna");
+    r.join(&b, "bob");
+    r.approve(&a, &b, "bob");
+    let first = wire(&envelope(&a, &b.id, 256, 1));
+    let second = wire(&envelope(&a, &b.id, 1024, 2));
+
+    r.set_time(0, 1_000);
+    assert_eq!(r.submit_as(&a, &first), StatusCode::ACCEPTED);
+    let stamped = START / DAY * DAY + 1_000;
+    assert_eq!(r.inbox_at(&b), [(stamped, first.clone())]);
+
+    // A resubmit hours later, also with another valid signature over the
+    // same bytes: 200, and the first stamp stays.
+    r.set_time(0, 30_000);
+    assert_eq!(r.submit_as(&a, &first), StatusCode::OK);
+    let mut resigned = Envelope::from_wire(&first).unwrap();
+    let sig = Signature::from_slice(&resigned.signature).unwrap();
+    resigned.signature = negate_s(&sig).to_bytes().to_vec();
+    assert_ne!(wire(&resigned), first);
+    assert_eq!(r.submit_as(&a, &wire(&resigned)), StatusCode::OK);
+    assert_eq!(r.inbox_at(&b), [(stamped, first.clone())]);
+
+    // A new envelope gets the time it arrived.
+    assert_eq!(r.submit_as(&a, &second), StatusCode::ACCEPTED);
+    let later = START / DAY * DAY + 30_000;
+    assert_eq!(
+        r.inbox_at(&b),
+        [(stamped, first.clone()), (later, second.clone())]
+    );
+    // What the relay stores: the stamp beside the envelope, and nothing
+    // once it is acknowledged.
+    assert_eq!(
+        r.number(
+            "SELECT received_at FROM envelopes WHERE id = ?1",
+            &id(&second)
+        ),
+        i64::try_from(later).unwrap()
+    );
+    assert_eq!(r.ack(&b, &[id(&first)]), StatusCode::NO_CONTENT);
+    assert_eq!(r.inbox_at(&b), [(later, second)]);
+    assert_eq!(r.rows("envelopes"), 1);
 }
 
 #[test]

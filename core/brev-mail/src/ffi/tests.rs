@@ -11,6 +11,7 @@ use std::sync::Weak;
 use std::thread;
 use std::time::Instant;
 
+use brev_proto::sig;
 use brev_relay::{parse_listen, Config, Decision, Endpoint, Gates, Policy, Relay, Server};
 
 use super::*;
@@ -35,25 +36,61 @@ fn tmp() -> Tmp {
 /// The idle time of the test sessions: long enough that no timer fires.
 const TEST_IDLE: u32 = 3600;
 
-/// The report of an app with every defence in place: class A.
-fn class_a() -> EnvironmentReport {
-    EnvironmentReport {
-        key_origin: KeyOrigin::SecureEnclave,
-        biometric_used: true,
-        capture_excluded: true,
-        secure_input_active: true,
-        synthetic_input_rejected: true,
-        accessibility_opaque: true,
-        pasteboard_disabled: true,
+/// A sample of a Mac with nothing wrong: secure input, capture excluded,
+/// SIP on, no `sudo`, no agent, no other window.
+fn clean() -> Sample {
+    Sample {
+        secure_input: true,
+        sharing_none: true,
+        prevents_capture: true,
+        csr_config: Some(0),
+        processes: Some(names(&["launchd", "Brev", "zsh"])),
+        windows: Some(Vec::new()),
     }
 }
 
-/// Unlocks `b` and confirms it, as the app does once it shows the mail,
-/// and reports class A, as the app does before a letter.
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|&n| n.to_owned()).collect()
+}
+
+/// This process, whose windows are Brev's own.
+fn own_pid() -> i32 {
+    i32::try_from(std::process::id()).unwrap()
+}
+
+/// How Brev is built: every defence by design.
+const DESIGN: Design = Design {
+    ax_opaque: true,
+    pasteboard_off: true,
+    input_filter: true,
+};
+
+/// Unlocks `b` and confirms it with a clean sample, as the app does once it
+/// shows the mail.
 fn unlock_active(b: &Brev, dek: &[u8]) {
     b.unlock(dek, TEST_IDLE).unwrap();
-    b.confirm_active().unwrap();
-    b.report_environment(class_a()).unwrap();
+    b.confirm_active(clean()).unwrap();
+}
+
+/// Opens a compose session with the Secure Enclave key (the test key
+/// stands in for it) and an admin user.
+fn compose(u: &User) {
+    u.b.compose_started(DESIGN, Some(true), KeyOrigin::SecureEnclave)
+        .unwrap();
+}
+
+/// A compose session, then `prepare_send` with a clean sample.
+fn prepare(u: &User, contact: &[u8]) -> Result<(), BrevError> {
+    compose(u);
+    u.b.prepare_send(contact.to_vec(), clean())
+}
+
+/// The one Touch ID of a letter: the test key signs the token digest, then
+/// the envelope digest that answers it.
+fn seal(u: &User, token_digest: &[u8]) -> Result<(), BrevError> {
+    let digest =
+        u.b.attach_token_signature(u.key.sign_digest(token_digest))?;
+    u.b.attach_signature(u.key.sign_digest(&digest))
 }
 
 fn len32(n: usize) -> u32 {
@@ -217,9 +254,10 @@ fn add(u: &User, address: &str) -> Vec<u8> {
         .unwrap()
 }
 
-/// The three steps of a letter, as the app makes them.
+/// The steps of a letter, as the app makes them: compose, prepare, the
+/// sign request, the two signatures of one Touch ID, submit.
 fn send(u: &User, contact: &[u8], subject: &[u8], body: &[u8]) -> Vec<u8> {
-    u.b.prepare_send(contact.to_vec()).unwrap();
+    prepare(u, contact).unwrap();
     let digest =
         u.b.sign_request(
             contact.to_vec(),
@@ -227,9 +265,10 @@ fn send(u: &User, contact: &[u8], subject: &[u8], body: &[u8]) -> Vec<u8> {
             len32(subject.len()),
             body,
             len32(body.len()),
+            clean(),
         )
         .unwrap();
-    u.b.attach_signature(u.key.sign_digest(&digest)).unwrap();
+    seal(u, &digest).unwrap();
     u.b.submit().unwrap()
 }
 
@@ -243,7 +282,7 @@ fn pair(net: &Net) -> (User, User, Vec<u8>, Vec<u8>) {
 }
 
 fn sign_request(u: &User, contact: &[u8]) -> Result<Vec<u8>, BrevError> {
-    u.b.sign_request(contact.to_vec(), b"s", 1, b"body", 4)
+    u.b.sign_request(contact.to_vec(), b"s", 1, b"body", 4, clean())
 }
 
 #[test]
@@ -252,7 +291,7 @@ fn locked_session_refuses_every_export() {
     let (a, _b, b_at_a, _) = pair(&net);
     let thread = send(&a, &b_at_a, b"s", b"b");
     let msg = a.b.messages(thread.clone()).unwrap()[0].id.clone();
-    a.b.prepare_send(b_at_a.clone()).unwrap();
+    prepare(&a, &b_at_a).unwrap();
     let code = net.relay.root_invite().unwrap();
     let requests = net.server.requests();
     a.b.lock();
@@ -261,16 +300,23 @@ fn locked_session_refuses_every_export() {
     locked(a.b.contacts().map(drop));
     locked(a.b.threads(b_at_a.clone()).map(drop));
     locked(a.b.messages(thread).map(drop));
-    locked(a.b.open_body(msg).map(drop));
+    locked(a.b.open_body(msg.clone()).map(drop));
     locked(a.b.me().map(drop));
     locked(a.b.contact_info(b_at_a.clone()).map(drop));
     locked(a.b.accept_new_key(b_at_a.clone(), vec![b'A'; 35]));
     locked(a.b.register_request(b"carl", 4).map(drop));
     locked(a.b.register(vec![0x30], Vec::new()));
     locked(a.b.add_contact(b"carl", 4).map(drop));
-    locked(a.b.prepare_send(b_at_a.clone()));
+    locked(a.b.observe(clean()).map(drop));
+    locked(a.b.compose_started(DESIGN, Some(true), KeyOrigin::SecureEnclave));
+    locked(a.b.compose_closed());
+    locked(a.b.synthetic_dropped());
+    locked(a.b.paste_accepted());
+    locked(a.b.prepare_send(b_at_a.clone(), clean()));
     locked(sign_request(&a, &b_at_a).map(drop));
+    locked(a.b.attach_token_signature(vec![0x30]).map(drop));
     locked(a.b.attach_signature(vec![0x30]));
+    locked(a.b.letter_proof(msg).map(drop));
     locked(a.b.submit().map(drop));
     locked(a.b.sync().map(drop));
     locked(a.b.create_invite().map(drop));
@@ -339,8 +385,7 @@ fn poison_while_unlocked_locks_all_on_next_call() {
     let net = net();
     let (a, _b, _, _) = pair(&net);
     let name = Arc::clone(&a.b.contacts().unwrap()[0].name);
-    a.b.prepare_send(a.b.contacts().unwrap()[0].id.clone())
-        .unwrap();
+    prepare(&a, &a.b.contacts().unwrap()[0].id).unwrap();
     // A panic in a content method while unlocked: the DEK is loaded and no
     // drop guard has locked anything.
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -356,7 +401,7 @@ fn poison_while_unlocked_locks_all_on_next_call() {
     assert!(matches!(a.b.contacts(), Err(BrevError::Locked)));
     assert!(!a.b.s.is_poisoned());
     let s = guard(&a.b.s);
-    assert!(s.me.is_locked() && s.ticket.is_none());
+    assert!(s.me.is_locked() && s.ticket.is_none() && s.compose.is_none());
     drop(s);
     assert_eq!(name.byte_len(), 0);
     assert_eq!(crypto::live_plaintexts(), 0);
@@ -478,32 +523,33 @@ fn sign_request_needs_a_fresh_prepare() {
     // None yet.
     malformed(sign_request(&a, &b_at_a));
     // For another contact: refused, and the ticket is used up.
-    a.b.prepare_send(c_at_a.clone()).unwrap();
+    prepare(&a, &c_at_a).unwrap();
     malformed(sign_request(&a, &b_at_a));
     malformed(sign_request(&a, &c_at_a));
     // Used once.
-    a.b.prepare_send(b_at_a.clone()).unwrap();
+    prepare(&a, &b_at_a).unwrap();
     sign_request(&a, &b_at_a).unwrap();
     malformed(sign_request(&a, &b_at_a));
     // A bad length does not use it; a good call then does.
-    a.b.prepare_send(b_at_a.clone()).unwrap();
+    prepare(&a, &b_at_a).unwrap();
     assert!(matches!(
-        a.b.sign_request(b_at_a.clone(), b"s", 2, b"b", 1),
+        a.b.sign_request(b_at_a.clone(), b"s", 2, b"b", 1, clean()),
         Err(BrevError::Malformed)
     ));
     sign_request(&a, &b_at_a).unwrap();
     // `lock` and `cancel_send` clear it.
-    a.b.prepare_send(b_at_a.clone()).unwrap();
+    prepare(&a, &b_at_a).unwrap();
     a.b.lock();
     unlock_active(&a.b, &a.dek);
+    compose(&a);
     malformed(sign_request(&a, &b_at_a));
-    a.b.prepare_send(b_at_a.clone()).unwrap();
+    prepare(&a, &b_at_a).unwrap();
     a.b.cancel_send();
     malformed(sign_request(&a, &b_at_a));
     // A failed prepare clears the one before it.
-    a.b.prepare_send(b_at_a.clone()).unwrap();
+    prepare(&a, &b_at_a).unwrap();
     assert!(matches!(
-        a.b.prepare_send(vec![7; 16]),
+        a.b.prepare_send(vec![7; 16], clean()),
         Err(BrevError::NotFound)
     ));
     malformed(sign_request(&a, &b_at_a));
@@ -521,10 +567,10 @@ fn sign_request_and_register_request_make_no_request() {
     let fresh = user(&net);
     let code = net.relay.root_invite().unwrap();
     fresh.b.open_invite(&code, len32(code.len())).unwrap();
-    a.b.prepare_send(b_at_a.clone()).unwrap();
+    prepare(&a, &b_at_a).unwrap();
     let before = net.server.requests();
     let digest = sign_request(&a, &b_at_a).unwrap();
-    a.b.attach_signature(a.key.sign_digest(&digest)).unwrap();
+    seal(&a, &digest).unwrap();
     a.b.cancel_send();
     let digest = fresh.b.register_request(b"Carl", 4).unwrap();
     assert_eq!(digest.len(), 32);
@@ -549,47 +595,67 @@ fn sign_request_and_register_request_make_no_request() {
     assert_eq!(&me.address.chunk(0).unwrap()[..5], b"carl\0");
 }
 
-/// `lock` and `cancel_send` forget the letter, signed or not: nothing is
-/// attached, submitted or stored afterwards.
+/// `lock` and `cancel_send` forget the letter at every step: its plaintext
+/// while its token is signed (wiped: the live counter drops to 0), and the
+/// sealed letter, signed or not. Nothing is attached, submitted or stored
+/// afterwards.
 #[test]
 fn lock_and_cancel_clear_the_pending_letter() {
     let net = net();
     let (a, _b, b_at_a, _) = pair(&net);
     let not_found = |r: Result<(), BrevError>| assert!(matches!(r, Err(BrevError::NotFound)));
-    let digest = |a: &User| {
-        a.b.prepare_send(b_at_a.clone()).unwrap();
+    let token_digest = |a: &User| {
+        prepare(a, &b_at_a).unwrap();
         sign_request(a, &b_at_a).unwrap()
     };
-
-    // Nothing to attach or submit yet.
-    not_found(a.b.attach_signature(vec![0x30]));
-    not_found(a.b.submit().map(drop));
-    // An unsigned letter can not be submitted.
-    let d = digest(&a);
-    not_found(a.b.submit().map(drop));
-    // Unsigned, then cancelled or locked.
-    a.b.cancel_send();
-    not_found(a.b.attach_signature(a.key.sign_digest(&d)));
-    let d = digest(&a);
-    a.b.lock();
-    unlock_active(&a.b, &a.dek);
-    not_found(a.b.attach_signature(a.key.sign_digest(&d)));
-    // Signed, then cancelled or locked.
-    for lock in [false, true] {
-        let d = digest(&a);
-        a.b.attach_signature(a.key.sign_digest(&d)).unwrap();
-        assert!(guard(&a.b.s).letter.as_ref().unwrap().is_signed());
+    let cancel_or_lock = |a: &User, lock: bool| {
         if lock {
             a.b.lock();
             unlock_active(&a.b, &a.dek);
         } else {
             a.b.cancel_send();
         }
+    };
+
+    // Nothing to attach or submit yet.
+    not_found(a.b.attach_token_signature(vec![0x30]).map(drop));
+    not_found(a.b.attach_signature(vec![0x30]));
+    not_found(a.b.submit().map(drop));
+    // A letter waiting for its token signature: no envelope to sign or
+    // submit yet.
+    let d = token_digest(&a);
+    not_found(a.b.attach_signature(a.key.sign_digest(&d)));
+    not_found(a.b.submit().map(drop));
+    a.b.cancel_send();
+    // Waiting for its token signature (the plaintext), then cancelled or
+    // locked: wiped.
+    for lock in [false, true] {
+        let d = token_digest(&a);
+        assert!(guard(&a.b.s).pending.is_some());
+        assert_eq!(crypto::live_plaintexts(), 1, "the letter's plaintext");
+        cancel_or_lock(&a, lock);
+        assert_eq!(crypto::live_plaintexts(), 0, "lock {lock}");
+        assert!(guard(&a.b.s).pending.is_none());
+        not_found(a.b.attach_token_signature(a.key.sign_digest(&d)).map(drop));
+    }
+    // The token signed (sealed, the plaintext wiped), before the envelope
+    // signature; and signed, before the submit. Then cancelled or locked.
+    for (signed, lock) in [(false, false), (false, true), (true, false), (true, true)] {
+        let d = token_digest(&a);
+        let e = a.b.attach_token_signature(a.key.sign_digest(&d)).unwrap();
+        assert_eq!(crypto::live_plaintexts(), 0, "sealed: ciphertext only");
+        if signed {
+            a.b.attach_signature(a.key.sign_digest(&e)).unwrap();
+            assert!(guard(&a.b.s).letter.as_ref().unwrap().is_signed());
+        }
+        cancel_or_lock(&a, lock);
         assert!(guard(&a.b.s).letter.is_none());
+        not_found(a.b.attach_signature(a.key.sign_digest(&e)));
         not_found(a.b.submit().map(drop));
     }
-    // A foreign signature clears it too.
-    digest(&a);
+    // A foreign envelope signature clears it too.
+    let d = token_digest(&a);
+    a.b.attach_token_signature(a.key.sign_digest(&d)).unwrap();
     assert!(matches!(
         a.b.attach_signature(TestKey::new().sign_digest(&[0; 32])),
         Err(BrevError::Signing)
@@ -598,8 +664,8 @@ fn lock_and_cancel_clear_the_pending_letter() {
     assert!(a.b.threads(b_at_a.clone()).unwrap().is_empty());
     assert_eq!(net.relay.waiting().unwrap(), 0);
     // Control: the same steps without a lock send the letter.
-    let d = digest(&a);
-    a.b.attach_signature(a.key.sign_digest(&d)).unwrap();
+    let d = token_digest(&a);
+    seal(&a, &d).unwrap();
     a.b.submit().unwrap();
     assert_eq!(net.relay.waiting().unwrap(), 1);
     assert_eq!(a.b.threads(b_at_a).unwrap().len(), 1);
@@ -717,7 +783,7 @@ fn sync_counts_arrivals_when_the_ack_fails() {
         fn send(&self, e: &Envelope) -> Result<(), NetError> {
             self.0.send(e)
         }
-        fn poll(&self) -> Result<Vec<Envelope>, NetError> {
+        fn poll(&self) -> Result<Vec<(u64, Envelope)>, NetError> {
             self.0.poll()
         }
         fn ack(&self, _: &[[u8; 32]]) -> Result<(), NetError> {
@@ -730,7 +796,7 @@ fn sync_counts_arrivals_when_the_ack_fails() {
     let (caller, token) = guard(&b.b.s).credentials().unwrap();
     let envelopes = b.b.net.inbox(&caller, &token).unwrap();
     let (to_b, at_b) = MockTransport::pair();
-    for e in &envelopes {
+    for (_, e) in &envelopes {
         to_b.send(e).unwrap();
     }
     let epoch = guard(&b.b.s).epoch;
@@ -745,7 +811,7 @@ fn sync_counts_arrivals_when_the_ack_fails() {
     assert_eq!(b.b.sync_via(&at_b, epoch).unwrap(), 0);
     assert!(at_b.poll().unwrap().is_empty(), "the duplicate is acked");
     // A stale epoch (a lock and unlock in between) stores nothing.
-    to_b.send(&envelopes[0]).unwrap();
+    to_b.send(&envelopes[0].1).unwrap();
     assert!(matches!(
         b.b.sync_via(&at_b, epoch.wrapping_sub(1)),
         Err(BrevError::Locked)
@@ -771,17 +837,17 @@ fn unlock_is_armed_until_confirmed() {
     let u = locked_user(NO_RELAY);
     let b = &u.b;
     assert!(
-        matches!(b.confirm_active(), Err(BrevError::Locked)),
+        matches!(b.confirm_active(clean()), Err(BrevError::Locked)),
         "nothing to confirm"
     );
     b.unlock(&u.dek, TEST_IDLE).unwrap();
     assert!(b.is_locked());
     assert!(matches!(b.contacts(), Err(BrevError::Locked)));
     assert!(matches!(b.me().map(drop), Err(BrevError::Locked)));
-    b.confirm_active().unwrap();
+    b.confirm_active(clean()).unwrap();
     assert!(!b.is_locked());
     assert!(b.contacts().unwrap().is_empty());
-    b.confirm_active().unwrap();
+    b.confirm_active(clean()).unwrap();
     assert!(!b.is_locked(), "idempotent while open");
     for idle in [0, MAX_IDLE_SECS + 1, u32::MAX] {
         assert!(matches!(b.unlock(&u.dek, idle), Err(BrevError::Malformed)));
@@ -798,7 +864,7 @@ fn an_unconfirmed_unlock_is_wiped_after_2_s() {
     let net = net();
     let (a, _b, b_at_a, _) = pair(&net);
     let kept = Arc::clone(&a.b.contacts().unwrap()[0].name);
-    a.b.prepare_send(b_at_a).unwrap();
+    prepare(&a, &b_at_a).unwrap();
     // Unlocking an open session arms it again, texts and all.
     a.b.unlock(&a.dek, TEST_IDLE).unwrap();
     let epoch = guard(&a.b.s).epoch;
@@ -812,8 +878,12 @@ fn an_unconfirmed_unlock_is_wiped_after_2_s() {
     {
         let s = guard(&a.b.s);
         assert!(s.me.is_locked() && s.ticket.is_none() && s.epoch != epoch);
+        assert!(s.compose.is_none(), "the compose session is gone too");
     }
-    assert!(matches!(a.b.confirm_active(), Err(BrevError::Locked)));
+    assert!(matches!(
+        a.b.confirm_active(clean()),
+        Err(BrevError::Locked)
+    ));
     assert!(a.b.is_locked());
 }
 
@@ -824,7 +894,7 @@ fn idle_wipes_and_activity_postpones_it() {
     let u = locked_user(NO_RELAY);
     let b = &u.b;
     b.unlock(&u.dek, 2).unwrap();
-    b.confirm_active().unwrap();
+    b.confirm_active(clean()).unwrap();
     // The empty own address: `Malformed` while open, `Locked` once closed.
     let kept = b.me().unwrap().address;
     assert!(matches!(kept.chunk(0), Err(BrevError::Malformed)));
@@ -855,11 +925,11 @@ fn a_passed_deadline_moves_the_epoch_before_anything_runs() {
     let (caller, token) = guard(&b.b.s).credentials().unwrap();
     let envelopes = b.b.net.inbox(&caller, &token).unwrap();
     let (to_b, at_b) = MockTransport::pair();
-    for e in &envelopes {
+    for (_, e) in &envelopes {
         to_b.send(e).unwrap();
     }
     b.b.unlock(&b.dek, 1).unwrap();
-    b.b.confirm_active().unwrap();
+    b.b.confirm_active(clean()).unwrap();
     // The epoch of a `sync` whose poll is under way.
     let epoch = guard(&b.b.s).epoch;
     let held = guard(&b.b.s);
@@ -935,42 +1005,40 @@ fn folder_and_file_modes_are_checked() {
     unlock_active(&Brev::open(arg, NO_RELAY.into()).unwrap(), &dek);
 }
 
-/// A letter needs environment class A: a report of class B or C, or none
-/// since the unlock, gives `Environment` with the fields short of class A,
-/// before any request, and leaves no ticket. Class A sends.
+/// A letter needs environment class A (docs/AUTHORSHIP.md §3.3): facts of
+/// class B, a software key (class C; a release build refuses it), or no
+/// compose session give `Environment` with the facts short of class A,
+/// before any request, and leave no ticket. Class A sends.
 #[cfg(not(feature = "allow-software-keys"))]
 #[test]
 fn prepare_send_needs_class_a() {
     let net = net();
     let (a, _b, b_at_a, _) = pair(&net);
-    let class_b = EnvironmentReport {
-        capture_excluded: false,
-        secure_input_active: false,
-        ..class_a()
-    };
-    let class_c = EnvironmentReport {
-        key_origin: KeyOrigin::Software,
-        ..class_a()
+    let class_b = Sample {
+        secure_input: false,
+        prevents_capture: false,
+        ..clean()
     };
     let before = net.server.requests();
-    for (report, want) in [
+    for (key, sample, want) in [
         (
-            Some(class_b),
-            vec![ReportField::CaptureExcluded, ReportField::SecureInputActive],
+            Some(KeyOrigin::SecureEnclave),
+            class_b,
+            vec!["capture-off", "secure-input"],
         ),
-        (Some(class_c), vec![ReportField::KeyOrigin]),
-        (None, vec![]),
+        (Some(KeyOrigin::Software), clean(), vec!["key"]),
+        (Some(KeyOrigin::Unknown), clean(), vec!["key"]),
+        (None, clean(), vec![]),
     ] {
-        // A lock forgets the last report; the unlock makes none.
+        // A lock forgets the compose session; the unlock makes none.
         a.b.lock();
-        a.b.unlock(&a.dek, TEST_IDLE).unwrap();
-        a.b.confirm_active().unwrap();
-        if let Some(r) = report {
-            a.b.report_environment(r).unwrap();
+        unlock_active(&a.b, &a.dek);
+        if let Some(key) = key {
+            a.b.compose_started(DESIGN, Some(true), key).unwrap();
         }
-        match a.b.prepare_send(b_at_a.clone()) {
-            Err(BrevError::Environment { failed }) => assert_eq!(failed, want, "{report:?}"),
-            other => panic!("{report:?}: {other:?}"),
+        match a.b.prepare_send(b_at_a.clone(), sample.clone()) {
+            Err(BrevError::Environment { failed }) => assert_eq!(failed, want, "{key:?}"),
+            other => panic!("{key:?}: {other:?}"),
         }
         assert!(guard(&a.b.s).ticket.is_none());
         assert!(matches!(
@@ -980,7 +1048,6 @@ fn prepare_send_needs_class_a() {
     }
     assert_eq!(net.server.requests(), before, "the relay saw no request");
     // Control: class A sends.
-    a.b.report_environment(class_a()).unwrap();
     send(&a, &b_at_a, b"s", b"x");
     assert_eq!(net.server.requests(), before + 2, "lookup and submit");
 }
@@ -1014,25 +1081,37 @@ fn the_sent_row_keeps_its_environment_class() {
     assert_eq!(classes(&b), [None]);
 }
 
-/// The report is taken only through the gate, and a lock forgets it.
+/// The compose calls go through the gate, and a lock forgets the session;
+/// `compose_closed` drops it, and the events count only in an open one.
 #[test]
-fn a_report_needs_the_gate_and_a_lock_forgets_it() {
+fn compose_needs_the_gate_and_a_lock_forgets_it() {
     let u = locked_user(NO_RELAY);
     let b = &u.b;
-    assert!(matches!(
-        b.report_environment(class_a()),
-        Err(BrevError::Locked)
-    ));
+    let start = || b.compose_started(DESIGN, None, KeyOrigin::SecureEnclave);
+    assert!(matches!(start(), Err(BrevError::Locked)));
     b.unlock(&u.dek, TEST_IDLE).unwrap();
-    assert!(
-        matches!(b.report_environment(class_a()), Err(BrevError::Locked)),
-        "armed"
+    assert!(matches!(start(), Err(BrevError::Locked)), "armed");
+    b.confirm_active(clean()).unwrap();
+    // Without a compose session the events count nowhere.
+    b.synthetic_dropped().unwrap();
+    b.paste_accepted().unwrap();
+    start().unwrap();
+    b.synthetic_dropped().unwrap();
+    b.synthetic_dropped().unwrap();
+    b.paste_accepted().unwrap();
+    let env = guard(&b.s).facts(&clean().into()).unwrap().1;
+    assert_eq!((env.blocked_input, env.pastes, env.admin), (2, 1, None));
+    // A second start starts again.
+    start().unwrap();
+    assert_eq!(
+        guard(&b.s).facts(&clean().into()).unwrap().1.blocked_input,
+        0
     );
-    b.confirm_active().unwrap();
-    b.report_environment(class_a()).unwrap();
-    assert!(guard(&b.s).report.is_some());
+    b.compose_closed().unwrap();
+    assert!(guard(&b.s).compose.is_none());
+    start().unwrap();
     b.lock();
-    assert!(guard(&b.s).report.is_none());
+    assert!(guard(&b.s).compose.is_none());
 }
 
 /// Design §8 brev-mail 7: each sync deletes the local invites past their
@@ -1076,4 +1155,409 @@ fn expired_local_invites_are_deleted() {
         .map(|i| *i.secret)
         .collect();
     assert!(secrets.contains(&[1; 16]) && secrets.contains(&[2; 16]));
+}
+
+/// B's one letter from A: its message id.
+fn received(b: &User, a_at_b: &[u8]) -> Vec<u8> {
+    let threads = b.b.threads(a_at_b.to_vec()).unwrap();
+    let thread = threads.last().unwrap().id.clone();
+    b.b.messages(thread).unwrap().remove(0).id
+}
+
+/// A's signed letter to `contact`, sealed and signed but not submitted: its
+/// envelope, for a transport of the test's own.
+fn signed_envelope(a: &User, contact: &[u8]) -> Envelope {
+    prepare(a, contact).unwrap();
+    let digest = sign_request(a, contact).unwrap();
+    seal(a, &digest).unwrap();
+    let s = guard(&a.b.s);
+    s.letter.as_ref().unwrap().envelope().clone()
+}
+
+/// Delivers `envelopes` to `b` through a `MockTransport` stamped at
+/// `received_at` (the system clock when `None`): how many arrived.
+fn deliver(b: &User, envelopes: &[&Envelope], received_at: Option<u64>) -> u32 {
+    let (to_b, at_b) = MockTransport::pair();
+    to_b.set_time(received_at);
+    for e in envelopes {
+        to_b.send(e).unwrap();
+    }
+    let epoch = guard(&b.b.s).epoch;
+    let arrived = b.b.sync_via(&at_b, epoch).unwrap();
+    assert!(at_b.poll().unwrap().is_empty(), "all acknowledged");
+    arrived
+}
+
+/// docs/AUTHORSHIP.md §8: a letter A → B in class A through a
+/// `MockTransport`. The facts come from raw samples and events, counted in
+/// Rust; the Secure Enclave key (a test key) signs the token and the
+/// envelope; B's core checks the token with A's pinned key and the
+/// transport's `received_at`, and stores the result: verified, class A,
+/// with the counts A's app saw. A's own copy has no proof.
+#[test]
+fn a_letter_round_trips_with_a_verified_class_a_token() {
+    let net = net();
+    let (a, b, b_at_a, a_at_b) = pair(&net);
+    compose(&a);
+    let seen = Sample {
+        processes: Some(names(&["launchd", "claude", "Brev"])),
+        windows: Some(vec![
+            Window {
+                owner_pid: 7,
+                layer: 0,
+            },
+            Window {
+                owner_pid: 8,
+                layer: 0,
+            },
+            Window {
+                owner_pid: own_pid(),
+                layer: 0,
+            },
+            Window {
+                owner_pid: 9,
+                layer: 25,
+            },
+        ]),
+        ..clean()
+    };
+    assert!(a.b.observe(seen).unwrap().is_empty());
+    for _ in 0..3 {
+        a.b.synthetic_dropped().unwrap();
+    }
+    a.b.prepare_send(b_at_a.clone(), clean()).unwrap();
+    let digest = sign_request(&a, &b_at_a).unwrap();
+    let envelope_digest =
+        a.b.attach_token_signature(a.key.sign_digest(&digest))
+            .unwrap();
+    assert_ne!(digest, envelope_digest, "two signatures, two digests");
+    a.b.attach_signature(a.key.sign_digest(&envelope_digest))
+        .unwrap();
+    let envelope = guard(&a.b.s).letter.as_ref().unwrap().envelope().clone();
+    assert_eq!(envelope.id().to_vec(), envelope_digest);
+    let sent = a.b.submit().unwrap();
+
+    assert_eq!(deliver(&b, &[&envelope], None), 1);
+    let proof = b.b.letter_proof(received(&b, &a_at_b)).unwrap().unwrap();
+    assert!(proof.seconds.is_some_and(|s| s <= 5), "{proof:?}");
+    assert_eq!(
+        proof,
+        Proof {
+            verified: true,
+            class: Some(1),
+            failed: Vec::new(),
+            attested: false,
+            admin: Some(true),
+            agents: Some(1),
+            windows: Some(2),
+            blocked_input: Some(3),
+            seconds: proof.seconds,
+            sip: Some(true),
+            sudo: Some(0),
+        }
+    );
+    // The letter itself arrived as it was written.
+    let m = received(&b, &a_at_b);
+    let body = b.b.open_body(m).unwrap();
+    assert_eq!(&body.chunk(0).unwrap()[..4], b"body");
+    // The sender's own copy: no proof shown back.
+    let own = a.b.messages(sent).unwrap().remove(0).id;
+    assert_eq!(a.b.letter_proof(own).unwrap(), None);
+    assert!(matches!(
+        b.b.letter_proof(vec![0; 16]),
+        Err(BrevError::NotFound)
+    ));
+}
+
+/// docs/AUTHORSHIP.md §6: a token tampered with inside a payload that the
+/// sender's key sealed and signed again. The letter is stored anyway, with
+/// the failed check: a signature one bit off fails `"signature"`; a good
+/// token moved to another letter fails `"content"`. Neither shows a class
+/// or the sender's counts. So does a letter the relay stamped a day late:
+/// `"iat"`.
+#[test]
+fn a_tampered_token_is_stored_as_not_verified() {
+    let net = net();
+    let (a, b, b_at_a, a_at_b) = pair(&net);
+    // A letter and its claims, as `sign_request` keeps them, and the
+    // signature the Enclave gives.
+    let pending = |a: &User| {
+        prepare(a, &b_at_a).unwrap();
+        let digest = sign_request(a, &b_at_a).unwrap();
+        let raw = sig::der_to_raw(&a.key.sign_digest(&digest)).unwrap();
+        (guard(&a.b.s).pending.take().unwrap(), raw)
+    };
+    let sealed = |draft: &Draft, token: &[u8]| {
+        let s = guard(&a.b.s);
+        let mut letter = s.me.seal_letter(draft, token).unwrap();
+        let der = a.key.sign_digest(&letter.digest());
+        s.me.attach_signature(&mut letter, &der).unwrap();
+        letter.envelope().clone()
+    };
+    let (first, raw1) = pending(&a);
+    let mut bad = raw1;
+    bad[40] ^= 1;
+    let flipped = sealed(&first.draft, &token::assemble(&first.payload, &bad));
+    let (second, _) = pending(&a);
+    let moved = sealed(&second.draft, &token::assemble(&first.payload, &raw1));
+    let (third, raw3) = pending(&a);
+    let late = sealed(&third.draft, &token::assemble(&third.payload, &raw3));
+    let (fourth, raw4) = pending(&a);
+    let good = sealed(&fourth.draft, &token::assemble(&fourth.payload, &raw4));
+
+    let day_later = unix_now() + brev_hand::verify::PAST + 60;
+    for (env, at, want) in [
+        (&flipped, None, "signature"),
+        (&moved, None, "content"),
+        (&late, Some(day_later), "iat"),
+    ] {
+        assert_eq!(deliver(&b, &[env], at), 1, "{want}: stored anyway");
+        let proof = b.b.letter_proof(received(&b, &a_at_b)).unwrap().unwrap();
+        assert_eq!(
+            proof,
+            Proof {
+                verified: false,
+                class: None,
+                failed: vec![want.to_owned()],
+                attested: false,
+                admin: None,
+                agents: None,
+                windows: None,
+                blocked_input: None,
+                seconds: None,
+                sip: None,
+                sudo: None,
+            },
+            "{want}"
+        );
+    }
+    // Control: a letter built the same way with its own token verifies.
+    assert_eq!(deliver(&b, &[&good], None), 1);
+    let proof = b.b.letter_proof(received(&b, &a_at_b)).unwrap().unwrap();
+    assert!(proof.verified && proof.class == Some(1), "{proof:?}");
+}
+
+/// docs/AUTHORSHIP.md §6 step 5: a replayed envelope, the same message id
+/// and token, is refused as `Duplicate` in the transaction that would store
+/// it, acknowledged, and not counted; the stored letter and its result stay.
+#[test]
+fn a_replayed_envelope_is_duplicate() {
+    let net = net();
+    let (a, b, b_at_a, a_at_b) = pair(&net);
+    let envelope = signed_envelope(&a, &b_at_a);
+    assert_eq!(deliver(&b, &[&envelope], None), 1);
+    let m = received(&b, &a_at_b);
+    // Again, also stamped later and twice in one poll.
+    assert_eq!(deliver(&b, &[&envelope], None), 0);
+    assert_eq!(
+        deliver(&b, &[&envelope, &envelope], Some(unix_now() + 60)),
+        0
+    );
+    assert!(matches!(
+        guard(&b.b.s).me.receive(&envelope, unix_now()),
+        Err(Error::Duplicate)
+    ));
+    let threads = b.b.threads(a_at_b.clone()).unwrap();
+    assert_eq!(threads.len(), 1);
+    assert_eq!(b.b.messages(threads[0].id.clone()).unwrap().len(), 1);
+    assert!(b.b.letter_proof(m).unwrap().unwrap().verified);
+    // The same through the relay: submitted, fetched as a duplicate,
+    // acknowledged.
+    a.b.submit().unwrap();
+    assert_eq!(net.relay.waiting().unwrap(), 1);
+    assert_eq!(b.b.sync().unwrap().letters, 0);
+    assert_eq!(net.relay.waiting().unwrap(), 0);
+}
+
+/// docs/AUTHORSHIP.md §4.3 (D-0109): a sample with a running `sudo` locks
+/// everything at once: every open text, the letter's plaintext waiting for
+/// its token signature, the compose session, the ticket; the plaintext
+/// counter is 0. The reasons come back. A failed read does not lock; SIP
+/// off does, and both reasons are named.
+#[test]
+fn a_sudo_sample_locks_everything() {
+    let net = net();
+    let (a, _b, b_at_a, _) = pair(&net);
+    let kept = a.b.contacts().unwrap();
+    prepare(&a, &b_at_a).unwrap();
+    sign_request(&a, &b_at_a).unwrap();
+    assert!(
+        crypto::live_plaintexts() >= 2,
+        "control: texts and the letter"
+    );
+    let sudo = Sample {
+        processes: Some(names(&["launchd", "sudo", "Brev"])),
+        ..clean()
+    };
+    assert_eq!(a.b.observe(sudo.clone()).unwrap(), [LockCause::Sudo]);
+    assert!(a.b.is_locked());
+    assert_eq!(crypto::live_plaintexts(), 0);
+    assert_eq!(kept[0].name.byte_len(), 0);
+    {
+        let s = guard(&a.b.s);
+        assert!(s.pending.is_none() && s.compose.is_none() && s.ticket.is_none());
+    }
+    assert!(matches!(a.b.observe(sudo), Err(BrevError::Locked)));
+    assert!(matches!(
+        a.b.attach_token_signature(vec![0x30]),
+        Err(BrevError::Locked)
+    ));
+
+    // A read that failed is no reason to lock (it gives class B).
+    unlock_active(&a.b, &a.dek);
+    let unread = Sample {
+        processes: None,
+        csr_config: None,
+        windows: None,
+        ..clean()
+    };
+    assert!(a.b.observe(unread).unwrap().is_empty());
+    assert!(!a.b.is_locked());
+    // SIP off locks too; with sudo, both are named.
+    let both = Sample {
+        processes: Some(names(&["su"])),
+        csr_config: Some(0x04),
+        ..clean()
+    };
+    assert_eq!(
+        a.b.observe(both).unwrap(),
+        [LockCause::Sudo, LockCause::SipOff]
+    );
+    assert!(a.b.is_locked());
+    // The samples of the send calls follow the same rule.
+    unlock_active(&a.b, &a.dek);
+    compose(&a);
+    let sip_off = Sample {
+        csr_config: Some(0x02),
+        ..clean()
+    };
+    match a.b.prepare_send(b_at_a.clone(), sip_off) {
+        Err(BrevError::Environment { failed }) => assert_eq!(failed, ["sip"]),
+        other => panic!("{other:?}"),
+    }
+    assert!(a.b.is_locked());
+    assert_eq!(net.relay.waiting().unwrap(), 0);
+}
+
+/// docs/AUTHORSHIP.md §4.3: the second unlock step takes a sample, and one
+/// with SIP off (or a `sudo`) refuses it, names the fact, and leaves
+/// everything locked; the unlock it answered is gone.
+#[test]
+fn confirm_active_with_sip_off_refuses_and_stays_locked() {
+    let u = locked_user(NO_RELAY);
+    let b = &u.b;
+    for (sample, fact) in [
+        (
+            Sample {
+                csr_config: Some(0x02),
+                ..clean()
+            },
+            "sip",
+        ),
+        (
+            Sample {
+                processes: Some(names(&["sudo"])),
+                ..clean()
+            },
+            "sudo",
+        ),
+    ] {
+        b.unlock(&u.dek, TEST_IDLE).unwrap();
+        match b.confirm_active(sample) {
+            Err(BrevError::Environment { failed }) => assert_eq!(failed, [fact]),
+            other => panic!("{fact}: {other:?}"),
+        }
+        assert!(b.is_locked());
+        assert!(matches!(b.contacts(), Err(BrevError::Locked)));
+        assert!(
+            matches!(b.confirm_active(clean()), Err(BrevError::Locked)),
+            "{fact}: the armed unlock is gone"
+        );
+        assert!(b.is_locked());
+    }
+    // Control: a clean sample opens.
+    unlock_active(b, &u.dek);
+    assert!(!b.is_locked());
+}
+
+/// docs/AUTHORSHIP.md §2.2, §4.1: a gap of more than 5 s in the measuring
+/// (here the compose session's clock moved 6 s on since the last sample)
+/// gives class B, so `sign_request` refuses after a `prepare_send` that
+/// passed, with `"max-gap"`. The letter from before (sealed, unsent) and
+/// the ticket are gone, and nothing decrypted is left.
+#[test]
+fn a_sample_gap_over_5_s_refuses_the_sign_request() {
+    let net = net();
+    let (a, _b, b_at_a, _) = pair(&net);
+    prepare(&a, &b_at_a).unwrap();
+    let d = sign_request(&a, &b_at_a).unwrap();
+    a.b.attach_token_signature(a.key.sign_digest(&d)).unwrap();
+    a.b.prepare_send(b_at_a.clone(), clean()).unwrap();
+    {
+        let mut s = guard(&a.b.s);
+        assert!(s.letter.is_some() && s.ticket.is_some());
+        let c = s.compose.as_mut().unwrap();
+        c.started = c.started.checked_sub(Duration::from_secs(6)).unwrap();
+    }
+    match sign_request(&a, &b_at_a) {
+        Err(BrevError::Environment { failed }) => assert_eq!(failed, ["max-gap"]),
+        other => panic!("{other:?}"),
+    }
+    {
+        let s = guard(&a.b.s);
+        assert!(s.pending.is_none() && s.letter.is_none() && s.ticket.is_none());
+    }
+    assert_eq!(crypto::live_plaintexts(), 0);
+    assert!(matches!(a.b.submit(), Err(BrevError::NotFound)));
+    // The gap stays in this compose session's facts: prepare refuses too.
+    assert!(matches!(
+        a.b.prepare_send(b_at_a.clone(), clean()),
+        Err(BrevError::Environment { .. })
+    ));
+    // Samples every 2 s leave no such gap: control, a fresh session sends.
+    compose(&a);
+    assert!(a.b.observe(clean()).unwrap().is_empty());
+    send(&a, &b_at_a, b"s", b"x");
+    assert_eq!(net.relay.waiting().unwrap(), 1);
+}
+
+/// docs/AUTHORSHIP.md §3.2: the token signature must be the own key's over
+/// the digest `sign_request` gave. Anything else (another key, another
+/// digest, the envelope-style signature over the claims, not DER) is
+/// `Signing`, and the letter, its plaintext and the ticket are forgotten.
+#[test]
+fn a_wrong_token_signature_is_signing_and_forgets_the_letter() {
+    let net = net();
+    let (a, _b, b_at_a, _) = pair(&net);
+    // A wrong DER signature, from the user, the token digest and the claims.
+    type Wrong = fn(&User, &[u8], &[u8]) -> Vec<u8>;
+    let wrong: [Wrong; 4] = [
+        |_, d, _| TestKey::new().sign_digest(d),
+        |a, _, _| a.key.sign_digest(&[0; 32]),
+        |a, _, payload| a.key.sign_der_high_s(payload),
+        |_, _, _| vec![0x30, 0x02, 0x01],
+    ];
+    for (i, der) in wrong.into_iter().enumerate() {
+        prepare(&a, &b_at_a).unwrap();
+        let d = sign_request(&a, &b_at_a).unwrap();
+        let payload = guard(&a.b.s).pending.as_ref().unwrap().payload.clone();
+        assert!(
+            matches!(
+                a.b.attach_token_signature(der(&a, &d, &payload)),
+                Err(BrevError::Signing)
+            ),
+            "{i}"
+        );
+        {
+            let s = guard(&a.b.s);
+            assert!(s.pending.is_none() && s.letter.is_none() && s.ticket.is_none());
+        }
+        assert_eq!(crypto::live_plaintexts(), 0, "{i}");
+        assert!(matches!(
+            a.b.attach_token_signature(a.key.sign_digest(&d)),
+            Err(BrevError::NotFound)
+        ));
+    }
+    assert_eq!(net.relay.waiting().unwrap(), 0);
+    assert!(a.b.threads(b_at_a).unwrap().is_empty());
 }

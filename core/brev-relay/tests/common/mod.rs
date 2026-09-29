@@ -419,15 +419,20 @@ impl Relayed {
         assert_eq!(self.answer(approver, asker, true), StatusCode::NO_CONTENT);
     }
 
-    /// `who`'s inbox answer, parsed.
+    /// `who`'s inbox answer, parsed: the wires.
     pub fn inbox(&self, who: &Identity) -> Vec<Vec<u8>> {
+        self.inbox_at(who).into_iter().map(|(_, w)| w).collect()
+    }
+
+    /// `who`'s inbox answer, parsed: each wire with its `received_at`.
+    pub fn inbox_at(&self, who: &Identity) -> Vec<(u64, Vec<u8>)> {
         let (status, answer) = self.post("/v1/inbox", who.request(&[]));
         assert_eq!(status, StatusCode::OK);
         assert!(answer.len() <= INBOX_ANSWER_MAX);
         body::parse_inbox_answer(&answer)
             .unwrap()
             .into_iter()
-            .map(<[u8]>::to_vec)
+            .map(|(at, w)| (at, w.to_vec()))
             .collect()
     }
 

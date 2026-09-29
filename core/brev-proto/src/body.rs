@@ -609,36 +609,42 @@ pub const INBOX_MAX: usize = 16;
 /// waiting letters is never empty.
 pub const INBOX_MAX_BYTES: usize = 4 << 20;
 
-/// Longest inbox answer: the count, a length per envelope, the envelopes.
-pub const INBOX_ANSWER_MAX: usize = 2 + INBOX_MAX * 4 + INBOX_MAX_BYTES;
+/// Longest inbox answer: the count, per envelope its arrival time and its
+/// length, the envelopes.
+pub const INBOX_ANSWER_MAX: usize = 2 + INBOX_MAX * (8 + 4) + INBOX_MAX_BYTES;
 
-/// An inbox answer (design §2.4): count (u16 BE) ‖ per envelope its length
-/// (u32 BE) ‖ its wire bytes. Refuses more than [`INBOX_MAX`] envelopes or
-/// more than [`INBOX_MAX_BYTES`] of them; the relay picks what fits.
-pub fn inbox_answer(wires: &[Vec<u8>]) -> Result<Vec<u8>, BodyError> {
-    let bytes: usize = wires.iter().map(Vec::len).sum();
-    let count = u16::try_from(wires.len()).map_err(|_| BodyError::Count)?;
-    if wires.len() > INBOX_MAX {
+/// An inbox answer (design §2.4; docs/AUTHORSHIP.md §2.5): count (u16 BE) ‖
+/// per envelope the relay's `received_at` (u64 BE, Unix seconds, set when
+/// it first stored the envelope) ‖ its length (u32 BE) ‖ its wire bytes.
+/// `received_at` is outside every signed byte. Refuses more than
+/// [`INBOX_MAX`] envelopes or more than [`INBOX_MAX_BYTES`] of them; the
+/// relay picks what fits.
+pub fn inbox_answer(waiting: &[(u64, Vec<u8>)]) -> Result<Vec<u8>, BodyError> {
+    let bytes: usize = waiting.iter().map(|(_, wire)| wire.len()).sum();
+    let count = u16::try_from(waiting.len()).map_err(|_| BodyError::Count)?;
+    if waiting.len() > INBOX_MAX {
         return Err(BodyError::Count);
     }
     if bytes > INBOX_MAX_BYTES {
         return Err(BodyError::Length);
     }
-    let mut out = Vec::with_capacity(2 + 4 * wires.len() + bytes);
+    let mut out = Vec::with_capacity(2 + 12 * waiting.len() + bytes);
     out.extend_from_slice(&count.to_be_bytes());
-    for wire in wires {
+    for (received_at, wire) in waiting {
         let len = u32::try_from(wire.len()).map_err(|_| BodyError::Length)?;
+        out.extend_from_slice(&received_at.to_be_bytes());
         out.extend_from_slice(&len.to_be_bytes());
         out.extend_from_slice(wire);
     }
     Ok(out)
 }
 
-/// Parses an inbox answer into the wire envelopes it frames, borrowing it:
-/// at most [`INBOX_MAX`] of them and [`INBOX_MAX_BYTES`] in all, every
-/// length inside the body, no byte after the last. Each envelope still goes
-/// through [`crate::Envelope::from_wire`].
-pub fn parse_inbox_answer(body: &[u8]) -> Result<Vec<&[u8]>, BodyError> {
+/// Parses an inbox answer into each envelope's `received_at` and the wire
+/// bytes it frames, borrowing them: at most [`INBOX_MAX`] of them and
+/// [`INBOX_MAX_BYTES`] in all, every length inside the body, no byte after
+/// the last. Each envelope still goes through
+/// [`crate::Envelope::from_wire`].
+pub fn parse_inbox_answer(body: &[u8]) -> Result<Vec<(u64, &[u8])>, BodyError> {
     let (count, mut rest) = body.split_first_chunk::<2>().ok_or(BodyError::Length)?;
     let count = usize::from(u16::from_be_bytes(*count));
     if count > INBOX_MAX {
@@ -647,11 +653,12 @@ pub fn parse_inbox_answer(body: &[u8]) -> Result<Vec<&[u8]>, BodyError> {
     let mut out = Vec::with_capacity(count);
     let mut bytes = 0usize;
     for _ in 0..count {
-        let (len, tail) = rest.split_first_chunk::<4>().ok_or(BodyError::Length)?;
+        let (received_at, tail) = rest.split_first_chunk::<8>().ok_or(BodyError::Length)?;
+        let (len, tail) = tail.split_first_chunk::<4>().ok_or(BodyError::Length)?;
         let len = usize::try_from(u32::from_be_bytes(*len)).map_err(|_| BodyError::Length)?;
         let (wire, tail) = tail.split_at_checked(len).ok_or(BodyError::Length)?;
         bytes += len;
-        out.push(wire);
+        out.push((u64::from_be_bytes(*received_at), wire));
         rest = tail;
     }
     if !rest.is_empty() || bytes > INBOX_MAX_BYTES {
@@ -1031,7 +1038,7 @@ mod tests {
     }
 
     /// The lookup answer (97 bytes, valid key) and the inbox framing (count,
-    /// lengths, caps, nothing after the last envelope).
+    /// arrival times, lengths, caps, nothing after the last envelope).
     #[test]
     fn answer_encodings() {
         let key = TestKey::new(1);
@@ -1050,14 +1057,24 @@ mod tests {
         bad[64] ^= 1; // off the curve
         assert_eq!(parse_lookup_answer(&bad), Err(BodyError::Key));
 
-        let wires: Vec<Vec<u8>> = (0..3u8).map(|i| vec![i; 430 + usize::from(i)]).collect();
-        let body = inbox_answer(&wires).unwrap();
-        assert_eq!(body.len(), 2 + 3 * 4 + 430 + 431 + 432);
+        let waiting: Vec<(u64, Vec<u8>)> = (0..3u8)
+            .map(|i| (1_790_000_000 + u64::from(i), vec![i; 430 + usize::from(i)]))
+            .collect();
+        let body = inbox_answer(&waiting).unwrap();
+        assert_eq!(body.len(), 2 + 3 * 12 + 430 + 431 + 432);
         assert_eq!(&body[..2], &[0, 3]);
-        assert_eq!(&body[2..6], &430u32.to_be_bytes());
-        assert_eq!(&body[6..436], &wires[0][..]);
+        assert_eq!(&body[2..10], &1_790_000_000u64.to_be_bytes());
+        assert_eq!(&body[10..14], &430u32.to_be_bytes());
+        assert_eq!(&body[14..444], &waiting[0].1[..]);
+        assert_eq!(&body[444..452], &1_790_000_001u64.to_be_bytes());
         let parsed = parse_inbox_answer(&body).unwrap();
-        assert_eq!(parsed, wires.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        assert_eq!(
+            parsed,
+            waiting
+                .iter()
+                .map(|(at, w)| (*at, w.as_slice()))
+                .collect::<Vec<_>>()
+        );
         assert_eq!(inbox_answer(&[]).unwrap(), [0, 0]);
         assert_eq!(parse_inbox_answer(&[0, 0]), Ok(Vec::new()));
 
@@ -1071,27 +1088,29 @@ mod tests {
         );
         // A length field pointing past the end.
         let mut bad = body.clone();
-        bad[2..6].copy_from_slice(&u32::MAX.to_be_bytes());
+        bad[10..14].copy_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(parse_inbox_answer(&bad), Err(BodyError::Length));
 
         // Caps: 16 envelopes and 4 MiB, on both sides.
-        let many = vec![vec![0u8; 430]; INBOX_MAX + 1];
+        let many = vec![(0u64, vec![0u8; 430]); INBOX_MAX + 1];
         assert!(inbox_answer(&many[..INBOX_MAX]).is_ok());
         assert_eq!(inbox_answer(&many), Err(BodyError::Count));
         let mut seventeen = inbox_answer(&many[..INBOX_MAX]).unwrap();
         seventeen[..2].copy_from_slice(&17u16.to_be_bytes());
+        seventeen.extend_from_slice(&0u64.to_be_bytes());
         seventeen.extend_from_slice(&430u32.to_be_bytes());
         seventeen.extend_from_slice(&[0; 430]);
         assert_eq!(parse_inbox_answer(&seventeen), Err(BodyError::Count));
-        let full = vec![vec![1u8; INBOX_MAX_BYTES / 4]; 4];
+        let full = vec![(u64::MAX, vec![1u8; INBOX_MAX_BYTES / 4]); 4];
         let body = inbox_answer(&full).unwrap();
-        assert_eq!(body.len(), 2 + 4 * 4 + INBOX_MAX_BYTES);
+        assert_eq!(body.len(), 2 + 4 * 12 + INBOX_MAX_BYTES);
         assert!(body.len() <= INBOX_ANSWER_MAX);
         assert_eq!(parse_inbox_answer(&body).unwrap().len(), 4);
-        let over = [full.clone(), vec![vec![1u8]]].concat();
+        let over = [full.clone(), vec![(0, vec![1u8])]].concat();
         assert_eq!(inbox_answer(&over), Err(BodyError::Length));
         let mut body = body;
         body[..2].copy_from_slice(&5u16.to_be_bytes());
+        body.extend_from_slice(&0u64.to_be_bytes());
         body.extend_from_slice(&1u32.to_be_bytes());
         body.push(1);
         assert_eq!(parse_inbox_answer(&body), Err(BodyError::Length));

@@ -5,10 +5,12 @@
 //! Content goes in only as `&[u8]` plus a used length (zero-copy
 //! `ForeignBytes`) and comes out only through [`OpenText::chunk`], in chunks
 //! of exactly [`CHUNK`] bytes. No `String` carries content in either
-//! direction (the only ones are the store directory and the relay URL),
-//! errors are unit variants but `Environment` (the names of report fields),
-//! and records carry ids, codes, metadata and the app's environment report
-//! only. Invite codes cross as ASCII bytes, addresses as [`OpenText`].
+//! direction (the only ones are the store directory, the relay URL, the
+//! process names of a [`Sample`] and the fixed names of facts and checks),
+//! errors are unit variants but `Environment` (the names of facts), and
+//! records carry ids, codes, metadata, the app's raw samples and a letter's
+//! [`Proof`] only. Invite codes cross as ASCII bytes, addresses as
+//! [`OpenText`].
 //!
 //! No call that takes content does network I/O, and no network call takes
 //! content (§3.2). Every network call runs with the session mutex released,
@@ -26,27 +28,38 @@
 //! itself when idle (docs/VAULT_SPLIT_PLAN.md §5d, §5e): its timer thread,
 //! or the first call to take the session mutex after the deadline, wipes.
 //!
-//! A letter goes out only in environment class A, from the app's report of
-//! its own defences (`report_environment`, docs/VAULT_SPLIT_PLAN.md §6). The
-//! report is the app's own word: until attestation it catches bugs in the
-//! app, not attackers (CLAUDE.md §2).
+//! Hand (docs/AUTHORSHIP.md, D-0107 to D-0109): facts, not flags. While
+//! unlocked the app hands over raw [`Sample`]s (`observe`, every 2 s), and a
+//! compose session (`compose_started` to `compose_closed`) keeps a
+//! brev-hand `FactLog` of them and of the input events. A sample that shows
+//! a running `sudo` or `su`, or SIP off, locks everything at once. A letter
+//! goes out only in environment class A, computed here from the facts and
+//! the key origin the app names, and it carries a token that the identity
+//! key signs with the same Touch ID as the envelope: `sign_request` gives
+//! the token's digest, `attach_token_signature` seals the letter with the
+//! token and gives the envelope's. The app has no call that sets a count or
+//! a class. The facts are still the app's own word: until attestation they
+//! catch bugs in the app, not attackers (CLAUDE.md §2). A received letter's
+//! token is checked and its result stored; [`Brev::letter_proof`] reads it
+//! for the badge.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use brev_hand::{lock_reasons, token, Claims, Env, FactLog, LockReason, Verification};
 use brev_proto::body::{self, is_valid_address, EventKind, ADDRESS_MAX};
 use brev_proto::invite::{self, MAX_CODE, SECRET_LEN};
 use brev_proto::SIG_LEN;
-use brev_vault::{classify, failed_fields, EnvironmentClass, Holder, Platform, Text, Timer};
+use brev_vault::{EnvironmentClass, Holder, Text, Timer};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, Plaintext};
 use crate::relay::{Incoming, Mailbox, RelayTransport};
 use crate::store::{
-    is_permanent, today, Letter, APPROVED_ME, BLOCKED, BLOCK_UNTOLD, MAIL, VERIFIED,
+    is_permanent, today, Draft, Letter, APPROVED_ME, BLOCKED, BLOCK_UNTOLD, MAIL, VERIFIED,
 };
 use crate::transport::{NetError, Transport};
 use crate::{ContactId, Core, Error, IdentityId, MessageId, PublicBundle, ThreadId};
@@ -84,8 +97,8 @@ const SEND_THRESHOLD: EnvironmentClass = if cfg!(feature = "allow-software-keys"
 static SOFTWARE_KEYS_MARKER: [u8; 26] = *b"BREV-ALLOW-SOFTWARE-KEYS-1";
 
 /// Errors across the FFI. Unit variants, but `Environment`, which carries
-/// the names of report fields, so nothing but a variant index and those
-/// names ever crosses. Each unit variant is the [`Error`] of the same name.
+/// the fixed names of facts, so nothing but a variant index and those names
+/// ever crosses. Each unit variant is the [`Error`] of the same name.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum BrevError {
     /// The session is locked, or a text was closed, or a lock came while
@@ -113,7 +126,8 @@ pub enum BrevError {
     /// row is damaged.
     #[error("not a brev store")]
     Corrupt,
-    /// The signature is not DER or not by the own identity key.
+    /// The signature is not DER, or not by the own identity key, or not
+    /// over the digest it answers.
     #[error("signing failed")]
     Signing,
     /// The OS random number generator failed.
@@ -145,13 +159,18 @@ pub enum BrevError {
     /// safe to decrypt in (a `DYLD_*` variable, no `MallocScribble=1`).
     #[error("unsafe")]
     Unsafe,
-    /// `prepare_send`: the app's environment report since the unlock is
-    /// below the class sending needs (A), so nothing was sent.
+    /// `prepare_send`, `sign_request`: the letter's facts are below the
+    /// class sending needs (A), or no compose session is open, so nothing
+    /// was signed or sent. `confirm_active`, `prepare_send`, `sign_request`:
+    /// the sample shows a reason to lock (docs/AUTHORSHIP.md §4.3), and
+    /// everything is locked now.
     #[error("environment")]
     Environment {
-        /// The report's fields short of class A, in field order; empty if
-        /// there was no report since the unlock.
-        failed: Vec<ReportField>,
+        /// The token's names of the facts short of class A, in token order
+        /// (`"key"` for a key that is not in hardware), or of the facts
+        /// that locked (`"sudo"`, `"sip"`); empty without a compose
+        /// session.
+        failed: Vec<String>,
     },
     // Phase 4 (docs/PHASE4_DESIGN.md §5.4): appended, so no variant index
     // above moves.
@@ -239,82 +258,161 @@ impl From<KeyOrigin> for brev_vault::KeyOrigin {
     }
 }
 
-/// The app's report on its own defences, made right before `prepare_send`
-/// (brev-vault's `EnvironmentReport`). Flags only, no content.
+/// One on-screen window, as `CGWindowListCopyWindowInfo` lists it
+/// (brev-hand's `Window`). No title, no content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct EnvironmentReport {
-    /// Where the identity key lives.
-    pub key_origin: KeyOrigin,
-    /// This unlock unwrapped the DEK with Touch ID.
-    pub biometric_used: bool,
-    /// Every window is excluded from capture and every content layer
-    /// prevents capture.
-    pub capture_excluded: bool,
-    /// Secure event input is on.
-    pub secure_input_active: bool,
-    /// The app drops synthetic input.
-    pub synthetic_input_rejected: bool,
-    /// The content views expose nothing to accessibility.
-    pub accessibility_opaque: bool,
-    /// No Copy, Cut or Paste reaches content.
-    pub pasteboard_disabled: bool,
+pub struct Window {
+    /// The owning process.
+    pub owner_pid: i32,
+    /// The window layer; 0 is an ordinary app window.
+    pub layer: i32,
 }
 
-impl From<EnvironmentReport> for brev_vault::EnvironmentReport {
-    fn from(r: EnvironmentReport) -> Self {
-        brev_vault::EnvironmentReport {
-            key_origin: r.key_origin.into(),
-            biometric_used: r.biometric_used,
-            capture_excluded: r.capture_excluded,
-            secure_input_active: r.secure_input_active,
-            synthetic_input_rejected: r.synthetic_input_rejected,
-            accessibility_opaque: r.accessibility_opaque,
-            pasteboard_disabled: r.pasteboard_disabled,
+/// What the app read at one moment (brev-hand's `Sample`): raw
+/// observations, never a count or a verdict. `None` is a read that failed.
+/// Process names are kept only while they are counted.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Sample {
+    /// `IsSecureEventInputEnabled()`.
+    pub secure_input: bool,
+    /// The compose window's `sharingType` is `.none`.
+    pub sharing_none: bool,
+    /// The protected content layer has `preventsCapture`.
+    pub prevents_capture: bool,
+    /// `csr_get_active_config`.
+    pub csr_config: Option<u32>,
+    /// The name of every process (`sysctl KERN_PROC_ALL`).
+    pub processes: Option<Vec<String>>,
+    /// Every on-screen window.
+    pub windows: Option<Vec<Window>>,
+}
+
+impl From<Sample> for brev_hand::Sample {
+    fn from(s: Sample) -> Self {
+        brev_hand::Sample {
+            secure_input: s.secure_input,
+            sharing_none: s.sharing_none,
+            prevents_capture: s.prevents_capture,
+            csr_config: s.csr_config,
+            processes: s.processes,
+            windows: s.windows.map(|w| {
+                w.into_iter()
+                    .map(|w| brev_hand::Window {
+                        owner_pid: w.owner_pid,
+                        layer: w.layer,
+                    })
+                    .collect()
+            }),
         }
     }
 }
 
-/// A field of [`EnvironmentReport`], as `BrevError::Environment` names it
-/// (brev-vault's `ReportField`).
+/// What the app is built to do, which it cannot measure (brev-hand's
+/// `Design`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Design {
+    /// Content views expose no text to Accessibility.
+    pub ax_opaque: bool,
+    /// No copy, cut, paste or drag of content.
+    pub pasteboard_off: bool,
+    /// Events from another process are dropped.
+    pub input_filter: bool,
+}
+
+impl From<Design> for brev_hand::Design {
+    fn from(d: Design) -> Self {
+        brev_hand::Design {
+            ax_opaque: d.ax_opaque,
+            pasteboard_off: d.pasteboard_off,
+            input_filter: d.input_filter,
+        }
+    }
+}
+
+/// Why a sample locked Brev (docs/AUTHORSHIP.md §4.3; brev-hand's
+/// `LockReason`). `BrevError::Environment` names the same facts `"sudo"`
+/// and `"sip"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum ReportField {
-    /// `key_origin`: not the Secure Enclave (or a TPM).
-    KeyOrigin,
-    /// `biometric_used`.
-    BiometricUsed,
-    /// `capture_excluded`.
-    CaptureExcluded,
-    /// `secure_input_active`.
-    SecureInputActive,
-    /// `synthetic_input_rejected`.
-    SyntheticInputRejected,
-    /// `accessibility_opaque`.
-    AccessibilityOpaque,
-    /// `pasteboard_disabled`.
-    PasteboardDisabled,
+pub enum LockCause {
+    /// A `sudo` or `su` process runs.
+    Sudo,
+    /// A SIP bit that guards Brev is off.
+    SipOff,
 }
 
-impl From<brev_vault::ReportField> for ReportField {
-    fn from(f: brev_vault::ReportField) -> Self {
-        use brev_vault::ReportField as V;
-        match f {
-            V::KeyOrigin => ReportField::KeyOrigin,
-            V::BiometricUsed => ReportField::BiometricUsed,
-            V::CaptureExcluded => ReportField::CaptureExcluded,
-            V::SecureInputActive => ReportField::SecureInputActive,
-            V::SyntheticInputRejected => ReportField::SyntheticInputRejected,
-            V::AccessibilityOpaque => ReportField::AccessibilityOpaque,
-            V::PasteboardDisabled => ReportField::PasteboardDisabled,
+impl From<LockReason> for LockCause {
+    fn from(r: LockReason) -> Self {
+        match r {
+            LockReason::Sudo => LockCause::Sudo,
+            LockReason::SipOff => LockCause::SipOff,
         }
     }
 }
 
-/// The app's report, as the platform the vault classifies.
-struct Reported(brev_vault::EnvironmentReport);
+/// The token's name of the fact behind a lock reason.
+fn lock_fact(r: LockReason) -> &'static str {
+    match r {
+        LockReason::Sudo => "sudo",
+        LockReason::SipOff => "sip",
+    }
+}
 
-impl Platform for Reported {
-    fn environment_report(&self) -> brev_vault::EnvironmentReport {
-        self.0
+/// What a received letter's authorship token showed (docs/AUTHORSHIP.md
+/// §6), for the badge and its detail view. Content-free: flags, fixed
+/// names and counts.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Proof {
+    /// Every check passed: «Skrevet i Brev · klasse …». Otherwise
+    /// «Ikke verifisert».
+    pub verified: bool,
+    /// The class, when verified: 1 = A, 2 = B, 3 = C.
+    pub class: Option<u8>,
+    /// What failed, in the order of the checks: `"token"` (its form),
+    /// `"signature"`, `"app-attest"`, `"content"`, `"iat"` (its time), and
+    /// for the class check the facts that do not support the claimed class
+    /// (`"sip"`, `"key"`, …). Empty when verified.
+    pub failed: Vec<String>,
+    /// Apple's App Attest vouched for the app: always false on Mac
+    /// (D-0108), «Appen er ikke bekreftet av Apple».
+    pub attested: bool,
+    /// The sender's app reported: the user is an admin. Like every number
+    /// below, only when verified, and `None` for a fact it could not read.
+    pub admin: Option<bool>,
+    /// Known AI programs running.
+    pub agents: Option<u32>,
+    /// Other apps' windows on screen.
+    pub windows: Option<u32>,
+    /// Synthetic events the filter dropped.
+    pub blocked_input: Option<u32>,
+    /// Seconds from opening compose to sending.
+    pub seconds: Option<u32>,
+    /// SIP on.
+    pub sip: Option<bool>,
+    /// `sudo` or `su` processes.
+    pub sudo: Option<u32>,
+}
+
+impl From<&Verification> for Proof {
+    fn from(v: &Verification) -> Self {
+        let failed = v
+            .outcomes
+            .iter()
+            .flat_map(|o| o.failed.iter().map(|&n| n.to_owned()))
+            .collect();
+        let env = v.claims.as_ref().filter(|_| v.passed()).map(|c| c.env);
+        Proof {
+            verified: v.passed(),
+            class: v.class().and_then(|c| u8::try_from(c.code()).ok()),
+            failed,
+            attested: false,
+            admin: env.and_then(|e| e.admin),
+            agents: env.and_then(|e| e.agents),
+            windows: env.and_then(|e| e.windows),
+            blocked_input: env.map(|e| e.blocked_input),
+            seconds: env.map(|e| e.seconds),
+            sip: env.and_then(|e| e.sip),
+            sudo: env.and_then(|e| e.sudo),
+        }
     }
 }
 
@@ -506,22 +604,54 @@ struct Session {
     /// Bumped by every lock. A call that released the mutex for the network
     /// and finds another epoch when it takes it again stores nothing.
     epoch: u64,
-    /// The contact `prepare_send` found with its pinned key just now, and
-    /// the environment class it was allowed in; used once by
-    /// `sign_request`.
-    ticket: Option<(ContactId, EnvironmentClass)>,
+    /// The contact `prepare_send` found with its pinned key just now; used
+    /// once by `sign_request`.
+    ticket: Option<ContactId>,
+    /// The open compose session's facts (docs/AUTHORSHIP.md §3.1).
+    compose: Option<Compose>,
+    /// The letter between `sign_request` and `attach_token_signature`: its
+    /// plaintext and the claims whose digest is being signed.
+    pending: Option<Pending>,
     /// The one letter being sent (ciphertext only): sealed by
-    /// `sign_request`, signed by `attach_signature`, stored by `submit`.
+    /// `attach_token_signature`, signed by `attach_signature`, stored by
+    /// `submit`.
     letter: Option<Letter>,
     /// The registration being made: its unsigned body and the address.
     registration: Option<Registering>,
-    /// The app's last environment report since the unlock.
-    report: Option<Reported>,
     /// The contact requests of the last sync from addresses that are not
     /// contacts (docs/PHASE4_DESIGN.md §5.1).
     requests: Vec<Peer>,
     /// The invite code `open_invite` checked last, until it is used.
     invite: Option<Opened>,
+}
+
+/// A compose session: the fact log, the monotonic clock its times (ms) are
+/// read from, and the key origin the app named.
+struct Compose {
+    log: FactLog,
+    started: Instant,
+    key: brev_vault::KeyOrigin,
+}
+
+impl Compose {
+    /// Milliseconds since the session started.
+    fn now(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The facts as they stand with `sample`, taken now; the log goes on.
+    fn facts(&self, sample: &brev_hand::Sample) -> Env {
+        self.log.clone().finish(self.now(), sample)
+    }
+}
+
+/// A letter whose token is being signed (docs/AUTHORSHIP.md §3.2): its
+/// draft (the plaintext, a vault `Plaintext` that a lock wipes), the claims
+/// as signed, and their class.
+struct Pending {
+    draft: Draft,
+    payload: Vec<u8>,
+    class: EnvironmentClass,
 }
 
 struct Registering {
@@ -596,17 +726,93 @@ impl Brev {
         r
     }
 
-    /// The second step of an unlock, once the app shows the mail: within
-    /// 2 s of `unlock` returning, the session opens until it has been idle
-    /// for `idle_secs`. Later, or while locked: everything is locked, and
-    /// `Locked`. Idempotent while open.
-    pub fn confirm_active(&self) -> Result<(), BrevError> {
+    /// The second step of an unlock, once the app shows the mail, with a
+    /// sample taken just now: within 2 s of `unlock` returning, the session
+    /// opens until it has been idle for `idle_secs`. A sample with a reason
+    /// to lock (a running `sudo` or `su`, SIP off; docs/AUTHORSHIP.md §4.3)
+    /// locks everything and gives `Environment` naming it (`"sudo"`,
+    /// `"sip"`). Later, or while locked: everything is locked, and `Locked`.
+    /// Idempotent while open.
+    pub fn confirm_active(&self, sample: Sample) -> Result<(), BrevError> {
         let mut s = self.session()?;
+        s.lock_if_unsafe(&sample.into())?;
         if s.me.confirm_active().is_err() {
             s.lock_all();
             return Err(BrevError::Locked);
         }
         Ok(())
+    }
+
+    /// A sample of the Mac while unlocked; the app hands one over every
+    /// 2 s (docs/AUTHORSHIP.md §4.3). A running `sudo` or `su`, or SIP off,
+    /// locks everything at once, as `lock` does, and the reasons come back
+    /// so the app can say why; otherwise the list is empty, and an open
+    /// compose session counts the sample. A read that failed (`None`) is no
+    /// reason to lock. `Locked` while locked.
+    pub fn observe(&self, sample: Sample) -> Result<Vec<LockCause>, BrevError> {
+        let mut s = self.session()?;
+        if s.me.is_locked() {
+            return Err(BrevError::Locked);
+        }
+        let sample = brev_hand::Sample::from(sample);
+        let reasons = lock_reasons(&sample);
+        if !reasons.is_empty() {
+            s.lock_all();
+            return Ok(reasons.into_iter().map(LockCause::from).collect());
+        }
+        if let Some(c) = s.compose.as_mut() {
+            let now = c.now();
+            c.log.sample(now, &sample);
+        }
+        Ok(Vec::new())
+    }
+
+    /// The compose sheet opened: a new fact log starts, on a monotonic
+    /// clock, with `design`, `admin` (read once; `None` if the read failed)
+    /// and the identity key's origin. Own windows are this process's
+    /// (`std::process::id`). A second call starts it again. `Locked` while
+    /// locked.
+    pub fn compose_started(
+        &self,
+        design: Design,
+        admin: Option<bool>,
+        key_origin: KeyOrigin,
+    ) -> Result<(), BrevError> {
+        let mut s = self.session()?;
+        if s.me.is_locked() {
+            return Err(BrevError::Locked);
+        }
+        let own = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+        s.compose = Some(Compose {
+            log: FactLog::start(0, own, design.into(), admin),
+            started: Instant::now(),
+            key: key_origin.into(),
+        });
+        Ok(())
+    }
+
+    /// The compose sheet closed: its fact log is dropped. `Locked` while
+    /// locked (a lock drops it too).
+    pub fn compose_closed(&self) -> Result<(), BrevError> {
+        let mut s = self.session()?;
+        if s.me.is_locked() {
+            return Err(BrevError::Locked);
+        }
+        s.compose = None;
+        Ok(())
+    }
+
+    /// The input filter dropped a synthetic event while composing: counted
+    /// in the open compose session, if any. `Locked` while locked.
+    pub fn synthetic_dropped(&self) -> Result<(), BrevError> {
+        self.count_event(FactLog::synthetic_dropped)
+    }
+
+    /// A paste reached the content while composing: counted in the open
+    /// compose session, if any. Brev never calls it (paste is blocked); an
+    /// app on the SDK that allows paste must. `Locked` while locked.
+    pub fn paste_accepted(&self) -> Result<(), BrevError> {
+        self.count_event(FactLog::paste_accepted)
     }
 
     /// A human used the app just now: an open session's idle deadline
@@ -618,8 +824,10 @@ impl Brev {
         self.timer.clock().note_activity();
     }
 
-    /// Closes every open text, forgets the letter and the registration
-    /// being made, and locks the store (its DEK is zeroed). Idempotent;
+    /// Closes every open text, forgets the letter (its plaintext wiped,
+    /// while its token is signed), the compose session and the
+    /// registration being made, and locks the store (its DEK is zeroed).
+    /// Idempotent;
     /// never fails, also after a panic. It clears the poison a panic left,
     /// so the unlock after it works. It never waits for the relay.
     pub fn lock(&self) {
@@ -978,7 +1186,7 @@ impl Brev {
     /// *Blokker* (docs/PHASE4_DESIGN.md owner answer 6): one click undoes
     /// the approval of `contact`. First the sealed local flag, which stops
     /// sending to it and drops its letters, and forgets a ticket or letter
-    /// for it; then the relay is told to store no more letters or requests
+    /// for it (also one waiting for its token signature); then the relay is told to store no more letters or requests
     /// from it. Until the relay answers, the sealed `BLOCK_UNTOLD` stays
     /// beside the flag, and every `sync` tells the relay again, also after
     /// a lock (WP5 review). An error means the relay was not told yet (the
@@ -990,8 +1198,14 @@ impl Brev {
             let (caller, token) = s.credentials()?;
             let peer = s.me.contact_bundle(contact)?.id();
             s.me.change_flags(contact, BLOCKED | BLOCK_UNTOLD, 0)?;
-            if matches!(s.ticket, Some((c, _)) if c == contact) {
+            if s.ticket == Some(contact) {
                 s.ticket = None;
+            }
+            if s.pending
+                .as_ref()
+                .is_some_and(|p| p.draft.contact() == contact)
+            {
+                s.pending = None;
             }
             if s.letter.as_ref().is_some_and(|l| l.contact() == contact) {
                 s.letter = None;
@@ -1095,17 +1309,14 @@ impl Brev {
         Ok(s.register(body))
     }
 
-    /// The app's report on its own defences (key origin, Touch ID, capture
-    /// exclusion, secure input, synthetic-input rejection, accessibility
-    /// opacity, no pasteboard), made right before `prepare_send`. Kept until
-    /// the next report or a lock. `Locked` while locked.
-    pub fn report_environment(&self, report: EnvironmentReport) -> Result<(), BrevError> {
-        let mut s = self.session()?;
-        if s.me.is_locked() {
-            return Err(BrevError::Locked);
-        }
-        s.report = Some(Reported(report.into()));
-        Ok(())
+    /// What a received letter's authorship token showed, as stored when it
+    /// arrived (docs/AUTHORSHIP.md §6): for the badge and its detail. `None`
+    /// for a letter the user sent (its own class went out with it and is
+    /// not shown back). Decrypts no content.
+    pub fn letter_proof(&self, message: Vec<u8>) -> Result<Option<Proof>, BrevError> {
+        let message = MessageId(id(&message)?);
+        let s = self.session()?;
+        Ok(s.me.proof(message)?.as_ref().map(Proof::from))
     }
 
     /// Step 0 of a letter (docs/PHASE3_DESIGN.md §3.2), without content:
@@ -1116,22 +1327,29 @@ impl Brev {
     /// contact that does not take the user's letters is `NotApproved`, with
     /// no ticket, so there is no digest and no prompt (docs/PHASE4_DESIGN.md
     /// §5.3). `NotFound` if the relay has no such address or this user is
-    /// not registered; `Network`, `Refused`. Before any request, the
-    /// environment report since the unlock must reach class A
-    /// (docs/VAULT_SPLIT_PLAN.md §6): `Environment` otherwise, also without
-    /// a report; and a blocked contact is `NotApproved`.
-    pub fn prepare_send(&self, contact: Vec<u8>) -> Result<(), BrevError> {
+    /// not registered; `Network`, `Refused`. Before any request, with
+    /// `sample` taken just now: a reason to lock locks everything
+    /// (`Environment`, docs/AUTHORSHIP.md §4.3); the open compose session's
+    /// facts must reach class A (§3.3, an early exit: `sign_request`
+    /// decides), else `Environment` with the facts short of it, also
+    /// without a compose session; and a blocked contact is `NotApproved`.
+    /// Forgets a letter waiting for its token signature.
+    pub fn prepare_send(&self, contact: Vec<u8>, sample: Sample) -> Result<(), BrevError> {
         let contact = ContactId(id(&contact)?);
-        let (caller, token, address, epoch, class) = {
+        let sample = brev_hand::Sample::from(sample);
+        let (caller, token, address, epoch) = {
             let mut s = self.session()?;
             s.ticket = None;
+            s.pending = None;
             let (caller, token) = s.credentials()?;
-            let class = s.send_class()?;
+            s.lock_if_unsafe(&sample)?;
+            let (key, env) = s.facts(&sample)?;
+            allowed(key, &env)?;
             if s.me.contact_flags(contact)? & BLOCKED != 0 {
                 return Err(BrevError::NotApproved);
             }
             let address = Zeroizing::new(s.me.contact_address(contact)?.to_vec());
-            (caller, token, address, s.epoch, class)
+            (caller, token, address, s.epoch)
         };
         let found = self.net.lookup(&caller, &token, &address);
         drop((token, address));
@@ -1144,19 +1362,25 @@ impl Brev {
             s.me.change_flags(contact, 0, APPROVED_ME)?;
             return Err(BrevError::NotApproved);
         }
-        s.ticket = Some((contact, class));
+        s.ticket = Some(contact);
         Ok(())
     }
 
-    /// Step 1: seals a letter that starts a new thread with `contact`. The
-    /// content is `subject[..subject_len]` and `body[..body_len]`: Swift
-    /// passes its whole fixed buffer and the used length. A length over the
-    /// buffer or over [`MAX_SUBJECT`] / [`MAX_BODY`] gives `Malformed`.
+    /// Step 1: a letter that starts a new thread with `contact`, and its
+    /// authorship token (docs/AUTHORSHIP.md §3). The content is
+    /// `subject[..subject_len]` and `body[..body_len]`: Swift passes its
+    /// whole fixed buffer and the used length. A length over the buffer or
+    /// over [`MAX_SUBJECT`] / [`MAX_BODY`] gives `Malformed`. With `sample`
+    /// taken just now: a reason to lock locks everything (`Environment`).
     /// `KeyChanged` while the contact's key change waits; `Malformed`
     /// without the ticket of a `prepare_send` for this contact (the ticket
-    /// is used up either way). No I/O. Keeps the sealed letter (ciphertext
-    /// only), with the ticket's environment class, and returns the digest
-    /// the identity key signs.
+    /// is used up either way). Then the compose session's facts are frozen
+    /// with the sample, and their class must reach A (§3.3): `Environment`
+    /// with the facts short of it otherwise, also without a compose
+    /// session. No I/O. Keeps the letter's plaintext (a vault `Plaintext`,
+    /// which `cancel_send` and a lock wipe) and the claims, with the
+    /// sender's clock as `iat`, and returns the digest of the token the
+    /// identity key signs. Any failure forgets the letter.
     pub fn sign_request(
         &self,
         contact: Vec<u8>,
@@ -1164,28 +1388,77 @@ impl Brev {
         subject_len: u32,
         body: &[u8],
         body_len: u32,
+        sample: Sample,
     ) -> Result<Vec<u8>, BrevError> {
         let contact = ContactId(id(&contact)?);
         let subject = used(subject, subject_len, MAX_SUBJECT)?;
         let body = used(body, body_len, MAX_BODY)?;
+        let sample = brev_hand::Sample::from(sample);
         let mut s = self.session()?;
         s.letter = None;
+        s.pending = None;
+        if s.me.is_locked() {
+            return Err(BrevError::Locked);
+        }
+        s.lock_if_unsafe(&sample)?;
         if s.me.pending_bundle(contact)?.is_some() {
             return Err(BrevError::KeyChanged);
         }
-        let Some((_, class)) = s.ticket.take().filter(|&(c, _)| c == contact) else {
+        if s.ticket.take() != Some(contact) {
             return Err(BrevError::Malformed);
+        }
+        let (key, env) = s.facts(&sample)?;
+        let class = allowed(key, &env)?;
+        let draft = s.me.draft(contact, subject, body)?;
+        let claims = Claims::new(draft.letter(), unix_now(), key, env)?;
+        debug_assert_eq!(claims.class, class, "one class rule");
+        let payload = claims.encode();
+        let digest = token::digest(&payload);
+        s.pending = Some(Pending {
+            draft,
+            payload,
+            class,
+        });
+        Ok(digest.to_vec())
+    }
+
+    /// Step 2, after the one Touch ID of the letter (docs/AUTHORSHIP.md
+    /// §3.2): the Secure Enclave's DER signature over the token digest
+    /// `sign_request` returned, checked with the own identity key. Then the
+    /// token is assembled, the letter sealed with it (the payload of
+    /// protocol version 2), and its plaintext wiped. Returns the envelope's
+    /// digest, which the same context signs next. A signature that is not
+    /// DER, not by the own key or not over that digest gives `Signing` and
+    /// forgets the letter and the ticket; `NotFound` without a letter
+    /// waiting for it.
+    pub fn attach_token_signature(&self, signature: Vec<u8>) -> Result<Vec<u8>, BrevError> {
+        let mut s = self.session()?;
+        if s.me.is_locked() {
+            return Err(BrevError::Locked);
+        }
+        let pending = s.pending.take().ok_or(BrevError::NotFound)?;
+        let signed = token::signed_bytes(&pending.payload);
+        let raw = match s.me.verify_own(&signed, &signature) {
+            Ok(raw) => raw,
+            Err(e) => {
+                s.ticket = None;
+                s.letter = None;
+                return Err(e.into());
+            }
         };
-        let mut letter = s.me.seal_letter(contact, subject, body)?;
-        letter.class = Some(class);
+        let token = token::assemble(&pending.payload, &raw);
+        let mut letter = s.me.seal_letter(&pending.draft, &token)?;
+        drop(pending.draft);
+        letter.class = Some(pending.class);
         let digest = letter.digest();
         s.letter = Some(letter);
         Ok(digest.to_vec())
     }
 
-    /// Step 3: attaches the Secure Enclave's DER signature to the letter,
-    /// checked with the own identity key. `Signing` clears the letter;
-    /// `NotFound` if there is none.
+    /// Step 3: attaches the Secure Enclave's DER signature over the
+    /// envelope digest `attach_token_signature` returned, checked with the
+    /// own identity key. `Signing` clears the letter; `NotFound` if there is
+    /// none.
     pub fn attach_signature(&self, signature: Vec<u8>) -> Result<(), BrevError> {
         let mut s = self.session()?;
         if s.me.is_locked() {
@@ -1254,10 +1527,13 @@ impl Brev {
         }
     }
 
-    /// Forgets the send ticket and the letter, signed or not. Never fails.
+    /// Forgets the send ticket and the letter: its plaintext waiting for
+    /// the token signature (wiped), and the sealed letter, signed or not.
+    /// The compose session goes on. Never fails.
     pub fn cancel_send(&self) {
         let mut s = guard(&self.s);
         s.ticket = None;
+        s.pending = None;
         s.letter = None;
     }
 
@@ -1301,7 +1577,7 @@ impl Brev {
     /// the letter (docs/PHASE4_DESIGN.md §8, brev-mail test 4).
     pub fn force_ticket_for_test(&self, contact: Vec<u8>) -> Result<(), BrevError> {
         let contact = ContactId(id(&contact)?);
-        self.session()?.ticket = Some((contact, EnvironmentClass::A));
+        self.session()?.ticket = Some(contact);
         Ok(())
     }
 }
@@ -1316,9 +1592,10 @@ impl Brev {
             me,
             epoch: 0,
             ticket: None,
+            compose: None,
+            pending: None,
             letter: None,
             registration: None,
-            report: None,
             requests: Vec::new(),
             invite: None,
         }));
@@ -1389,9 +1666,9 @@ impl Brev {
         let envelopes = net.poll()?;
         let mut done = Vec::with_capacity(envelopes.len());
         let mut arrived = 0u32;
-        for env in &envelopes {
+        for (received_at, env) in &envelopes {
             let mut s = self.resume(epoch)?;
-            match s.me.receive(env) {
+            match s.me.receive(env, *received_at) {
                 Ok(_) => {
                     arrived += 1;
                     done.push(env.id());
@@ -1426,6 +1703,19 @@ impl Brev {
                     .me
                     .change_flags(*contact, 0, BLOCK_UNTOLD)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Counts one input event (`count`) in the open compose session, if
+    /// any. `Locked` while locked.
+    fn count_event(&self, count: fn(&mut FactLog)) -> Result<(), BrevError> {
+        let mut s = self.session()?;
+        if s.me.is_locked() {
+            return Err(BrevError::Locked);
+        }
+        if let Some(c) = s.compose.as_mut() {
+            count(&mut c.log);
         }
         Ok(())
     }
@@ -1522,12 +1812,15 @@ impl Session {
         })
     }
 
-    /// The texts are closed inside `me.lock()`, under the same mutex.
+    /// The texts are closed inside `me.lock()`, under the same mutex; a
+    /// letter's plaintext waiting for its token signature is wiped with
+    /// `pending`, and the compose session's facts go too (CLAUDE.md §1.10).
     fn lock_all(&mut self) {
         self.ticket = None;
+        self.pending = None;
+        self.compose = None;
         self.letter = None;
         self.registration = None;
-        self.report = None;
         self.requests.clear();
         self.invite = None;
         self.epoch = self.epoch.wrapping_add(1);
@@ -1614,23 +1907,26 @@ impl Session {
         }
     }
 
-    /// The class of the environment report since the unlock (C without
-    /// one), if it reaches [`SEND_THRESHOLD`]; otherwise `Environment` with
-    /// the report's fields short of class A.
-    fn send_class(&self) -> Result<EnvironmentClass, BrevError> {
-        let report = self.report.as_ref().map(Platform::environment_report);
-        let class = report.as_ref().map_or(EnvironmentClass::C, classify);
-        if may_send(class, SEND_THRESHOLD) {
-            return Ok(class);
+    /// The lock rule for a sample handed over with a call
+    /// (docs/AUTHORSHIP.md §4.3): with a reason to lock, everything is
+    /// locked and the call gives `Environment` naming the facts.
+    fn lock_if_unsafe(&mut self, sample: &brev_hand::Sample) -> Result<(), BrevError> {
+        let reasons = lock_reasons(sample);
+        if reasons.is_empty() {
+            return Ok(());
         }
-        Err(BrevError::Environment {
-            failed: report
-                .as_ref()
-                .map_or_else(Vec::new, failed_fields)
-                .into_iter()
-                .map(ReportField::from)
-                .collect(),
-        })
+        self.lock_all();
+        Err(names(reasons.into_iter().map(lock_fact)))
+    }
+
+    /// The key origin and the facts of the open compose session with
+    /// `sample`, taken now; `Environment` naming nothing without one.
+    fn facts(&self, sample: &brev_hand::Sample) -> Result<(brev_vault::KeyOrigin, Env), BrevError> {
+        let c = self
+            .compose
+            .as_ref()
+            .ok_or(BrevError::Environment { failed: Vec::new() })?;
+        Ok((c.key, c.facts(sample)))
     }
 
     /// The own id and relay token for a token-authenticated request. Gated,
@@ -1658,6 +1954,32 @@ impl Holder for Session {
 /// never fail.
 fn guard<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The class of a letter written with a key in `key` under `env`
+/// (brev-hand's rule), if it reaches [`SEND_THRESHOLD`]; otherwise
+/// `Environment` with the facts short of class A.
+fn allowed(key: brev_vault::KeyOrigin, env: &Env) -> Result<EnvironmentClass, BrevError> {
+    let (class, failed) = brev_hand::classify(key, env);
+    if may_send(class, SEND_THRESHOLD) {
+        Ok(class)
+    } else {
+        Err(names(failed))
+    }
+}
+
+/// `Environment` naming `facts`.
+fn names(facts: impl IntoIterator<Item = &'static str>) -> BrevError {
+    BrevError::Environment {
+        failed: facts.into_iter().map(str::to_owned).collect(),
+    }
+}
+
+/// The wall clock in Unix seconds: a token's `iat`.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// A 32-byte DEK copied into a buffer that wipes itself.

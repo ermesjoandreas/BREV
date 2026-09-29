@@ -1,4 +1,5 @@
-//! Brev wire format, protocol version 1 (docs/PHASE3_DESIGN.md §2): the
+//! Brev wire format, protocol version 2 (docs/PHASE3_DESIGN.md §2,
+//! docs/AUTHORSHIP.md §2.5): the
 //! [`Envelope`] with its signed bytes and wire bytes, the length-hiding
 //! padding ([`pad_into`], [`unpad`]), identity ids and codes, the other relay
 //! bodies ([`body`]), invite codes ([`invite`], Phase 4) and the P-256
@@ -28,8 +29,10 @@ pub mod sig;
 mod test_keys;
 
 /// Wire-format version. Bumped whenever the envelope layout or the payload
-/// inside the AEAD changes: 1 since the payload is padded (Phase 3).
-pub const PROTOCOL_VERSION: u16 = 1;
+/// inside the AEAD changes: 1 since the payload is padded (Phase 3), 2 since
+/// it carries the authorship token after the letter (docs/AUTHORSHIP.md
+/// §2.5). The relay and the app refuse every other version.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Length of [`Envelope::header_bytes`]: magic, version, two ids, nonce.
 pub const HEADER_LEN: usize = 4 + 2 + 32 + 32 + 24;
@@ -239,7 +242,7 @@ mod tests {
         let b = env.signed_bytes();
         assert_eq!(b.len(), HEADER_LEN + 2);
         assert_eq!(&b[..4], b"BREV");
-        assert_eq!(&b[4..6], &[0, 1]);
+        assert_eq!(&b[4..6], &[0, 2]);
         assert_eq!(&b[6..38], &[1; 32]);
         assert_eq!(&b[38..70], &[2; 32]);
         assert_eq!(&b[70..94], &[3; 24]);
@@ -250,7 +253,7 @@ mod tests {
     /// trip, and the id as SHA-256 of the signed bytes only.
     #[test]
     fn wire_round_trip_and_layout() {
-        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(PROTOCOL_VERSION, 2);
         assert_eq!(
             (MIN_WIRE, MAX_CIPHERTEXT, MAX_WIRE),
             (430, 1_048_592, 1_048_750)
@@ -260,7 +263,7 @@ mod tests {
         let wire = env.to_wire().unwrap();
         assert_eq!(wire.len(), 430);
         assert_eq!(&wire[..4], &[0x42, 0x52, 0x45, 0x56]);
-        assert_eq!(&wire[4..6], &[0x00, 0x01]);
+        assert_eq!(&wire[4..6], &[0x00, 0x02]);
         assert_eq!(&wire[6..38], &env.sender);
         assert_eq!(&wire[38..70], &env.recipient);
         assert_eq!(&wire[70..94], &env.nonce);
@@ -311,7 +314,8 @@ mod tests {
         bad[0] = b'b';
         assert_eq!(Envelope::from_wire(&bad), Err(WireError::Magic));
 
-        for version in [0u16, 2, 0x0100, u16::MAX] {
+        // Version 1 (Phase 3's payload, no token) included.
+        for version in [0u16, 1, 3, 0x0200, u16::MAX] {
             let mut bad = good.clone();
             bad[4..6].copy_from_slice(&version.to_be_bytes());
             assert_eq!(

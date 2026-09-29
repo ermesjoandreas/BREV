@@ -858,11 +858,13 @@ fn release_deletes_links_events_invites_counts() {
 }
 
 /// Test 12b: a Phase 3 relay file (version 1) is refused and left as it
-/// was, and so is another database.
+/// was, and so are a Phase 4 file (version 2: no `received_at`) and
+/// another database.
 #[test]
 fn v1_relay_file_is_refused() {
     let tmp = TempDir::new();
     let v1 = tmp.0.join("v1.db");
+    let v2 = tmp.0.join("v2.db");
     let other = tmp.0.join("other.db");
     {
         let db = Connection::open(&v1).unwrap();
@@ -876,11 +878,19 @@ fn v1_relay_file_is_refused() {
              PRAGMA user_version = 1;",
         )
         .unwrap();
+        let db = Connection::open(&v2).unwrap();
+        db.execute_batch(
+            "CREATE TABLE envelopes (seq INTEGER PRIMARY KEY, id BLOB NOT NULL UNIQUE,
+                 recipient BLOB NOT NULL, wire BLOB NOT NULL) STRICT;
+             PRAGMA application_id = 1112689753;
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
         let db = Connection::open(&other).unwrap();
-        db.execute_batch("CREATE TABLE t (x); PRAGMA user_version = 2;")
+        db.execute_batch("CREATE TABLE t (x); PRAGMA user_version = 3;")
             .unwrap();
     }
-    for path in [&v1, &other] {
+    for path in [&v1, &v2, &other] {
         let bytes = fs::read(path).unwrap();
         let config = Config::default();
         assert!(matches!(
