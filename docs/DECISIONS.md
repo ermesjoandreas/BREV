@@ -4471,3 +4471,34 @@ WP5 and their reviews record.
   badge shows.
 - **Verified:** owner run, 2026-09-29, at 4d2e92c. Not run: the A parts of
   V82–V84 and SIP off (not practical on this Mac).
+
+### D-0113 — No classes; the SDK is generic and called Hand
+
+- **Date:** 2026-09-29
+- **Decision:** The owner answered docs/SDK_DESIGN.md:
+  1. **No classes.** A/B/C go away everywhere: in the token, the verifier,
+     the badge, the SDK and the platforms. One pass/fail rule takes their
+     place, and it is the old class-A conditions (SDK_DESIGN §5). A proof
+     is made only when every requirement holds; otherwise the app refuses
+     and names the failed facts. The badge says only «Skrevet i Brev» or
+     «Ikke verifisert», and the detail shows the numbers. A platform that
+     cannot read a required fact cannot make proofs; there are no lower
+     tiers. Test archives may skip the rule; the app's archive never can.
+     Removing the classes from brev-hand, brev-mail and the app is the
+     first code step, as a token profile change (Brev starts blank: test
+     letters only).
+  2. **Generic, not exam-centred.** The exam editor was an example in the
+     owner's diagram, not the focus. The design talks about "a host app"
+     and "a verifier".
+  3. **Answers.** Q3: a registry filled at a trusted login, checked against
+     the key active at issue, with no new keys during an open session. Q4:
+     the SDK seals content to the recipient's X25519 key in Rust. Q5: no C#
+     and no Linux until Windows is tested.
+  4. **Name.** The owner left the name open, so the SDK is called Hand:
+     crate `brev-sdk`, Swift package `HandKit`, CLI `hand-verify`. The
+     profile is `tag:ermesjoandreas.github.io,2026:hand-sdk-v1`; the domain
+     can change before a real release.
+- **Reasoning:** A pass/fail rule is easier to understand and cannot be
+  misread as "B is almost as good". The owner prefers hard rules (lock,
+  refuse) to grades (D-0109).
+- **Verified:** decision only.

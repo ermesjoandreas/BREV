@@ -686,23 +686,8 @@ Mac and Swift first. Each step is one commit with its tests. Brev's
 
 ## 13. Spørsmål til eier
 
-**Q1. Navn og tokenprofil.** (Det eneste åpne spørsmålet.)
-(a) Én profil for hele SDK-en (`tag:‹domene›,2026:hand-sdk-v1`). Appens
-formål ligger i innholds-hashen.
-(b) Én profil per app.
-*Anbefaling: (a).* Da har alle verifikatorer én regel, og formålet holder
-appene fra hverandre. (b) gir ingenting ekstra. Velg også domenet i taggen
-(`brev.no` er bare en plassholder) og navnet SDK-en skal hete.
-
-**Sjekk: har jeg forstått «ingen klasser» riktig?** Svar ja eller nei.
-- Et bevis lages bare når alle kravene i §5 holder. Ellers får teksten
-  ikke noe bevis, og appen sier hvilke krav som feilet.
-- Merket sier bare «Skrevet i ‹app›» eller «Ikke verifisert». Tallene står
-  i detaljene.
-- En lås mens noen skriver, betyr at den teksten aldri får bevis. Teksten
-  er trygg, men målingen fortsetter ikke etter låsen.
-- Windows, Linux og iOS kan ikke lage bevis før de kan lese alle kravene.
-- Testarkiv hopper over kravene, slik de i dag senker klassen. Appens
-  arkiv kan aldri gjøre det.
-- Å fjerne klassene fra Brevs kode er første steg. Brev starter da blankt,
-  siden brevene bare er testbrev.
+**Besvart 2026-09-29 (D-0113).**
+- Q1: navnet er opp til meg. SDK-en heter **Hand**. Crate `brev-sdk`, Swift-pakke `HandKit`, CLI `hand-verify`.
+- Én profil for hele SDK-en: `tag:ermesjoandreas.github.io,2026:hand-sdk-v1`. Domenet er eierens GitHub-adresse, og det kan endres før første ekte utgivelse.
+- «Ingen klasser»: ja, slik det er beskrevet over.
+- Q3, Q4 og Q5: ja.
