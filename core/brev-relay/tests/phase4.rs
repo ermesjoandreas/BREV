@@ -1,6 +1,6 @@
 //! Phase 4 relay tests (docs/PHASE4_DESIGN.md §8, relay tests 1 to 12, with
 //! the three DoD tests 5, 7 and 9; the invite tests went with the invites,
-//! D-XXXX (no invites)), open registration, *Blokker* (owner answer 6) and
+//! D-0116), open registration, *Blokker* (owner answer 6) and
 //! the limit flags. The clock is the relay's manual [`brev_relay::Clock`],
 //! moved by the tests.
 
@@ -29,7 +29,7 @@ fn request_from(who: &Identity, address: &str) -> Seen {
     }
 }
 
-/// Test 1 (open registration, D-XXXX (no invites)): anyone registers an
+/// Test 1 (open registration, D-0116): anyone registers an
 /// address with no invite, like ordinary e-mail: 201, the same registration
 /// again 200, a taken address 409 with nothing written. A new identity has
 /// no link and no event, so its letters reach nobody (409) until a contact
@@ -546,7 +546,7 @@ fn release_deletes_links_events_counts() {
 
 /// Test 12b: a Phase 3 relay file (version 1) is refused and left as it
 /// was, and so are a Phase 4 file (version 2: no `received_at`), one with
-/// invites (version 3, D-XXXX (no invites)) and another database.
+/// invites (version 3, D-0116) and another database.
 #[test]
 fn v1_relay_file_is_refused() {
     let tmp = TempDir::new();
@@ -717,7 +717,7 @@ fn config_defaults_are_the_owners_values() {
     assert_eq!(manual.today(), 3);
 }
 
-/// The operator's `invite` command is gone (D-XXXX (no invites)): a usage
+/// The operator's `invite` command is gone (D-0116): a usage
 /// error (2), and no file is made.
 #[test]
 fn invite_command_is_gone() {
@@ -775,7 +775,7 @@ fn serve_takes_the_limit_flags() {
         &["--letters-per-day", "-1"],
         &["--letters-per-day", "+1"],
         &["--requests-per-day", "4294967296"],
-        // The invite limits went with the invites (D-XXXX (no invites)).
+        // The invite limits went with the invites (D-0116).
         &["--invites-per-day", "3"],
         &["--open-invites", "5"],
         &["--invite-days", "7"],

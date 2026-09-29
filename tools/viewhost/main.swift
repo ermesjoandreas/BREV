@@ -9,10 +9,9 @@
 // 127.0.0.1 with a port the OS picks and a database in the temporary folder;
 // stopped at the end) and makes three users: this host ("testvert") and the
 // contacts Ekko and Speil ("ekko", "speil"), which live in this process
-// without a window. The host registers with a root invite (the relay's
-// `invite` command, run here) and invites Ekko and Speil with its own
-// codes, so all are approved and verified contacts (docs/PHASE4_DESIGN.md
-// §3.4). The host sends fake, non-secret letters to Ekko and
+// without a window. All register with no invite (D-0116); Ekko and Speil
+// ask the host and the host approves them, so all are approved contacts
+// (docs/PHASE4_DESIGN.md §5.2). The host sends fake, non-secret letters to Ekko and
 // Speil, Ekko sends a long one back, and the host shows the real
 // MailViewController in a hardened MainWindow without activating itself
 // (with --compose it asks to be active). Every letter carries the test
@@ -43,47 +42,39 @@
 // from this process's log. Then exit.
 // With --contacts (docs/PHASE3_DESIGN.md §6, docs/PHASE4_DESIGN.md §6;
 // docs/VERIFY.md V67, V68, V69, V72, V73, V79): the host starts
-// unregistered; its contact ($ADDR_B), an inviter ($ADDR_C) and two askers
-// ($ADDR_D, $ADDR_E) register with root invites. ContactPasteboard uses a
+// unregistered; its contacts ($ADDR_B, $ADDR_C) and two askers ($ADDR_D,
+// $ADDR_E) register with no invite (D-0116). ContactPasteboard uses a
 // named pasteboard (no pasteboard alert, the user's own untouched) that
 // records how each write began and what the text was set beside, with its
 // self-clear shortened to 1.5 s; "another app's copy" is this host writing
-// to that pasteboard. The address page's invite step (the real
-// AddressViewController, signing with this host's software key) → ⌘V of a
-// refused text, ⌘V with a source PID, ⌘⇧V and ⌘⌥V paste nothing → ⌘V
-// pastes an unknown code: Return, one /v1/invites/open 404 → ⌘V pastes
-// the root code → Fortsett refuses a click made in code and an AX press →
-// ready → (hold) → Return: the address step → the address marker $ADDR_A
-// typed by key-downs → Registrer refuses the same → ready → (hold) → Return
-// registers → the mail screen and its header → Kontakter opens the real
-// ContactSheet: no responder answers copy:, cut:, paste:, pasteAsPlainText:
-// or selectAll: → Kopier adressen min, Lag invitasjon and Kopier koden
-// refuse the same → Kopier adressen min (called as a human's press): the
-// address, concealed and transient, on the pasteboard (for this Mac only,
-// the text set after both markers; the same for Kopier koden) → another
-// app's copy survives the self-clear → Lag invitasjon: a code on two lines
-// → Kopier koden → the self-clear empties the pasteboard → ⌘V of
-// $ADDR_C's code with one fingerprint character changed: InviteMismatch
-// after one /v1/invites/open, no redeem (V77) → ⌘V of the right code:
-// «Invitert av:»
-// → Legg til and Godta invitasjonen refuse the same → ready → (hold) →
-// Godta invitasjonen redeems it («Bekreftet med invitasjon») → Kontakter,
+// to that pasteboard. The address page (the real AddressViewController,
+// signing with this host's software key) → the address marker $ADDR_A
+// typed by key-downs → Registrer refuses a click made in code and an AX
+// press → ready → (hold) → Return registers → the mail screen and its
+// header → Kontakter opens the real ContactSheet: no responder answers
+// copy:, cut:, paste:, pasteAsPlainText: or selectAll: → Kopier adressen
+// min refuses the same → Kopier adressen min (called as a human's press):
+// the address, concealed and transient, on the pasteboard (for this Mac
+// only, the text set after both markers) → another app's copy survives the
+// self-clear → ⌘V of a refused text, ⌘V with a source PID, ⌘⇧V and ⌘⌥V
+// paste nothing → ⌘V pastes $ADDR_C → Legg til refuses the same → ready →
+// (hold) → Return asks it → Escape («Venter på svar») → Kontakter,
 // $ADDR_B typed, Return asks it (request.sent) → Escape («Venter på svar»)
 // → $ADDR_D and $ADDR_E ask the host → the next sync lists them under
 // «Forespørsler» → ↓ selects the first: the header shows it with Godta and
 // Avslå, which refuse the same → ready → (hold) → Godta (as a human's
 // press) → the second, Avslå → Blokker on $ADDR_D refuses the same, then
 // blocks («Blokkert») → the relay releases $ADDR_B and a new identity
-// registers it with a root invite → Send in a compose sheet finds the
+// registers it → Send in a compose sheet finds the
 // changed key → Escape → the header shows the warning, both codes and Godta
 // ny kode, which refuses the same → ConfirmSheet → its Godta refuses the
 // same → ready → (hold) → Godta accepts the shown code → a ContactSheet with
-// a code, $ADDR_B typed and the address copied → the lock sequence: all of
+// $ADDR_B typed and the address copied → the lock sequence: all of
 // it wiped, the pasteboard kept → the self-clear empties it while locked →
 // exit. At each step: the windows' hardening, the relay's trace (the relay
 // runs with --trace: no request that a refused press would have made), the
-// in-process accessibility tree (no address marker, identity code or
-// invite code; control: the fixed labels), and the protected layer
+// in-process accessibility tree (no address marker or identity code;
+// control: the fixed labels), and the protected layer
 // (contact data in its buffers, draw(_:) and cacheDisplay empty; the layer's
 // displayed frame too, unless the screen is locked or the display sleeps,
 // which a "skip layer" line says).
@@ -129,8 +120,8 @@
 //   --compose       the compose sheet's timeline instead (above)
 //   --contacts      the address page's, the contact sheet's, the
 //                   requests' and the key change's timeline instead
-//                   (above); each "ready" line names its stage (invite,
-//                   address, contacts, request, accept)
+//                   (above); each "ready" line names its stage (address,
+//                   contacts, request, accept)
 //   --triggers <t>  the lock triggers' timeline instead (above): switch
 //                   (about 5 s; the Finder comes to the front) or idle
 //                   (about 5.5 min; no input meanwhile). With --post, idle
@@ -419,8 +410,8 @@ guard let relayRun = startRelay(in: dir, trace: contactsMode ? relayTrace : nil)
 relayProcess = relayRun.0
 let relayURL = relayRun.1
 let me: User, ekkoUser: User
-/// With --contacts: the users at $ADDR_C (an inviter), $ADDR_D and $ADDR_E
-/// (two askers), each registered with a root invite.
+/// With --contacts: the users at $ADDR_C (a contact to ask), $ADDR_D and
+/// $ADDR_E (two askers), each registered with no invite.
 var others: [User] = []
 let session: Session
 /// Ekko's local id here, and this host's at Ekko.
@@ -430,11 +421,9 @@ do {
     ekkoUser = try User(in: dir.appendingPathComponent("ekko"), relay: relayURL)
     session = me.session
     if contactsMode {
-        for (name, address) in [("ekko", addrB), ("inviter", addrC), ("asker1", addrD), ("asker2", addrE)] {
+        for (name, address) in [("ekko", addrB), ("asked", addrC), ("asker1", addrD), ("asker2", addrE)] {
             let user = name == "ekko" ? ekkoUser : try User(in: dir.appendingPathComponent(name), relay: relayURL)
-            guard let root = rootInvite(in: dir) else { throw BrevError.InviteInvalid }
-            defer { root.wipe() }
-            try user.register(address, invite: root)
+            try user.register(address)
             if user !== ekkoUser { others.append(user) }
         }
     }
@@ -445,12 +434,10 @@ do {
 if !contactsMode {
     do {
         let speilUser = try User(in: dir.appendingPathComponent("speil"), relay: relayURL)
-        guard let root = rootInvite(in: dir) else { throw BrevError.InviteInvalid }
-        defer { root.wipe() }
-        try me.register("testvert", invite: root)
-        try me.invite(ekkoUser, as: "ekko")
-        try me.invite(speilUser, as: "speil")
-        // The host pins its invitees (their invited events), Ekko first.
+        try me.register("testvert")
+        try me.befriend(ekkoUser, as: "ekko")
+        try me.befriend(speilUser, as: "speil")
+        // The host approved both requests, Ekko first.
         _ = try session.sync()
         ekko = try me.contact("ekko")
         let speil = try me.contact("speil")
@@ -1119,24 +1106,13 @@ func holds(_ t: SecretText?, _ bytes: some Collection<UInt8>) -> Bool {
     return zip(0..<t.length, bytes).allSatisfy { t.units[$0] == UInt16($1) }
 }
 
-/// Whether `code` is an invite code of the user with `address` and
-/// identity code `identity` (35 bytes, as the header shows it; design
-/// §3.1): `brev1.<address>.<fingerprint>.<secret>`, the fingerprint being
-/// the identity code without spaces, in lower case.
-func isInvite(_ code: [UInt8], of address: String, identity: [UInt8]) -> Bool {
-    let head = Array("brev1.\(address).".utf8)
-    let fingerprint = identity.filter { $0 != 0x20 }.map { $0 >= 0x41 && $0 <= 0x5A ? $0 + 0x20 : $0 }
-    return code.count == head.count + 30 + 1 + 26 && code.starts(with: head) && fingerprint.count == 30
-        && Array(code[head.count..<head.count + 30]) == fingerprint && code[head.count + 30] == 0x2E
-}
-
 func contactSheet() -> ContactSheet? { window.attachedSheet as? ContactSheet }
 
 /// The edit actions no responder may answer under P1's variant (a).
 let editActions = ["copy:", "cut:", "paste:", "pasteAsPlainText:", "selectAll:"]
 
 /// --contacts: the address page first, as AppDelegate routes an unlocked
-/// Brev without an address, at its invite step; Registrer signs with this
+/// Brev without an address (no invite, D-0116); Registrer signs with this
 /// host's software key.
 func contactsStart() {
     if scanning { print("skip --scan: --contacts shows no letters") }
@@ -1155,75 +1131,7 @@ func contactsStart() {
     }
     window.root.show(page)
     page.start()
-    later(0.3) { inviteStage(page) }
-}
-
-func inviteStage(_ page: AddressViewController) {
-    guard let root = rootInvite(in: dir) else {
-        check("invite step: a root invite for the host", false)
-        finish()
-    }
-    let code = root.withBytes { Array($0) }
-    root.wipe()
-    let f = page.inviteField
-    check("invite step: in the main window, with Hardening's settings (V79)", hardened(window))
-    check("invite step: the invite field has focus and a protected layer; Fortsett shows, Registrer does not",
-          window.firstResponder === f && protected(f) && page.nextButton?.isHidden == false
-              && page.registerButton?.isHidden == true)
-    checkOpaque("invite field (ContactField)", f)
-    check("invite step: no responder from the field up answers " + editActions.joined(separator: " ") + " (P1's variant (a))",
-          editActions.allSatisfy { !chainAnswers(window, NSSelectorFromString($0)) })
-    // Another app's copy with a refused character; then the code, which a
-    // ⌘V with a source PID, ⌘⇧V and ⌘⌥V leave on the pasteboard.
-    copyElsewhere(Array("Hei, deg".utf8))
-    pasteKey(into: window)
-    let refused = f.model.text.length == 0
-    copyElsewhere(code)
-    let count = boardCount()
-    pasteKey(into: window, pid: Int64(getpid()))
-    window.sendEvent(hardwareKey(9, .maskCommand, pid: 1)!)
-    pasteKey(into: window, [.maskCommand, .maskShift])
-    pasteKey(into: window, [.maskCommand, .maskAlternate])
-    let untouched = f.model.text.length == 0
-    // A code the relay does not know: its secret's first character changed.
-    var unknown = code
-    unknown[6] = unknown[6] == 0x61 ? 0x62 : 0x61
-    copyElsewhere(unknown)
-    pasteKey(into: window)
-    let pastedUnknown = holds(f.model.text, unknown)
-    check("invite step: ⌘V pastes the pasteboard's text; a refused character, a ⌘V with a source PID, ⌘⇧V and ⌘⌥V paste nothing; reading writes nothing",
-          refused && untouched && pastedUnknown && boardCount() == count + 1)
-    let opens = relayTrace.count("/v1/invites/open"), opens200 = relayTrace.count("/v1/invites/open", 200)
-    let opens404 = relayTrace.count("/v1/invites/open", 404)
-    deliver(hardwareKey(36), to: window)
-    waitFor(10, { relayTrace.count("/v1/invites/open") == opens + 1 && page.nextButton?.isEnabled == true }) { back in
-        check("invite step: an unknown code: one /v1/invites/open 404, the step stays with the code in the field",
-              back && relayTrace.count("/v1/invites/open", 404) == opens404 + 1 && page.registerButton?.isHidden == true
-                  && holds(f.model.text, unknown))
-        f.wipe()
-        copyElsewhere(code)
-        pasteKey(into: window)
-        check("invite step: the root code pasted", holds(f.model.text, code))
-        check("invite step: Fortsett refuses a click made in code and an AX press", pressRefused(page.nextButton))
-        later(0.5) {
-            check("invite step: so no /v1/invites/open, the step stays",
-                  relayTrace.count("/v1/invites/open") == opens + 1 && page.registerButton?.isHidden == true)
-            checkAX("invite step", [window], control: L10n.addressInviteTitle)
-            checkProtected("invite step: the pasted code", [f])
-            announceStage("invite", [("field", f.enclosingScrollView), ("next", page.nextButton)]) {
-                check("invite step: the hold changed nothing (a driver's AX presses): no /v1/invites/open",
-                      relayTrace.count("/v1/invites/open") == opens + 1 && page.registerButton?.isHidden == true)
-                deliver(hardwareKey(36), to: window)
-                waitFor(10, { page.registerButton?.isHidden == false }) { next in
-                    check("invite step: Return checks the root code (one /v1/invites/open 200), wipes the field; the address step, its field focused, no inviter",
-                          next && relayTrace.count("/v1/invites/open", 200) == opens200 + 1 && zeroed(f.model.text)
-                              && window.firstResponder === page.field
-                              && page.inviterView.lines.allSatisfy { $0 == nil })
-                    later(0.3) { addressStage(page) }
-                }
-            }
-        }
-    }
+    later(0.3) { addressStage(page) }
 }
 
 func addressStage(_ page: AddressViewController) {
@@ -1282,8 +1190,8 @@ func headerStage() {
     contactSheetStage()
 }
 
-/// Kontakter: the own address and Kopier adressen min, Lag invitasjon and
-/// Kopier koden, and the pasteboard's self-clear.
+/// Kontakter: the own address and Kopier adressen min, and the
+/// pasteboard's self-clear (no invite codes, D-0116).
 func contactSheetStage() {
     mail.showContacts(nil)
     guard let sheet = contactSheet() else {
@@ -1296,22 +1204,19 @@ func contactSheetStage() {
     check("contact sheet: Kontakter does nothing while it is up", window.sheets.count == 1)
     check("contact sheet: Hardening's settings (V79)", hardened(sheet))
     for (name, v) in [("field (ContactField)", sheet.field), ("own address", sheet.ownAddress),
-                      ("own code", sheet.ownCode), ("code", sheet.codeView),
-                      ("inviter", sheet.inviterView)] as [(String, ContentView)] {
+                      ("own code", sheet.ownCode)] as [(String, ContentView)] {
         checkOpaque("contact sheet \(name)", v)
     }
-    check("contact sheet: row 1 shows the own address; no code, no inviter",
-          shows(sheet.ownAddress.lines[0], addrA) && sheet.code == nil && !sheet.inviteOpened)
+    check("contact sheet: row 1 shows the own address", shows(sheet.ownAddress.lines[0], addrA))
     check("contact sheet: no responder from the field up answers " + editActions.joined(separator: " ")
             + " (P1's variant (a)), and the environment report's pasteboardDisabled holds (design §5.5)",
           editActions.allSatisfy { !chainAnswers(sheet, NSSelectorFromString($0)) }
               && EnvironmentProbe.design().pasteboardOff)
-    let count = boardCount(), invites = relayTrace.count("/v1/invites")
-    let refused = pressRefused(sheet.copyAddressButton) && pressRefused(sheet.makeInviteButton)
-        && pressRefused(sheet.copyCodeButton)
+    let count = boardCount()
+    let refused = pressRefused(sheet.copyAddressButton)
     later(0.5) {
-        check("contact sheet: Kopier adressen min, Lag invitasjon and Kopier koden refuse a click made in code and an AX press: no pasteboard write, no /v1/invites, no code",
-              refused && boardCount() == count && relayTrace.count("/v1/invites") == invites && sheet.code == nil)
+        check("contact sheet: Kopier adressen min refuses a click made in code and an AX press: no pasteboard write",
+              refused && boardCount() == count)
         namedBoard?.reset()
         sheet.copyAddress(nil)   // as a human's press of Kopier adressen min
         check("Kopier adressen min: the pasteboard holds the own address as plain text, concealed and transient",
@@ -1323,99 +1228,54 @@ func contactSheetStage() {
         later(boardLifetime + 0.5) {
             check("self-clear: after the lifetime, a later copy by another app is left alone",
                   boardText() == Array("annen app".utf8))
-            sheet.makeInvite(nil)   // as a human's press of Lag invitasjon
-            waitFor(10, { sheet.code != nil && !sheet.busy }) { made in
-                let code = sheet.code?.withBytes { Array($0) } ?? []
-                let cut = 6 + addrA.utf8.count + 1
-                check("Lag invitasjon: one /v1/invites 201, no Touch ID; the host's code on two lines (to the address, then the rest)",
-                      made && relayTrace.count("/v1/invites", 201) == invites + 1 && me.signatures == 1
-                          && isInvite(code, of: addrA, identity: ownCode(session))
-                          && holds(sheet.codeView.lines[0], code[..<cut]) && holds(sheet.codeView.lines[1], code[cut...]))
-                namedBoard?.reset()
-                sheet.copyCode(nil)   // as a human's press of Kopier koden
-                check("Kopier koden: the pasteboard holds the code as plain text, concealed and transient",
-                      boardTypes() == writtenTypes && boardText() == code)
-                check("Kopier koden: written for this Mac only (no Universal Clipboard), the text after both markers",
-                      namedBoard?.wroteHostOnlyMarkersFirst == true,
-                      "\(namedBoard?.starts ?? []) \(namedBoard?.beforeText ?? [])")
-                checkAX("contact sheet with a code", [window, sheet], control: L10n.contactsTitle)
-                checkProtected("contact sheet: the own address and the code", [sheet.ownAddress, sheet.codeView])
-                later(boardLifetime + 0.5) {
-                    check("self-clear: after the lifetime (60 s in Brev) the pasteboard is empty", boardTypes().isEmpty,
-                          "\(boardTypes())")
-                    inviteStageInSheet(sheet)
-                }
-            }
+            checkAX("contact sheet", [window, sheet], control: L10n.contactsTitle)
+            checkProtected("contact sheet: the own address and code", [sheet.ownAddress, sheet.ownCode])
+            pasteStageInSheet(sheet)
         }
     }
 }
 
-/// ContactField and Legg til with an invite code of another user's: one
-/// with an edited fingerprint (V77), then the right one and Godta
-/// invitasjonen.
-func inviteStageInSheet(_ sheet: ContactSheet) {
-    guard let inviter = others.first, let made = try? inviter.session.createInvite() else {
-        check("contact sheet: the inviter makes a code", false)
-        finish()
-    }
-    let code = made.withBytes { Array($0) }
-    made.wipe()
-    var edited = code
-    let at = 6 + addrC.utf8.count + 1   // the fingerprint's first character
-    edited[at] = edited[at] == 0x61 ? 0x62 : 0x61
-    copyElsewhere(edited)
+/// ContactField and Legg til with a pasted address: ⌘V pastes, the
+/// refused forms paste nothing, and Legg til asks the other user.
+func pasteStageInSheet(_ sheet: ContactSheet) {
+    let other = Array(addrC.utf8)
+    copyElsewhere(Array("Hei, deg".utf8))
     pasteKey(into: sheet)
-    let opens = relayTrace.count("/v1/invites/open"), opens200 = relayTrace.count("/v1/invites/open", 200)
-    let redeems = relayTrace.count("/v1/invites/redeem"), lookups = relayTrace.count("/v1/lookup")
-    check("contact sheet: ⌘V pastes a code into the field", holds(sheet.field.model.text, edited))
-    let refused = pressRefused(sheet.addButton) && pressRefused(sheet.acceptInviteButton)
+    let refusedText = sheet.field.model.text.length == 0
+    copyElsewhere(other)
+    let count = boardCount()
+    pasteKey(into: sheet, pid: Int64(getpid()))
+    sheet.sendEvent(hardwareKey(9, .maskCommand, pid: 1)!)
+    pasteKey(into: sheet, [.maskCommand, .maskShift])
+    pasteKey(into: sheet, [.maskCommand, .maskAlternate])
+    let untouched = sheet.field.model.text.length == 0
+    pasteKey(into: sheet)
+    check("contact sheet: ⌘V pastes the pasteboard's address; a refused character, a ⌘V with a source PID, ⌘⇧V and ⌘⌥V paste nothing; reading writes nothing",
+          refusedText && untouched && holds(sheet.field.model.text, other) && boardCount() == count)
+    let lookups = relayTrace.count("/v1/lookup"), asks = relayTrace.count("/v1/requests")
+    let refused = pressRefused(sheet.addButton)
     later(0.5) {
-        check("contact sheet: Legg til refuses a click made in code and an AX press: no /v1/invites/open, no /v1/lookup",
-              refused && relayTrace.count("/v1/invites/open") == opens && relayTrace.count("/v1/lookup") == lookups
-                  && !sheet.busy && !sheet.inviteOpened)
-        deliver(hardwareKey(36), to: sheet)
-        waitFor(10, { relayTrace.count("/v1/invites/open") == opens + 1 && !sheet.busy }) { done in
-            check("wrong fingerprint (V77): one /v1/invites/open 200, then nothing: no inviter, no /v1/invites/redeem, no contact; the code stays in the field",
-                  done && relayTrace.count("/v1/invites/open", 200) == opens200 + 1
-                      && relayTrace.count("/v1/invites/redeem") == redeems && !sheet.inviteOpened
-                      && contactState().count == 0 && holds(sheet.field.model.text, edited))
-            sheet.field.wipe()
-            copyElsewhere(code)
-            pasteKey(into: sheet)
+        check("contact sheet: Legg til refuses a click made in code and an AX press: no /v1/lookup",
+              refused && relayTrace.count("/v1/lookup") == lookups && !sheet.busy)
+        let written = boardCount()
+        announceStage("contacts", [("field", sheet.field.enclosingScrollView),
+                                   ("copyme", sheet.copyAddressButton), ("add", sheet.addButton)]) {
+            check("contact sheet: the hold changed nothing (a driver's AX presses): no /v1/lookup, no pasteboard write, the sheet stays",
+                  relayTrace.count("/v1/lookup") == lookups && contactSheet() === sheet && boardCount() == written)
             deliver(hardwareKey(36), to: sheet)
-            waitFor(10, { sheet.inviteOpened && !sheet.busy }) { opened in
-                check("the right code: «Invitert av:» with the inviter's address and code (its own header's), Godta invitasjonen; the field wiped",
-                      opened && shows(sheet.inviterView.lines[0], addrC)
-                          && shows(sheet.inviterView.lines[1], ownCode(inviter.session)) && zeroed(sheet.field.model.text)
-                          && sheet.acceptInviteButton?.isHidden == false)
-                checkProtected("contact sheet: the inviter's address and code", [sheet.inviterView])
-                checkAX("contact sheet with an inviter", [window, sheet], control: L10n.inviteFrom)
-                check("contact sheet: Godta invitasjonen refuses a click made in code and an AX press",
-                      pressRefused(sheet.acceptInviteButton))
+            waitFor(10, { sheet.added != nil && !sheet.busy }) { done in
+                check("Legg til the pasted address: one /v1/lookup 200, one /v1/requests 202; the sheet stays, the field wiped",
+                      done && relayTrace.count("/v1/lookup", 200) == lookups + 1
+                          && relayTrace.count("/v1/requests", 202) == asks + 1 && contactSheet() === sheet
+                          && zeroed(sheet.field.model.text))
+                deliver(hardwareKey(53), to: sheet)
                 later(0.5) {
-                    check("contact sheet: so no /v1/invites/redeem, the sheet stays",
-                          relayTrace.count("/v1/invites/redeem") == redeems && contactSheet() === sheet)
-                    let written = boardCount()
-                    announceStage("contacts", [("field", sheet.field.enclosingScrollView),
-                                               ("copyme", sheet.copyAddressButton), ("make", sheet.makeInviteButton),
-                                               ("copycode", sheet.copyCodeButton), ("add", sheet.addButton),
-                                               ("accept", sheet.acceptInviteButton)]) {
-                        check("contact sheet: the hold changed nothing (a driver's AX presses): no /v1/invites/redeem, no pasteboard write, the sheet stays",
-                              relayTrace.count("/v1/invites/redeem") == redeems && contactSheet() === sheet
-                                  && boardCount() == written)
-                        sheet.acceptInvite(nil)   // as a human's press of Godta invitasjonen
-                        waitFor(10, { contactSheet() == nil }) { closed in
-                            let h = mail.header
-                            check("Godta invitasjonen: one /v1/invites/redeem 200, the sheet closes wiped; the inviter selected, «Bekreftet med invitasjon»",
-                                  closed && relayTrace.count("/v1/invites/redeem", 200) == redeems + 1
-                                      && contactState().count == 1 && shows(h.addresses.lines[0], addrC)
-                                      && h.shownState == "verified" && zeroed(sheet.field.model.text) && sheet.code == nil
-                                      && sheet.ownAddress.lines[0] == nil && sheet.ownCode.lines[0] == nil
-                                      && sheet.codeView.lines.allSatisfy { $0 == nil }
-                                      && sheet.inviterView.lines.allSatisfy { $0 == nil })
-                            later(0.5, addByAddressStage)
-                        }
-                    }
+                    let h = mail.header
+                    check("Escape closes the sheet wiped; the new contact is selected, «Venter på svar»",
+                          contactSheet() == nil && contactState().count == 1 && shows(h.addresses.lines[0], addrC)
+                              && h.shownState == "waiting" && zeroed(sheet.field.model.text)
+                              && sheet.ownAddress.lines[0] == nil && sheet.ownCode.lines[0] == nil)
+                    later(0.5, addByAddressStage)
                 }
             }
         }
@@ -1535,7 +1395,7 @@ func blockStage() {
 
 
 /// The relay's operator frees $ADDR_B (`brev-relay release`), and a new
-/// identity registers it with a root invite: the host's pinned key for it
+/// identity registers it: the host's pinned key for it
 /// has changed.
 func replaceContact() -> User? {
     guard let path = relayBinary else { return nil }
@@ -1545,11 +1405,9 @@ func replaceContact() -> User? {
     release.standardError = FileHandle.nullDevice
     guard (try? release.run()) != nil else { return nil }
     release.waitUntilExit()
-    guard release.terminationStatus == 0, let user = try? User(in: dir.appendingPathComponent("ekko2"), relay: relayURL),
-          let root = rootInvite(in: dir)
+    guard release.terminationStatus == 0, let user = try? User(in: dir.appendingPathComponent("ekko2"), relay: relayURL)
     else { return nil }
-    defer { root.wipe() }
-    guard (try? user.register(addrB, invite: root)) != nil else { return nil }
+    guard (try? user.register(addrB)) != nil else { return nil }
     return user
 }
 
@@ -1629,16 +1487,15 @@ func acceptStage(_ h: ContactBar, _ newCode: [UInt8]) {
     }
 }
 
-/// The lock sequence with ContactSheet open: a code shown, $ADDR_B typed,
-/// the own address just copied.
+/// The lock sequence with ContactSheet open: $ADDR_B typed, the own
+/// address just copied.
 func contactsLock() {
     mail.showContacts(nil)
     guard let sheet = contactSheet() else {
         check("before lock: a contact sheet opens", false)
         finish()
     }
-    sheet.makeInvite(nil)
-    waitFor(10, { sheet.code != nil && !sheet.busy }) { made in
+    do {
         let b = fake([addrB])
         let typed = typeKeys(b, into: sheet)
         b.wipe()
@@ -1647,12 +1504,12 @@ func contactsLock() {
             let views = all(ContentView.self, in: mail.view) + all(ContentView.self, in: sheet.contentView!)
             let buffers = views.flatMap { $0.pool }
             check("before lock: the header and the sheet's own address, code and typed address hold pixels (control)",
-                  made && typed && [sheet.field, sheet.ownAddress, sheet.codeView].allSatisfy { $0.pool.contains(where: hasPixels) }
+                  typed && [sheet.field, sheet.ownAddress, sheet.ownCode].allSatisfy { $0.pool.contains(where: hasPixels) }
                       && mail.header.addresses.pool.contains(where: hasPixels))
             lock.lock(.manual)
             check("lock: the contact sheet ended; its field, own address and code wiped; secure input off",
-                  window.attachedSheet == nil && zeroed(sheet.field.model.text) && sheet.code == nil
-                      && sheet.ownAddress.lines[0] == nil && sheet.codeView.lines.allSatisfy { $0 == nil } && secureInputOff())
+                  window.attachedSheet == nil && zeroed(sheet.field.model.text)
+                      && sheet.ownAddress.lines[0] == nil && sheet.ownCode.lines[0] == nil && secureInputOff())
             check("lock: the header's addresses and codes are wiped",
                   all(ContactTextView.self, in: mail.header).allSatisfy { $0.lines.allSatisfy { $0 == nil } }
                       && mail.header.newCode == nil)

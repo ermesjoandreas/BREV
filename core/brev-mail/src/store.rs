@@ -13,8 +13,8 @@
 //! so the file holds neither a contact's identity id nor its address.
 //!
 //! Schema v5 (docs/PHASE4_DESIGN.md §5.1) adds each contact's sealed flags
-//! (they take my letters, blocked). Schema v8 (docs/DECISIONS.md D-XXXX (no
-//! invites)) drops the user's open invites and the flag "key verified by an
+//! (they take my letters, blocked). Schema v8 (docs/DECISIONS.md D-0116)
+//! drops the user's open invites and the flag "key verified by an
 //! invite".
 //!
 //! Schema v6 (docs/AUTHORSHIP.md §6) adds `messages.proof`: a received
@@ -50,7 +50,7 @@ const APPLICATION_ID: i32 = 0x4252_4556;
 /// docs/PHASE4_DESIGN.md §5.1), `messages.proof` (version 6,
 /// docs/AUTHORSHIP.md §6), no `messages.env_class` (version 4 added it,
 /// version 7 drops it; D-0115), and no `invites` (version 5 added it,
-/// version 8 drops it; D-XXXX (no invites)). A version 2 to 7 store opens
+/// version 8 drops it; D-0116). A version 2 to 7 store opens
 /// as `Corrupt`; there is no migration.
 const SCHEMA_VERSION: i32 = 8;
 
@@ -119,7 +119,7 @@ const KEY_TOKEN: std::ops::Range<usize> = 64 + sig::KEY_LEN..96 + sig::KEY_LEN;
 /// `contacts.flags`: the contact takes the user's letters (it approved the
 /// user, or asked the user).
 pub(crate) const APPROVED_ME: u8 = 1;
-// 2 was "key verified by an invite" (D-XXXX (no invites)); it is not
+// 2 was "key verified by an invite" (D-0116); it is not
 // reused.
 /// `contacts.flags`: the user blocked the contact (*Blokker*): nothing is
 /// sent to it and its letters are dropped.
@@ -445,8 +445,8 @@ impl Core {
         Ok(())
     }
 
-    /// The registration v3 body without its signature (D-XXXX (no
-    /// invites)): `address`, both public keys and SHA-256 of the relay
+    /// The registration v3 body without its signature (D-0116):
+    /// `address`, both public keys and SHA-256 of the relay
     /// token. The identity key signs `body::register_preimage_v3` of it.
     pub fn registration(&self, address: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
         let (_, keys) = self.identity_keys()?;

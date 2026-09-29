@@ -197,7 +197,7 @@ fn unlock_refuses_all_zero_dek() {
     drop(Cleanup(path));
 }
 
-/// Design §8 brev-mail 7, docs/AUTHORSHIP.md §6, D-0115 and D-XXXX (no
+/// Design §8 brev-mail 7, docs/AUTHORSHIP.md §6, D-0115 and D-0116
 /// invites): schema v8, its pragmas and its tables, column by column.
 #[test]
 fn schema_v8() {
@@ -497,7 +497,7 @@ fn v6_store_is_refused() {
     );
 }
 
-/// D-XXXX (no invites): a store with invites (schema v7: the `invites`
+/// D-0116: a store with invites (schema v7: the `invites`
 /// table) is refused; there is no migration.
 #[test]
 fn v7_store_is_refused() {

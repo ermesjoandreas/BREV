@@ -288,13 +288,6 @@ Klem fra Kari
 let shortBody = "Hei!\n\nHar du lyst til å komme på middag på lørdag klokka seks? Ta gjerne med deg noe å drikke.\n\nKari"
 func body(_ text: String) -> SecretText { fake([text]) }
 
-/// Registers `user` at `address` with a root invite.
-func registerRoot(_ user: User, _ address: String) throws {
-    guard let root = rootInvite(in: dir) else { throw BrevError.InviteInvalid }
-    defer { root.wipe() }
-    try user.register(address, invite: root)
-}
-
 /// The relay's operator frees `address`, and a new identity registers it.
 func replaceIdentity(_ address: String) throws -> User {
     guard let path = Bundle.main.object(forInfoDictionaryKey: "BrevRelayBinary") as? String else {
@@ -308,7 +301,7 @@ func replaceIdentity(_ address: String) throws -> User {
     release.waitUntilExit()
     guard release.terminationStatus == 0 else { throw BrevError.NotFound }
     let user = try User(in: dir.appendingPathComponent("\(address)-2"), relay: relayURL)
-    try registerRoot(user, address)
+    try user.register(address)
     return user
 }
 
@@ -319,10 +312,10 @@ do {
     kari = try User(in: dir.appendingPathComponent("kari"), relay: relayURL)
     let ola = try User(in: dir.appendingPathComponent("ola"), relay: relayURL)
     let ingrid = try User(in: dir.appendingPathComponent("ingrid"), relay: relayURL)
-    try registerRoot(host, hostAddress)
-    try host.invite(kari, as: kariAddress)
-    try host.invite(ola, as: olaAddress)
-    try host.invite(ingrid, as: ingridAddress)
+    try host.register(hostAddress)
+    try host.befriend(kari, as: kariAddress)
+    try host.befriend(ola, as: olaAddress)
+    try host.befriend(ingrid, as: ingridAddress)
     _ = try host.session.sync()
     kariAtHost = try host.contact(kariAddress)
     let olaAtHost = try host.contact(olaAddress)
@@ -335,7 +328,7 @@ do {
     // Two requests: two others ask the host.
     for (name, address) in [("per", perAddress), ("lise", liseAddress)] {
         let asker = try User(in: dir.appendingPathComponent(name), relay: relayURL)
-        try registerRoot(asker, address)
+        try asker.register(address)
         let typed = fake([hostAddress])
         defer { typed.wipe() }
         _ = try asker.session.addContact(address: typed)
@@ -358,7 +351,7 @@ do {
     host.session.cancelSend()
     try host.session.composeClosed()
     newUser = try User(in: dir.appendingPathComponent("new"), relay: relayURL)
-    try registerRoot(newUser, "ny-bruker")
+    try newUser.register("ny-bruker")
     unregistered = try User(in: dir.appendingPathComponent("unregistered"), relay: relayURL)
 } catch {
     check("fixture: users, letters, requests and a key change", false, "\((error as? BrevError).map { "\($0)" } ?? "\(error)")")
@@ -525,19 +518,8 @@ scene("lock-notice", control: L10n.lockedBecause([.sudo])) {
 scene("notice-damaged") { window.root.show(NoticeViewController(L10n.unlockErrorDamaged)) }
 scene("notice-unsafe") { window.root.show(NoticeViewController(L10n.launchErrorUnsafe)) }
 let addressPage = AddressViewController(session: unregistered.session) { _, done in done(.failure(BrevError.Signing)) }
-scene("address-invite", control: L10n.addressInviteTitle) {
-    window.root.show(addressPage)
-}
 scene("address-register", control: L10n.addressTitle) {
-    if window.root.child !== addressPage { window.root.show(addressPage) }
-    if let root = rootInvite(in: dir) {
-        root.withBytes { _ = addressPage.inviteField.model.insertPasted($0) }
-        root.wipe()
-        addressPage.inviteField.relayout()
-    }
-    addressPage.next()   // Fortsett, as a human's press
-    expect("address page: the invite opens and step 2 shows",
-          spin(until: { addressPage.registerButton?.isHidden == false }))
+    window.root.show(addressPage)
     let typed = fake(["andreas-2"])
     _ = Array(UnsafeBufferPointer(start: typed.units, count: typed.length)).withUnsafeBufferPointer {
         addressPage.field.model.insert($0)
@@ -647,7 +629,17 @@ expect("a new user: Innboks (not chosen by a human), empty, nothing read",
 if onlyScene == nil {
     do {
         let tone = try User(in: dir.appendingPathComponent("tone"), relay: relayURL)
-        try newUser.invite(tone, as: toneAddress)
+        // The new user asks Tone and Tone approves, so the approval reaches
+        // the new user by the mail screen's own sync.
+        try tone.register(toneAddress)
+        let typed = fake([toneAddress])
+        defer { typed.wipe() }
+        _ = try newUser.session.addContact(address: typed)
+        _ = try tone.session.sync()
+        let asks = try tone.session.requests()
+        defer { asks.forEach { $0.address.wipe(); $0.code.wipe() } }
+        guard let ask = asks.first else { throw BrevError.NotFound }
+        _ = try tone.session.answerRequest(peer: ask.peer, approve: true)
         try tone.send(to: try tone.contact("ny-bruker"), subject: fake([subjects[0]]), body: body(shortBody))
         tone.session.brev.lock()
         emptyMail.syncOnce()
@@ -663,7 +655,7 @@ if onlyScene == nil {
               emptyMail.selection.map { !$0.isMailbox } == true && emptyMail.openThread == nil
                   && emptyMail.letters.isEmpty)
     } catch {
-        expect("a contact for the new user by invite, and a letter", false, "\(error)")
+        expect("a contact for the new user by request and approval, and a letter", false, "\(error)")
     }
 }
 emptyMail.wipeAll()
@@ -759,12 +751,6 @@ sheetScene("compose-filled", control: L10n.composeSend) {
     return sheet
 }
 sheetScene("contacts", control: L10n.contactsSectionMe) { ContactSheet(session: host.session) }
-sheetScene("contacts-invite", control: L10n.inviteNote) {
-    // Kari's sheet: the host used its daily invites for the fixture.
-    let sheet = ContactSheet(session: kari.session)
-    sheet.made(Result { try kari.session.createInvite() })
-    return sheet
-}
 sheetScene("confirm-reset", control: L10n.resetConfirmTitle) { ConfirmSheet.make(.reset) }
 sheetScene("confirm-key", control: L10n.acceptConfirmTitle) { ConfirmSheet.make(.acceptKey) }
 sheetScene("proof-verified", control: L10n.proofAttest) {

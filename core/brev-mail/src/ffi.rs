@@ -17,7 +17,7 @@
 //! second half of a call that a lock came in between (§5.2).
 //!
 //! Phase 4 (docs/PHASE4_DESIGN.md §5.3): a new identity registers its
-//! address with no invite (docs/DECISIONS.md D-XXXX (no invites)); contacts
+//! address with no invite (docs/DECISIONS.md D-0116); contacts
 //! are the peers the user added (which always sends a contact request) or
 //! approved; `sync` handles the relay's events first, then the letters;
 //! *Blokker* sets a sealed flag and tells the relay. Requests live only in
@@ -789,7 +789,7 @@ impl Brev {
     /// Starts a registration of the typed address `address[..address_len]`
     /// (ASCII upper case is folded; then 3 to 32 of `a-z 0-9 -`, a letter
     /// first, `Malformed` otherwise). Registration is open: no invite
-    /// (docs/DECISIONS.md D-XXXX (no invites)). Builds registration v3 and
+    /// (docs/DECISIONS.md D-0116). Builds registration v3 and
     /// returns the SHA-256 digest the identity key signs. No I/O.
     /// `Duplicate` once registered.
     pub fn register_request(&self, address: &[u8], address_len: u32) -> Result<Vec<u8>, BrevError> {

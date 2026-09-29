@@ -8,9 +8,8 @@
 // software P-256 key and the identity key is a software key too, as in the
 // heap-scan harness (app/Tests/main.swift). The letters on the mail screen
 // come from a second user through the relay scripts/test.sh starts
-// (BREV_RELAY_URL); the first user registers with the root invite test.sh
-// mints for this run (BREV_ROOT_INVITE), the second with the first's invite
-// code (docs/PHASE4_DESIGN.md §3.4). It runs the real BrevApplication,
+// (BREV_RELAY_URL); both users register with no invite (D-0116) and become
+// contacts by the second's request and the first's approval. It runs the real BrevApplication,
 // LockController and UnlockService, and checks what the harness (Shared/
 // only) and the view host (a window, never run by test.sh) cannot:
 // - a synthetic key that BrevApplication drops, in sendEvent and in
@@ -27,10 +26,8 @@
 //   view's pixel buffers
 //   in place, locks Rust and shows the lock screen (design §8.4; D-0034;
 //   docs/PHASE3_DESIGN.md §6.4);
-// - the lock sequence on the address page wipes the text typed at its
-//   invite step, and at its address step (the second user's code opened)
-//   the typed address and the inviter's address and code, and zeroes their
-//   pixels (docs/PHASE3_DESIGN.md §6.5, docs/PHASE4_DESIGN.md §6.1);
+// - the lock sequence on the address page wipes the typed address and
+//   zeroes its pixels (docs/PHASE3_DESIGN.md §6.5);
 // - a replaced line of the contact bar has its pixels zeroed, and a
 //   lock ends a compose sheet without reporting a close, so AppDelegate
 //   reads nothing again while Brev locks (WP5 review), after zeroing its
@@ -65,7 +62,7 @@
 // screen; each content view draws its visible part into its pixel buffers
 // as AppKit's display pass would make it. Output is check names only.
 //
-// usage: BREV_RELAY_URL=http://127.0.0.1:<port> BREV_ROOT_INVITE=<code> lock-probe
+// usage: BREV_RELAY_URL=http://127.0.0.1:<port> lock-probe
 
 import AppKit
 import LocalAuthentication
@@ -134,10 +131,6 @@ _ = NSApp.setActivationPolicy(.prohibited)
 
 guard let relay = getenv("BREV_RELAY_URL").map({ String(cString: $0) }), !relay.isEmpty else {
     print("FAIL the lock probe needs BREV_RELAY_URL (the relay scripts/test.sh starts)")
-    exit(2)
-}
-guard let rootCode = getenv("BREV_ROOT_INVITE"), strlen(rootCode) > 0 else {
-    print("FAIL the lock probe needs BREV_ROOT_INVITE (the root invite scripts/test.sh mints)")
     exit(2)
 }
 
@@ -228,12 +221,8 @@ func makeSession(_ sub: String, kek: SecKey, identity: SecKey) throws -> (Sessio
 /// A fresh address: the relay lives through the whole test.sh run.
 func freshAddress(_ who: String) -> String { "\(who)-\(getpid())-\(UInt32.random(in: 0...UInt32.max))" }
 
-/// Opens the invite `code` (the caller wipes it) and registers `address`
-/// with it, typed as the app passes it.
-func register(_ s: Session, _ identity: SecKey, _ address: String, invite code: SecretBytes) throws {
-    let opened = try s.openInvite(code: code)
-    opened.address.wipe()
-    opened.code.wipe()
+/// Registers `address` (no invite), typed as the app passes it.
+func register(_ s: Session, _ identity: SecKey, _ address: String) throws {
     let typed = text(address)
     defer { typed.wipe() }
     let digest = try s.registerRequest(address: typed)
@@ -330,8 +319,6 @@ guard unlockRust() else {
     check("unlock for the mail screen", false)
     finish()
 }
-/// An invite code of the second user's, for the address page's step 2.
-let peerInvite = SecretBytes(capacity: Int(limits().maxInvite))
 do {
     // A second user, and a letter each way through the relay.
     let peerKEK = softwareKey(), peerIdentity = softwareKey()
@@ -339,20 +326,19 @@ do {
     try Enclave.unwrap(peerWrapped, with: peerKEK) { try peer.brev.unlock(dek: $0, idleSecs: LockState.rustIdleSecs) }
     try peer.brev.confirmActive(sample: clean)
     let me = freshAddress("a"), other = freshAddress("b")
-    // The root invite for the first, an invite code of the first's for the
-    // second; the first's sync pins the second (its invited event).
-    let root = SecretBytes(capacity: Int(limits().maxInvite))
-    _ = root.append(UnsafeRawBufferPointer(start: rootCode, count: strlen(rootCode)))
-    defer { root.wipe() }
-    try register(session, identity, me, invite: root)
-    let code = try session.createInvite()
-    defer { code.wipe() }
-    try register(peer, peerIdentity, other, invite: code)
-    let peerCode = try peer.createInvite()
-    peerCode.withBytes { _ = peerInvite.append($0) }
-    peerCode.wipe()
+    // Both register; the second adds the first (a request), the first
+    // approves it, and the second's sync learns of the approval.
+    try register(session, identity, me)
+    try register(peer, peerIdentity, other)
+    let typed = text(me)
+    defer { typed.wipe() }
+    let meAtPeer = try peer.addContact(address: typed)
     _ = try session.sync()
-    let peerAtMe = try contact(session, other), meAtPeer = try contact(peer, me)
+    let asks = try session.requests()
+    defer { asks.forEach { $0.address.wipe(); $0.code.wipe() } }
+    guard asks.count == 1 else { throw BrevError.NotFound }
+    let peerAtMe = try session.answerRequest(peer: asks[0].peer, approve: true)
+    _ = try peer.sync()
     try send(session, identity, to: peerAtMe, subject: "Et testbrev",
              body: "Hei!\n\nDette er et testbrev fra låseprøven, med æ, ø og å.\n\nHilsen")
     try send(peer, peerIdentity, to: meAtPeer, subject: "Et svar",
@@ -473,50 +459,18 @@ func typeKeys(_ s: String, into field: SecureComposeView) {
         NSEvent(cgEvent: cg).map(field.keyDown)
     }
 }
-typeKeys("brev-address", into: page.inviteField)
-// The page opens at its invite step (docs/PHASE4_DESIGN.md §6.1), whose
-// field takes the typed text.
-let typedField = page.inviteField
+typeKeys("brev-address", into: page.field)
+// The page's one field (no invite step, D-0116) takes the typed text.
+let typedField = page.field
 typedField.updateLayer()
 let fieldPool = typedField.pool
-check("control: the text typed on the address page's invite step is pixels in the field's buffers",
+check("control: the address typed on the address page is pixels in the field's buffers",
       typedField.model.text.length == 12 && fieldPool.contains(where: hasPixels))
 lock.lock(.manual)
 check("lock: the address page's field is wiped, its pixels zero, Rust locked",
       typedField.model.text.length == 0 && (0..<typedField.model.text.maxUnits).allSatisfy { typedField.model.text.units[$0] == 0 }
           && !fieldPool.contains(where: hasPixels) && session.brev.isLocked() && lockScreens == 2,
       "length \(typedField.model.text.length), lock screens \(lockScreens)")
-
-// Step 2 (WP5 review): the second user's code, put in as ⌘V puts it, and
-// Fortsett show «Invitert av:» with its address and code; an address is
-// typed; the lock wipes the address field and the inviter too.
-guard unlockRust() else {
-    check("unlock for the address page's step 2", false)
-    finish()
-}
-_ = lock.state.endUnlock(lock.state.beginUnlock(), succeeded: true, appActive: true)
-peerInvite.withBytes { _ = page.inviteField.model.insertPasted($0) }
-peerInvite.wipe()
-page.next()   // Fortsett, as a human's press
-let opening = Date(timeIntervalSinceNow: 10)
-while page.inviterView.lines[0] == nil && Date() < opening {
-    _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
-}
-typeKeys("brev-address", into: page.field)
-page.view.layoutSubtreeIfNeeded()
-let stepTwo: [ContentView] = [page.field, page.inviterView]
-stepTwo.forEach { $0.updateLayer() }
-let stepTwoPools = stepTwo.flatMap { $0.pool }
-check("control: on the address page's step 2, the typed address and the inviter's address and code are pixels in their buffers",
-      page.field.model.text.length == 12 && page.inviterView.lines.allSatisfy { $0 != nil }
-          && stepTwo.allSatisfy { $0.pool.contains(where: hasPixels) },
-      "length \(page.field.model.text.length), inviter \(page.inviterView.lines.map { $0 != nil })")
-lock.lock(.manual)
-check("lock: the address page's step 2 is wiped (the address field and the inviter), its pixels zero, Rust locked",
-      page.field.model.text.length == 0 && (0..<page.field.model.text.maxUnits).allSatisfy { page.field.model.text.units[$0] == 0 }
-          && page.inviterView.lines.allSatisfy { $0 == nil } && !stepTwoPools.contains(where: hasPixels)
-          && session.brev.isLocked() && lockScreens == 3,
-      "length \(page.field.model.text.length), inviter \(page.inviterView.lines.map { $0 != nil }), lock screens \(lockScreens)")
 
 // MARK: - A new header line, and the lock sequence with a compose sheet open
 

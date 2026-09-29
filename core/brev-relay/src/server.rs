@@ -9,7 +9,7 @@
 //! answer 403, 404, 409, 428 or 429 before any write. An envelope's
 //! recipient is looked up only after its signature is verified. A
 //! registration with a valid signature learns whether an address is taken
-//! (409): registration is open (docs/DECISIONS.md D-XXXX (no invites)), and
+//! (409): registration is open (docs/DECISIONS.md D-0116), and
 //! any registered identity can look an address up anyway.
 
 use std::future::IntoFuture;

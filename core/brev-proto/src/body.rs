@@ -5,7 +5,7 @@
 //! anything but the exact layout.
 //!
 //! Phase 4 (docs/PHASE4_DESIGN.md §3.2) adds the registration with an
-//! attestation (v3 since registration is open, docs/DECISIONS.md D-XXXX (no
+//! attestation (v3 since registration is open, docs/DECISIONS.md D-0116
 //! invites); v2 carried an invite), the envelope submit with the sender's
 //! token, the lookup reply with its status byte, contact requests, events
 //! and their answers, and *Blokker*. The Phase 3 forms stay until
@@ -161,7 +161,7 @@ impl<'a> Registration<'a> {
     }
 }
 
-/// Signing domain of a registration v3 (docs/DECISIONS.md D-XXXX (no
+/// Signing domain of a registration v3 (docs/DECISIONS.md D-0116
 /// invites); v2 carried an invite, docs/PHASE4_DESIGN.md §3.3). It differs
 /// from [`REGISTER_DOMAIN`] and from v2's, so no other version's signature
 /// verifies as v3.
@@ -664,8 +664,8 @@ impl<'a> Peer<'a> {
 pub enum EventKind {
     /// The peer asks to write to the recipient.
     Request = 1,
-    // 2 was an invite the peer redeemed (docs/DECISIONS.md D-XXXX (no
-    // invites)); it is not reused.
+    // 2 was an invite the peer redeemed (docs/DECISIONS.md D-0116);
+    // it is not reused.
     /// The peer approved the recipient's request.
     Approved = 3,
 }
@@ -996,7 +996,7 @@ mod tests {
         assert_eq!(parse_inbox_answer(&body), Err(BodyError::Length));
     }
 
-    /// Registration v3 (D-XXXX (no invites)): offsets, the v3 domain (a v1
+    /// Registration v3 (D-0116): offsets, the v3 domain (a v1
     /// or v2 signature fails), the attestation at 0 and 8 192 bytes and not
     /// 8 193, and the largest body.
     #[test]
@@ -1226,7 +1226,7 @@ mod tests {
             assert_eq!(EventKind::from_byte(byte), Some(kind));
             assert_eq!(kind.byte(), byte);
         }
-        // 2 was the invited event (D-XXXX (no invites)); it is gone.
+        // 2 was the invited event (D-0116); it is gone.
         for byte in [0, 2, 4] {
             assert_eq!(EventKind::from_byte(byte), None, "{byte}");
         }

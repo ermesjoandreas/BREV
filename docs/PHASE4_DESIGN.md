@@ -1,5 +1,7 @@
 # Brev Phase 4: "Human-only guarantees (anti-noise)" (design, revised)
 
+> **2026-09-29 (D-0116):** Invite codes are gone. Registration is open (no invite), and contacts are added by address and approved by the other side. The invite sections below (§3.1, §3.4, §4.6, §5.3 and §6.1's invite step) are history.
+
 Status: revised after review, 2026-09-28. Read at branch `claude/laughing-knuth-yhp8ji`, head **`63fc44f`** (= `cc7dbd6` + a `USER_SESSION.md` commit + "Phase 3 WP6 prep: `scripts/build.sh --instance b` builds Brev B"). Inputs: CLAUDE.md §1 to §6 (§5 Phase 4 as amended by D-0030 and D-0031), docs/DECISIONS.md up to **D-0068**, docs/PHASE3_DESIGN.md, docs/ARCHITECTURE-REUSE.md, `core/brev-{proto,relay,mail}`, the Swift contact UI. The repo was not modified. Scratch: `S = /private/tmp/claude-503/-Users-andypandy/01f11233-b284-49b2-9c90-391fa2f358ef/scratchpad/p4` (reviser clone in `S/reviser`, spikes in `S/spike`).
 
 Principle: the simplest thing that meets §5 Phase 4. The relay stays on 127.0.0.1. The envelope format does not change. No new crate, no new Swift framework, no new Enclave key, no new Touch ID prompt. Approvals are relay state that only the recipient can change. Invites are one-time text codes checked against a fingerprint **in both directions** (the inviter checks the invitee with the same secret, §3.4). Rate limits are daily counters in the relay's file.

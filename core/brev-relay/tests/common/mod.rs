@@ -107,7 +107,7 @@ impl Identity {
     }
 
     /// A registration v3 body with any address bytes and signing-key field,
-    /// signed by this identity's key (D-XXXX (no invites)).
+    /// signed by this identity's key (D-0116).
     pub fn registration_with(
         &self,
         address: &[u8],

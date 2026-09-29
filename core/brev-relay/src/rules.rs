@@ -167,8 +167,8 @@ pub(crate) struct NewIdentity<'a> {
 }
 
 impl Relay {
-    /// Register (design §4.3; open since docs/DECISIONS.md D-XXXX (no
-    /// invites)), in this order: exactly this identity, address and token
+    /// Register (design §4.3; open since docs/DECISIONS.md D-0116), in
+    /// this order: exactly this identity, address and token
     /// hash already → 200 (a retry whose answer was lost; only the key
     /// holder can make it); the address or the id taken → 409; the identity
     /// verifier → 428; the policy → 429. Then 201: the identity, with no

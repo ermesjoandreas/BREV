@@ -8,8 +8,8 @@
 // field's UTF-8 limit (Rust's limits()) is refused, and the view beeps. An
 // address field (docs/PHASE3_DESIGN.md §6.5) takes only a–z, 0–9 and "-",
 // with A–Z folded to a–z; any other keystroke is refused the same way. A
-// contact field (docs/PHASE4_DESIGN.md §6.2: an address or an invite code)
-// also takes "."; it alone takes pasted bytes (`insertPasted`), ASCII only.
+// contact field (docs/PHASE4_DESIGN.md §6.2: an address to add) takes the
+// same units; it alone takes pasted bytes (`insertPasted`), ASCII only.
 // Delete and ←/→ go by composed character (SecretText.composedRange); ↑/↓,
 // line start and end, and clicks use the lines of the field's TextLayout.
 // No AppKit: compiled into the app and the CLI harness. Main thread only.
@@ -26,9 +26,9 @@ final class EditModel {
         /// with A–Z taken as a–z; every other unit is refused. Rust checks
         /// the rest (3 to 32 characters, a letter first).
         case address
-        /// An address or an invite code (docs/PHASE4_DESIGN.md §3.1,
-        /// §6.2): the address units and "."; A–Z taken as a–z. Rust parses
-        /// the rest.
+        /// An address to add as a contact (docs/PHASE4_DESIGN.md §6.2):
+        /// the address units, and the one charset that takes a paste. There
+        /// are no invite codes (D-0116).
         case contact
     }
 
@@ -65,13 +65,7 @@ final class EditModel {
         }
     }
 
-    /// A contact field's unit for `u`: an address unit, or "." as it is.
-    static func contactUnit(_ u: UInt16) -> UInt16? {
-        u == 0x2E ? u : addressUnit(u)
-    }
-
-    /// The most bytes one paste may bring (the pasteboard read's limit;
-    /// Rust's `open_invite` takes as many).
+    /// The most bytes one paste may bring (the pasteboard read's limit).
     static let maxPaste = 256
 
     // MARK: Edits
@@ -89,7 +83,7 @@ final class EditModel {
         // An address or contact field refuses the keystroke if one unit is
         // not allowed, and takes the others folded, from a stack buffer
         // zeroed after.
-        let rule = charset == .address ? Self.addressUnit : Self.contactUnit
+        let rule = Self.addressUnit
         return withUnsafeTemporaryAllocation(of: UInt16.self, capacity: u.count) { folded in
             folded.initialize(repeating: 0)
             defer { _ = memset_s(folded.baseAddress!, folded.count * 2, 0, folded.count * 2) }
@@ -103,8 +97,8 @@ final class EditModel {
 
     /// A paste into a contact field (docs/PHASE4_DESIGN.md §6.2): at most
     /// `maxPaste` bytes, ASCII only. Spaces, tabs and line breaks are left
-    /// out (a code copied from a file or a message often ends with one; Rust
-    /// trims them too); every other byte must pass the contact rule, or the
+    /// out (an address copied from a message often ends with one); every
+    /// other byte must pass the address rule, or the
     /// whole paste is refused and nothing changes, as is one that would not
     /// fit. The units go in at the caret as one insert, from a stack buffer
     /// zeroed after. The caller wipes `bytes`. Refused in any other field.
@@ -117,7 +111,7 @@ final class EditModel {
             defer { _ = memset_s(units.baseAddress!, units.count * 2, 0, units.count * 2) }
             var n = 0
             for b in bytes where ![0x20, 0x09, 0x0A, 0x0D].contains(b) {
-                guard let u = Self.contactUnit(UInt16(b)) else { return false }
+                guard let u = Self.addressUnit(UInt16(b)) else { return false }
                 units[n] = u
                 n += 1
             }

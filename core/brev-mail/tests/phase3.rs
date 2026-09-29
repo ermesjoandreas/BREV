@@ -2,9 +2,9 @@
 //! surface (docs/PHASE4_DESIGN.md §5): two `Brev` sessions in temp dirs, the
 //! relay in-process on 127.0.0.1:0, P-256 test keys standing in for the
 //! Secure Enclave, and the FFI API exactly as the Swift app uses it.
-//! Identities register with no invite (open registration, D-XXXX (no
-//! invites)) and become contacts by request. Includes both definition-of-done tests of CLAUDE.md §5
-//! Phase 3: `relay_file_holds_no_plaintext` and
+//! Identities register with no invite (open registration, D-0116) and
+//! become contacts by request. Includes both definition-of-done tests of
+//! CLAUDE.md §5 Phase 3: `relay_file_holds_no_plaintext` and
 //! `changed_key_warns_and_blocks_sending`.
 
 mod common;
@@ -445,7 +445,7 @@ fn strangers_are_dropped_and_acked() {
 }
 
 /// Addresses (owner question Q3, brev-proto's rules), registered with no
-/// invite (open registration, D-XXXX (no invites)): typed upper case is
+/// invite (open registration, D-0116): typed upper case is
 /// folded; the rules, taken addresses (another address goes through), one
 /// address per identity; contacts by address; nothing is asked of the
 /// relay before the signed registration.

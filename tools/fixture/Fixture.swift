@@ -3,7 +3,7 @@
 // Compiled into tools/viewhost and tools/snapshot, never into Brev.app. It
 // holds only what both need (docs/UI_REDESIGN.md §5.3, review 6): the relay
 // (brev-relay on 127.0.0.1 with a port the OS picks and a database in a
-// temporary folder, and its root invites), `User` (a store under a DEK
+// temporary folder; registration is open, D-0116), `User` (a store under a DEK
 // wrapped to a software P-256 key, and a software identity key: no keychain,
 // no Touch ID, no Secure Enclave) and `fake(_:)`, which builds a SecretText
 // from fixed test strings and the test marker of app/Tests/scan.c (built
@@ -133,24 +133,37 @@ final class User {
         }
     }
 
-    /// Opens the invite `code` (the caller wipes it) and registers
-    /// `address` with it.
-    func register(_ address: String, invite code: SecretBytes) throws {
-        let opened = try session.openInvite(code: code)
-        opened.address.wipe()
-        opened.code.wipe()
+    /// The address `register` registered; nil before.
+    private(set) var address: String?
+
+    /// Registers `address` (no invite, D-0116).
+    func register(_ address: String) throws {
         let typed = fake([address])
         defer { typed.wipe() }
         let digest = try session.registerRequest(address: typed)
         try session.register(signature: try Enclave.sign(digest: digest, key: identity), digest: digest)
+        self.address = address
     }
 
-    /// Invites the user `invitee` with a code of this user's, and registers
-    /// `address` there with it.
-    func invite(_ invitee: User, as address: String) throws {
-        let code = try session.createInvite()
-        defer { code.wipe() }
-        try invitee.register(address, invite: code)
+    /// Registers `newcomer` as `address` and makes it this user's contact
+    /// the Phase 4 way: it adds this user (a request), this user's sync
+    /// fetches the request and approves it, and its sync learns of the
+    /// approval. This user must be registered.
+    func befriend(_ newcomer: User, as address: String) throws {
+        guard let mine = self.address else { throw BrevError.NotFound }
+        try newcomer.register(address)
+        let typed = fake([mine])
+        defer { typed.wipe() }
+        _ = try newcomer.session.addContact(address: typed)
+        _ = try session.sync()
+        let asks = try session.requests()
+        defer { asks.forEach { $0.address.wipe(); $0.code.wipe() } }
+        let u = Array(address.utf16)
+        guard let ask = asks.first(where: { r in
+            r.address.length == u.count && (0..<u.count).allSatisfy { r.address.units[$0] == u[$0] }
+        }) else { throw BrevError.NotFound }
+        _ = try session.answerRequest(peer: ask.peer, approve: true)
+        _ = try newcomer.session.sync()
     }
 
     /// The local id of the contact with `address`; the names read are wiped.
@@ -205,25 +218,4 @@ final class User {
         }
         DispatchQueue.main.async { done(result) }
     }
-}
-
-/// A root invite from the relay database in `dir` (the operator's
-/// `brev-relay invite`, which works while the relay serves), in a
-/// SecretBytes; nil if it fails.
-func rootInvite(in dir: URL) -> SecretBytes? {
-    guard let path = relayBinary else { return nil }
-    let command = Process()
-    command.executableURL = URL(fileURLWithPath: path)
-    command.arguments = ["invite", "--db", dir.appendingPathComponent("relay.db").path]
-    let out = Pipe()
-    command.standardOutput = out
-    command.standardError = FileHandle.nullDevice
-    guard (try? command.run()) != nil else { return nil }
-    var printed = out.fileHandleForReading.readDataToEndOfFile()
-    command.waitUntilExit()
-    defer { printed.wipe() }
-    let code = SecretBytes(capacity: Int(limits().maxInvite))
-    let n = printed.firstIndex(of: 0x0A).map { $0 - printed.startIndex } ?? printed.count
-    let fits = printed.withUnsafeBytes { code.append(UnsafeRawBufferPointer(rebasing: $0[..<n])) }
-    return command.terminationStatus == 0 && fits && code.count > 0 ? code : nil
 }

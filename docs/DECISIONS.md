@@ -4695,3 +4695,32 @@ WP5 and their reviews record.
 - **Verified:** scripts/test.sh, scripts/build.sh (both instances),
   tools/snapshot `--check` and its PNGs (no «Klasse» anywhere). Not run on
   screen or with Touch ID; V82–V84 need the owner's rerun.
+
+### D-0116 — Open registration; no invite codes
+
+- **Date:** 2026-09-29
+- **Decision:** The owner wants ordinary, open registration, with no
+  invite codes, not even optional ones. Anyone registers an address.
+  Contacts are added by address, and the other side approves the request
+  (Phase 4's approval, *Blokker* and daily limits are unchanged).
+  - The whole invite feature is removed: the relay's invite endpoints,
+    tables, root invites, operator command and invite graph; brev-proto's
+    invite format and bodies; brev-mail's `invites` table, the "verified
+    by invite" flag and its FFI calls (`create_invite`, `open_invite`,
+    `redeem_invite`, `InviteInfo`, `InviteInvalid`, `InviteMismatch`,
+    `Limits.max_invite`, `verified`); and the app's invite step in
+    onboarding, «Lag invitasjon», «Kopier koden» and «Godta
+    invitasjonen».
+  - Registration body v3, store schema v8 and relay file v4. Test letters
+    only, so there is no migration.
+  - The contact field takes addresses only; ⌘V there is kept.
+- **Consequences:** Two accepted risks go into CLAUDE.md §2:
+  - Anyone can make many accounts. Approval and the per-identity limits
+    keep inboxes closed, and a per-source limit belongs with the remote
+    relay.
+  - Nothing checks a contact's first key any more except the optional
+    comparison of identity codes. Invite codes used to carry the key's
+    fingerprint.
+- **Verified:** `scripts/test.sh`: cargo tests, the Swift harness (case 9
+  is now `approval`: request, approval, letters, *Blokker*), the lock
+  probe, the snapshot tool and the view host's compile check.

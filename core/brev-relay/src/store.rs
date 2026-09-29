@@ -17,7 +17,7 @@ use crate::{Config, Error, Gates, Policy};
 const APPLICATION_ID: i32 = 0x4252_4C59;
 /// `user_version` of this schema: 4 since registration is open and the
 /// invites, the invite graph and the events' tags are gone
-/// (docs/DECISIONS.md D-XXXX (no invites)); 3 added each envelope's
+/// (docs/DECISIONS.md D-0116); 3 added each envelope's
 /// `received_at` (docs/AUTHORSHIP.md §2.5). Phase 3's files (1), Phase 4's
 /// (2) and those with invites (3) are refused.
 const USER_VERSION: i32 = 4;

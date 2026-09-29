@@ -4,7 +4,7 @@
 //! FFI API exactly as the Swift app uses it. Includes both brev-mail
 //! definition-of-done tests of CLAUDE.md §5 Phase 4
 //! (`registration_needs_no_invite`, `a_stranger_cannot_reach_an_inbox`;
-//! the invite tests went with the invites, D-XXXX (no invites)), *Blokker*
+//! the invite tests went with the invites, D-0116), *Blokker*
 //! (owner answer 6), and the
 //! deferred WP2 review note: a blocked peer cannot get an event into the
 //! blocker's queue; and the WP5 review's: a block the relay missed is told
@@ -82,7 +82,7 @@ fn sign_and_submit(u: &User, contact: &[u8], body: &[u8]) -> Result<Vec<u8>, Bre
     u.b.submit()
 }
 
-/// DoD (D-XXXX (no invites), replacing design §8 brev-mail 1 to 3): anyone
+/// DoD (D-0116, replacing design §8 brev-mail 1 to 3): anyone
 /// registers an address with no invite, like ordinary e-mail, and
 /// registering approves no one. The new identity has no contact; its
 /// request waits at A with no text; no letter to A is made until A

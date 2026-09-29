@@ -1,7 +1,7 @@
 //! Brev relay (docs/PHASE3_DESIGN.md §4, docs/PHASE4_DESIGN.md §4): a
 //! minimal axum server on `127.0.0.1` only. An identity registers an address
 //! with a signed body, with no invite (registration is open,
-//! docs/DECISIONS.md D-XXXX (no invites)); a token-authenticated caller looks
+//! docs/DECISIONS.md D-0116); a token-authenticated caller looks
 //! up an address, asks for contact, answers what it is told, submits its own
 //! signed envelopes, fetches its waiting envelopes and acknowledges them, and
 //! an acknowledged envelope is deleted. A letter is stored only if its

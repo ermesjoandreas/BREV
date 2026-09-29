@@ -1,6 +1,6 @@
 //! Relay tests of Phase 3's properties (docs/PHASE3_DESIGN.md §4.6) on the
 //! Phase 4 relay (docs/PHASE4_DESIGN.md §8): open registration rules (no
-//! invite, D-XXXX (no invites)), token checks on every endpoint, no invite
+//! invite, D-0116), token checks on every endpoint, no invite
 //! endpoint, envelope checks with the sender's
 //! token, inbox and ack, deletion from the file, no plaintext, the policy
 //! hook, release, and the binary's listen rule, port file and trace. The
@@ -251,7 +251,7 @@ fn requests_need_the_token() {
     }
 }
 
-/// The invite endpoints are gone (D-XXXX (no invites)): each answers 404
+/// The invite endpoints are gone (D-0116): each answers 404
 /// to any body, with a valid token or none, and writes nothing.
 #[test]
 fn no_invite_endpoint_answers() {

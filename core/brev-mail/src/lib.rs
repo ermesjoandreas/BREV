@@ -7,7 +7,7 @@
 //! [`Brev`] and [`OpenText`] (`ffi.rs`); the relay client is in `relay.rs`
 //! (docs/PHASE3_DESIGN.md §5). Phase 4 (docs/PHASE4_DESIGN.md §5) adds
 //! contact approval and *Blokker*, with open registration and no invites
-//! (docs/DECISIONS.md D-XXXX (no invites)); Hand (docs/AUTHORSHIP.md, on
+//! (docs/DECISIONS.md D-0116); Hand (docs/AUTHORSHIP.md, on
 //! brev-hand) the authorship token of every letter and its check.
 //!
 //! `unsafe_code = "forbid"` is set at the workspace level. The UniFFI
