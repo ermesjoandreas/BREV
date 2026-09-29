@@ -4137,3 +4137,17 @@ WP5 and their reviews record.
   send refused as NotApproved with no Touch ID. Still open for Phase 3's
   definition of done: V60 (key change); for Phase 4's: V77 and the relay's
   rate-limit and delivery rows are machine-tested only.
+
+### D-0105 — Phase 3's definition of done is met on the owner's Mac
+
+- **Date:** 2026-09-29
+- **Decision:** Phase 3 (real transport) is closed for its definition of
+  done in CLAUDE.md §5: two app instances with separate data dirs
+  exchanged letters through the local relay (V57), the relay's database
+  held no plaintext (V58, also covered by `relay_file_holds_no_plaintext`),
+  and a changed key for a pinned contact triggered the warning and blocked
+  sending (V60). Phase 3's remaining VERIFY rows are in round 2.
+- **Verified:** docs/VERIFY-RESULTS.md, "Owner run, round 1" (V57, V58)
+  and the V60 row added to it: KeyChanged at Send with no Touch ID and an
+  unchanged envelope count, the warning with both codes, then after
+  acceptance and Brev B re-adding Brev a letter delivered and deleted.

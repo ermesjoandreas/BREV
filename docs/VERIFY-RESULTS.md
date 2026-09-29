@@ -23,8 +23,10 @@ Environment: ProductName:		macOS; ProductVersion:		26.2; BuildVersion:		25C56; X
 | V58 | pass | relay.db: 0 treff på BREV-SECRET-BODY (UTF-8 og UTF-16) mens et brev ventet; kontroll: adressen brev-secret-peer funnet 2 ganger. |
 | V59 | pass | Etter at begge har synket: 0 brev venter i relay.db (slettet etter levering). |
 | V81 | pass | Blokker i Brev B: ett klikk, ingen Touch ID; relay /v1/block 204; Brev sin Send gir NotApproved uten Touch ID-dialog, ingen ny /v1/envelopes (fortsatt 2). Eieren bekrefter at Brev B heller ikke kan skrive. |
+| V38 | pass (partial) | Brev B reset: brev.db removed in Finder gave 'open failed: Storage', then Slett alt og start på nytt and a new onboarding with a new key. |
+| V60 | pass | Key change: `brev-relay release brev-secret-peer`, Brev B re-registered the same address with a new key (root invite 2). In Brev, Send gave KeyChanged with no Touch ID and no new `/v1/envelopes` (2 before and after); the header showed the warning with both codes and Nytt brev was disabled (owner). After Godta ny kode ('new key accepted') and Brev B adding brev-secret-me (`/v1/requests` 202, two `/v1/events/answer` 204), Brev's letter was accepted (202) and arrived in Brev B (arrived=1); 0 waiting. |
 
-Not run in round 1: V77 (tampered invite fingerprint), V60 (key change, part of Phase 3's definition of done), and every round-2 row in `docs/USER_SESSION.md`.
+Not run yet: V77 (tampered invite fingerprint) and every round-2 row in `docs/USER_SESSION.md`. V60 was run right after round 1.
 
 ## Phase 3 branch after the vault split (`60d4e1b`)
 
