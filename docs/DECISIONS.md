@@ -4233,3 +4233,23 @@ WP5 and their reviews record.
   badge from claiming more than is proven.
 - **Verified:** Spike runs 1–3; the logs are in the spike folder's history
   (scratchpad) and the facts are summarised above.
+
+### D-0109 — Hand: one Touch ID per letter; sudo and SIP lock Brev; the rest are numbers
+
+- **Date:** 2026-09-29
+- **Decision:** The owner answered on docs/AUTHORSHIP.md:
+  1. One Touch ID per letter covers both signatures (token and envelope),
+     with one fresh `LAContext` (§3.2).
+  2. Other apps' windows, known AI programs and admin membership are
+     shown to the recipient as numbers. They do not lower the class and
+     do not lock Brev.
+  3. Brev locks while a `sudo` or `su` process runs or SIP is off, and
+     refuses to unlock until neither holds (§4.3). The adapter samples
+     every 2 s while Brev is unlocked. An unreadable fact does not lock;
+     it gives class B.
+  4. Go for the work order in §9.
+- **Reasoning:** Locking is a clear rule the user can see and fix. A
+  lowered class only shows up for the recipient. Agents and windows are
+  too weak, or too common, to lock on: most Mac users are admins, and the
+  owner runs AI tools all day.
+- **Verified:** decision only.

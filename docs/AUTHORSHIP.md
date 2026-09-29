@@ -49,7 +49,7 @@ Integer keys are registered EAT/CWT claims; text keys are Brev's own claims.
 | 10 | `eat_nonce` | bstr (16) | Random per token, from the OS RNG in Rust. |
 | 265 | `eat_profile` | tstr | `"tag:brev.no,2026:hand-v1"` (placeholder until the owner picks a domain). |
 | `"platform"` | | uint | 1 = macOS. Reported by the app. |
-| `"key"` | | uint | Where the identity key lives: 1 Secure Enclave, 2 TPM, 3 software. |
+| `"key"` | | uint | Where the identity key lives: 1 Secure Enclave, 2 TPM, 3 software, 4 unknown. |
 | `"class"` | | uint | The class the sender computed: 1 = A, 2 = B, 3 = C. |
 | `"content"` | | bstr (32) | Content hash, §2.3. |
 | `"env"` | | map | The measured facts, §2.2. |
@@ -62,8 +62,8 @@ A fact the app could not read is CBOR `null`. D-0107 item 3 applies: any
 
 | Key | Type | Source | How it is measured |
 |---|---|---|---|
-| `"secure-input"` | bool | sampled | `IsSecureEventInputEnabled()` was true in every sample while the compose view had focus. |
-| `"capture-off"` | bool | sampled | The compose window had `sharingType = .none` and its protected layer `preventsCapture = true` in every sample. |
+| `"secure-input"` | bool / null | sampled | `IsSecureEventInputEnabled()` was true in every sample while the compose view had focus. |
+| `"capture-off"` | bool / null | sampled | The compose window had `sharingType = .none` and its protected layer `preventsCapture = true` in every sample. |
 | `"ax-opaque"` | bool | by design | Content views expose no text to Accessibility. |
 | `"pasteboard-off"` | bool | by design | No copy, cut, paste or drag of content. |
 | `"input-filter"` | bool | by design | Events from another process (`eventSourceUnixProcessID != 0`) are dropped. |
@@ -202,7 +202,7 @@ lowers it in test archives only, with the existing release check.
 
 ### 4.1 The rule (one function in `brev-hand`, used by sender and recipient)
 
-- **C**: the key is not in hardware (`"key"` is 3).
+- **C**: the key is not in hardware (`"key"` is 3 or 4).
 - **B**: otherwise, if any of these holds:
   - a fact is `null` (unreadable);
   - `secure-input`, `capture-off`, `ax-opaque`, `pasteboard-off` or `input-filter` is false;
@@ -223,7 +223,21 @@ are admins, and a blocked input never reached the letter. Letting them
 lower the class would make class A claim things nobody can prove (D-0107
 item 4).
 
-### 4.3 The agent list
+### 4.3 Locking: sudo and SIP (owner, D-0109)
+
+While Brev is unlocked, the adapter hands Rust a sample every 2 s. It does
+this all the time, not only during compose. If a sample shows a running
+`sudo` or `su`, or SIP off, Rust locks the vault at once: the DEK and every
+open letter are wiped, and an unsent draft is lost. Unlock is refused with
+`Environment` while either holds, because the sample taken at unlock must
+be clean.
+
+A fact that cannot be read does not lock Brev. It gives class B (D-0107
+item 3), so letters can still be read but not sent. The token keeps
+`"sip"` and `"sudo"`, and the class rule in §4.1 still gives B for them,
+although genuine Brev never gets that far.
+
+### 4.4 The agent list
 
 A short, documented list of process names (for example `claude`, `codex`,
 `cursor`, `ollama`), kept in `brev-hand` and versioned with the profile. A
