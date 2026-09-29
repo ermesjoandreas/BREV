@@ -47,8 +47,10 @@ final class ConfirmSheet: HardenedWindow {
         return sheet
     }
 
+    /// Alert-like (docs/UI_REDESIGN.md §2.8): a 32 pt symbol on the left,
+    /// the title and the text beside it, the buttons bottom right.
     private func makeContent(_ kind: Kind) -> NSView {
-        let width: CGFloat = 392
+        let width: CGFloat = 340
         let (title, body, okTitle, cancelTitle) = kind == .reset
             ? (L10n.resetConfirmTitle, L10n.resetConfirmBody, L10n.resetConfirmOK, L10n.resetConfirmCancel)
             : (L10n.acceptConfirmTitle, L10n.acceptConfirmBody, L10n.acceptConfirmOK, L10n.acceptConfirmCancel)
@@ -57,16 +59,31 @@ final class ConfirmSheet: HardenedWindow {
         let ok = HumanButton(title: okTitle, target: self, action: #selector(confirm(_:)))
         ok.hasDestructiveAction = kind == .reset
         okButton = ok
-        let buttons = NSStackView(views: [cancel, ok])
-        buttons.spacing = 12
-        let stack = NSStackView(views: [
-            InterfaceText(title, style: .heading, width: width),
-            InterfaceText(body, width: width),
-            buttons,
-        ])
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let buttons = NSStackView(views: [spacer, cancel, ok])
+        buttons.spacing = 8
+        let icon = NSImageView()
+        let config = NSImage.SymbolConfiguration(pointSize: 32, weight: .regular)
+        icon.image = NSImage(systemSymbolName: kind == .reset ? "exclamationmark.triangle" : "key",
+                             accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        icon.contentTintColor = kind == .reset ? .systemOrange : .secondaryLabelColor
+        let heading = InterfaceText(title, width: width, alignment: .left)
+        heading.setFont(NSFont.boldSystemFont(ofSize: 13))
+        let text = NSStackView(views: [heading, InterfaceText(body, width: width, alignment: .left)])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 8
+        let top = NSStackView(views: [icon, text])
+        top.orientation = .horizontal
+        top.alignment = .top
+        top.spacing = 16
+        let stack = NSStackView(views: [top, buttons])
         stack.orientation = .vertical
-        stack.spacing = 16
-        stack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 20, right: 24)
+        stack.alignment = .leading
+        for v in [top, buttons] { v.widthAnchor.constraint(equalToConstant: width + 48).isActive = true }
+        stack.spacing = 20
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
         return stack
     }
 

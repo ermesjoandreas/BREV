@@ -118,7 +118,6 @@ enum L10n {
     static let contactsSectionAdd = tr("contacts.section.add")
     static let contactsAddress = tr("contacts.address")
     static let contactsCode = tr("contacts.code")
-    static let contactsMe = tr("contacts.me")
     static let contactsCopyMe = tr("contacts.copyme")
     static let contactsField = tr("contacts.field")
     static let contactsAdd = tr("contacts.add")

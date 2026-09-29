@@ -51,7 +51,7 @@ final class InterfaceText: NSView {
     }
 
     private let text: String
-    private let attributes: [NSAttributedString.Key: Any]
+    private var attributes: [NSAttributedString.Key: Any]
     private var size: NSSize
 
     /// `text` wrapped to `width` points, in `style`'s font and colour (or
@@ -81,6 +81,14 @@ final class InterfaceText: NSView {
         setFrameSize(size)
         invalidateIntrinsicContentSize()
         needsDisplay = true
+    }
+
+    /// Draws in `font` from now on (a sheet's bold 13 pt title).
+    func setFont(_ font: NSFont) {
+        attributes[.font] = font
+        let w = size.width
+        size.width = -1
+        setWidth(w)
     }
 
     override var isFlipped: Bool { true }

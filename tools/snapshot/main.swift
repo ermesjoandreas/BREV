@@ -163,15 +163,27 @@ func write(_ image: CGImage, _ name: String) {
 /// the preview PNG with the fake content drawn in by each view's own
 /// drawContent (docs/UI_REDESIGN.md §5.5).
 func render(_ root: NSView, _ name: String) {
-    guard let rep = capture(root), let chrome = rep.cgImage else {
-        return check("\(name): captured", false)
-    }
+    guard let (chrome, preview) = images(root) else { return check("\(name): captured", false) }
+    write(chrome, "\(name).png")
+    write(preview, "\(name)-preview.png")
+}
+
+/// The two images of `root`: chrome with outlines, and the preview.
+func images(_ root: NSView) -> (CGImage, CGImage)? {
+    guard let rep = capture(root), let chrome = rep.cgImage else { return nil }
     let w = chrome.width, h = chrome.height, s = CGFloat(w) / root.bounds.width
     let views = all(ContentView.self, in: root).filter { !$0.isHiddenOrHasHiddenAncestor }
     func context() -> CGContext {
         let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                             space: CGColorSpace(name: CGColorSpace.sRGB)!,
                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        // A sheet's content view has no background of its own: the window's.
+        if let window = root.window {
+            var fill = window.backgroundColor.cgColor
+            root.effectiveAppearance.performAsCurrentDrawingAppearance { fill = window.backgroundColor.cgColor }
+            ctx.setFillColor(fill)
+            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        }
         ctx.draw(chrome, in: CGRect(x: 0, y: 0, width: w, height: h))
         return ctx
     }
@@ -204,7 +216,6 @@ func render(_ root: NSView, _ name: String) {
         outline.setLineDash(phase: 0, lengths: [3 * s, 2 * s])
         outline.stroke(px.insetBy(dx: s / 2, dy: s / 2))
     }
-    if let image = outline.makeImage() { write(image, "\(name).png") }
     let preview = context()
     for v in views {
         guard let (visible, r) = place(v) else { continue }
@@ -216,7 +227,31 @@ func render(_ root: NSView, _ name: String) {
         v.drawContent(in: preview, rect: visible)
         preview.restoreGState()
     }
-    if let image = preview.makeImage() { write(image, "\(name)-preview.png") }
+    guard let a = outline.makeImage(), let b = preview.makeImage() else { return nil }
+    return (a, b)
+}
+
+/// `sheet` over `under` (the window it belongs to), dimmed, centred at the
+/// top below the toolbar, as a sheet shows.
+func composite(_ under: CGImage, _ sheet: CGImage, dark: Bool) -> CGImage? {
+    let w = under.width, h = under.height
+    guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    ctx.draw(under, in: CGRect(x: 0, y: 0, width: w, height: h))
+    ctx.setFillColor(CGColor(gray: 0, alpha: dark ? 0.35 : 0.18))
+    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    let r = CGRect(x: (w - sheet.width) / 2, y: h - 104 - sheet.height, width: sheet.width, height: sheet.height)
+    ctx.setShadow(offset: CGSize(width: 0, height: -8), blur: 40, color: CGColor(gray: 0, alpha: 0.35))
+    ctx.addPath(CGPath(roundedRect: r, cornerWidth: 20, cornerHeight: 20, transform: nil))
+    ctx.fillPath()
+    ctx.setShadow(offset: .zero, blur: 0)
+    ctx.saveGState()
+    ctx.addPath(CGPath(roundedRect: r, cornerWidth: 20, cornerHeight: 20, transform: nil))
+    ctx.clip()
+    ctx.draw(sheet, in: r)
+    ctx.restoreGState()
+    return ctx.makeImage()
 }
 
 // MARK: - Fake world: users, letters, requests, a key change
@@ -595,6 +630,131 @@ scene("mail-empty", control: L10n.sidebarAdd) {
 }
 expect("a new user: Innboks, empty, nothing read", emptyMail.selection == .inbox && emptyMail.messageList.count == 0)
 emptyMail.wipeAll()
+
+// The sheets, each drawn as its own window (never begun as a sheet), then
+// the compose sheet composited over the dimmed mail window.
+func sheetScene(_ name: String, control: String?, _ make: () -> NSWindow) {
+    guard onlyScene == nil || onlyScene == name else { return }
+    let sheet = make()
+    for (label, appearance) in appearances {
+        sheet.appearance = NSAppearance(named: appearance)
+        let root = sheet.contentView!
+        root.layoutSubtreeIfNeeded()
+        root.displayIfNeeded()
+        if !checkOnly { render(root, "\(name)-\(label)") }
+    }
+    checkWindow(name, sheet, control: control)
+    check("\(name): secure input stays off (no field took focus)",
+          !SecureInput.isOn && IsSecureEventInputEnabled() == secureInputAtStart)
+    if let holder = sheet as? ContentHolder { holder.wipeAll() }
+    sheet.close()
+    guardOffscreen(name)
+    print("scene \(name)")
+}
+
+/// A fixed text into a compose field through its model (never a key).
+func put(_ text: String, into field: SecureComposeView) {
+    field.window?.contentView?.layoutSubtreeIfNeeded()
+    for (i, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+        if i > 0 { field.model.insertNewline() }
+        Array(line.utf16).withUnsafeBufferPointer { _ = field.model.insert($0) }
+    }
+    field.relayout()
+    field.enclosingScrollView?.contentView.scroll(to: .zero)
+}
+
+func composeSheet() -> ComposeSheet? {
+    guard let kari = try? host.session.contacts().first(where: { c in
+        let u = Array(kariAddress.utf16)
+        return c.name.length == u.count && (0..<u.count).allSatisfy { c.name.units[$0] == u[$0] }
+    }) else { return nil }
+    defer { kari.name.wipe() }
+    return ComposeSheet(contact: kari, session: host.session, sampler: { _ in cleanSample },
+                        signer: { _, _, done in done(.failure(BrevError.Signing)) }, limits: limits())
+}
+
+sheetScene("compose-empty", control: L10n.composeSend) { composeSheet()! }
+sheetScene("compose-filled", control: L10n.composeSend) {
+    let sheet = composeSheet()!
+    put("Middag på lørdag", into: sheet.subject)
+    put("Hei Kari!\n\nJa, gjerne! Jeg tar med dessert. Skal jeg ta med noe mer?\n\nHilsen\nAndreas", into: sheet.body)
+    // Over the dimmed mail window, as the sheet shows (preview and chrome).
+    lock.session = host.session
+    window.root.show(mail)
+    if !checkOnly {
+        for (label, appearance) in appearances {
+            window.appearance = NSAppearance(named: appearance)
+            sheet.appearance = NSAppearance(named: appearance)
+            let mailRoot = window.contentView!.superview!, sheetRoot = sheet.contentView!
+            for v in [mailRoot, sheetRoot] {
+                v.layoutSubtreeIfNeeded()
+                v.displayIfNeeded()
+            }
+            if let under = images(mailRoot), let over = images(sheetRoot) {
+                for (image, suffix) in [(composite(under.0, over.0, dark: label == "dark"), ""),
+                                        (composite(under.1, over.1, dark: label == "dark"), "-preview")] {
+                    image.map { write($0, "compose-over-mail-\(label)\(suffix).png") }
+                }
+            }
+        }
+    }
+    return sheet
+}
+sheetScene("contacts", control: L10n.contactsSectionMe) { ContactSheet(session: host.session) }
+sheetScene("contacts-invite", control: L10n.inviteNote) {
+    // Kari's sheet: the host used its daily invites for the fixture.
+    let sheet = ContactSheet(session: kari.session)
+    sheet.made(Result { try kari.session.createInvite() })
+    return sheet
+}
+sheetScene("confirm-reset", control: L10n.resetConfirmTitle) { ConfirmSheet.make(.reset) }
+sheetScene("confirm-key", control: L10n.acceptConfirmTitle) { ConfirmSheet.make(.acceptKey) }
+sheetScene("proof-verified", control: L10n.proofAttest) {
+    ProofSheet.make(Proof(verified: true, class: 1, failed: [], attested: false, admin: false, agents: 0,
+                          windows: 0, blockedInput: 0, seconds: 420, sip: true, sudo: 0))
+}
+sheetScene("proof-unverified", control: L10n.proofCheck("signature")) {
+    ProofSheet.make(Proof(verified: false, class: nil, failed: ["signature"], attested: false, admin: nil,
+                          agents: nil, windows: nil, blockedInput: nil, seconds: nil, sip: nil, sudo: nil))
+}
+
+// View level: every row kind and chip, selected and not, focused and not.
+sheetScene("list-rows", control: nil) {
+    let w = HardenedWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 300), styleMask: [.titled],
+                           backing: .buffered, defer: false)
+    Hardening.apply(w)
+    w.isReleasedWhenClosed = false
+    let root = NSView(frame: NSRect(x: 0, y: 0, width: 760, height: 300))
+    w.contentView = root
+    let focused = SecureListView(style: .messages), unfocused = SecureListView(style: .messages)
+    let side = SecureListView(style: .sidebar, symbol: "person.crop.circle")
+    for (i, list) in [focused, unfocused].enumerated() {
+        let box = NSView(frame: NSRect(x: 16 + CGFloat(i) * 250, y: 40, width: 240, height: 224))
+        root.addSubview(box)
+        box.addSubview(list)
+        list.setRows([
+            SecureListView.Row(text: fake([kariAddress]), text2: fake([subjects[0]]), meta: "12:04",
+                               chip: SecureListView.Chip(text: L10n.chipClass("A"), warning: false)),
+            SecureListView.Row(text: fake([olaAddress]), text2: fake([subjects[3]]), meta: "tirsdag",
+                               chip: SecureListView.Chip(text: L10n.badge(verified: false, classCode: nil),
+                                                         warning: true)),
+            SecureListView.Row(text: fake([subjects[2]]), meta: "12.09.2026", note: L10n.listSent),
+            SecureListView.Row(text: fake([subjects[1]]), meta: "11.09.2026", note: L10n.listReceived,
+                               chip: SecureListView.Chip(text: L10n.chipClass("B"), warning: false)),
+        ], selected: i == 0 ? 0 : 1)
+        list.frame = box.bounds
+    }
+    let sideBox = NSView(frame: NSRect(x: 516, y: 40, width: 228, height: 224))
+    root.addSubview(sideBox)
+    sideBox.addSubview(side)
+    side.frame = NSRect(x: 0, y: 224 - 4 * 28, width: 228, height: 4 * 28)
+    side.setRows([SecureListView.Row(text: fake([kariAddress])),
+                  SecureListView.Row(text: fake([olaAddress]), flag: true),
+                  SecureListView.Row(text: fake([ingridAddress]), dim: true),
+                  SecureListView.Row(text: fake([perAddress]))], selected: 0)
+    w.makeFirstResponder(focused)
+    return w
+}
 
 // The real lock sequence on the mail window, with a letter open.
 scene("locked-after", control: L10n.unlockTitle) {
