@@ -1574,12 +1574,32 @@ func isInviteCode(_ code: SecretBytes, address: String, identity: SecretBytes) -
     }
 }
 
-/// Scanner needle 0: the code's secret, its last 26 bytes, XORed as scan.c
-/// takes it.
-func setSecretNeedle(_ code: SecretBytes) -> Bool {
-    var x = code.withBytes { $0.suffix(26).map { $0 ^ 0x5A } }
-    defer { _ = x.withUnsafeMutableBytes { memset_s($0.baseAddress!, $0.count, 0, $0.count) } }
-    return x.count == 26 && brev_scan_set_needle(0, x, x.count) == 0
+/// Scanner needles 0 and 1: the code's secret as text, its last 26 bytes,
+/// and as Rust keeps it once the code is parsed, the 16 bytes that base32
+/// text decodes to (design §3.1; the last 2 of its 130 bits are zero). Both
+/// XORed as scan.c takes them; each byte is XORed as it is decoded, so no
+/// plain copy is made here.
+func setSecretNeedles(_ code: SecretBytes) -> Bool {
+    var text = code.withBytes { $0.suffix(26).map { $0 ^ 0x5A } }
+    var raw = [UInt8](repeating: 0, count: 16)
+    defer {
+        _ = text.withUnsafeMutableBytes { memset_s($0.baseAddress!, $0.count, 0, $0.count) }
+        _ = raw.withUnsafeMutableBytes { memset_s($0.baseAddress!, $0.count, 0, $0.count) }
+    }
+    var bits: UInt32 = 0, pending = 0, n = 0
+    for x in text {
+        let c = x ^ 0x5A
+        guard (0x61...0x7A).contains(c) || (0x32...0x37).contains(c) else { return false }
+        bits = (bits << 5) | UInt32(c >= 0x61 ? c - 0x61 : c - 0x32 + 26)
+        pending += 5
+        if pending >= 8 {
+            pending -= 8
+            if n < 16 { raw[n] = UInt8(truncatingIfNeeded: bits >> pending) ^ 0x5A }
+            n += 1
+        }
+    }
+    return text.count == 26 && n == 16 && brev_scan_set_needle(0, text, text.count) == 0
+        && brev_scan_set_needle(1, raw, raw.count) == 0
 }
 
 /// A copy of `code` with the first character of its fingerprint changed
@@ -1603,10 +1623,13 @@ func editedFingerprint(_ code: SecretBytes, address: String) -> SecretBytes {
 /// (NotApproved, before any digest); A's sync shows the request with C's
 /// address and code, one answer approves it, C's sync learns it, and C's
 /// letter arrives. Then A blocks C (Blokker): A cannot send to C, and C's
-/// letters no longer reach A. While the letters are open and the code is
-/// kept the scanner sees them (positive controls); after the wipe, the
-/// flush and the locks, nothing: no UTF-8, UTF-16 or glyph copy of the
-/// marker, and no copy of the code's secret.
+/// letters no longer reach A. D opens A's code too and holds it opened
+/// until the lock, never registering. While the letters are open, the code
+/// is kept and an opened invite is held the scanner sees them (positive
+/// controls: the code's secret as text in Swift, as 16 bytes in Rust);
+/// after the wipe, the flush and the locks, nothing: no UTF-8, UTF-16 or
+/// glyph copy of the marker, and no copy of the code's secret, as text or
+/// as bytes.
 func caseInvite() {
     requireScribble(true)
     let relay = relayURL()
@@ -1618,6 +1641,7 @@ func caseInvite() {
         let a = try! User(in: dir.appendingPathComponent("a"), relay: relay)
         let b = try! User(in: dir.appendingPathComponent("b"), relay: relay)
         let c = try! User(in: dir.appendingPathComponent("c"), relay: relay)
+        let d = try! User(in: dir.appendingPathComponent("d"), relay: relay)
         let addressA = freshAddress("a"), addressB = freshAddress("b"), addressC = freshAddress("c")
 
         // A: the root invite.
@@ -1641,18 +1665,25 @@ func caseInvite() {
         }
         check("the invite code is brev1.<A's address>.<A's code as fingerprint>.<secret>, at most 96 ASCII bytes",
               isInviteCode(code, address: addressA, identity: meA.code))
-        check("scanner takes the code's secret as needle 0", setSecretNeedle(code))
+        check("scanner takes the code's secret as needles 0 (text) and 1 (its 16 bytes)", setSecretNeedles(code))
         let edited = editedFingerprint(code, address: addressA)
         check("a copy with one character of the fingerprint changed is InviteMismatch at B, which keeps nothing",
               throwsError(.InviteMismatch) { try b.session.openInvite(code: edited) }
                   && throwsError(.InviteInvalid) { try b.register(addressB) })
         edited.wipe()
+        let held = try? d.session.openInvite(code: code)
+        check("D opens the real code and holds it opened (D never registers)", held.map { !$0.root } ?? false)
+        held?.address.wipe()
+        held?.code.wipe()
         let invited = try? b.session.openInvite(code: code)
         check("the real code shows A as the inviter: A's address and code",
               invited.map { !$0.root && unitsOf($0.address) == Array(addressA.utf16)
                   && $0.code.withBytes { Array($0) } == meA.code.withBytes { Array($0) } } ?? false)
         invited?.address.wipe()
         invited?.code.wipe()
+        h = scan()
+        check("while B and D hold the opened invite: the scanner sees Rust's 16 bytes of the secret (positive control)",
+              h.needle(1) > 0, "\(h)")
         do { try b.register(addressB) } catch {
             check("B registers with A's invite code", false, "\(error)")
             return
@@ -1746,20 +1777,22 @@ func caseInvite() {
         letters.forEach(drawing.draw)
         h = scan()
         check("while open: the letters are in memory (positive control)", h.u16 > 0, "\(h)")
+        check("before the lock: D's opened invite still holds the secret's 16 bytes (positive control)",
+              h.needle(1) > 0, "\(h)")
         h = drawing.scanWithLiveLine(letters[0], font: font)
         check("while a line of one is alive: the glyph needle sees it (positive control)", h.glyph > 0, "\(h)")
         letters.forEach { $0.wipe() }
         (aThreads + bThreads).forEach { $0.subject.wipe() }
         GlyphFlush.flush()
         drawing.layout.reset()
-        for u in [a, b, c] { u.lock() }
+        for u in [a, b, c, d] { u.lock() }
         check("after lock: the invite calls are Locked (no request)",
               throwsLocked { try a.session.createInvite() } && throwsLocked { try a.session.requests() }
                   && throwsLocked { try a.session.sync() })
         h = scan()
-        check("after wipe, flush and lock: no copy of the marker (UTF-8, UTF-16, glyphs) or of the code's secret",
-              h.u8 == 0 && h.u16 == 0 && h.glyph == 0 && h.needle(0) == 0
-                  && [a, b, c].allSatisfy { $0.session.brev.isLocked() }, "\(h)")
+        check("after wipe, flush and lock: no copy of the marker (UTF-8, UTF-16, glyphs) or of the code's secret (text, bytes)",
+              h.u8 == 0 && h.u16 == 0 && h.glyph == 0 && h.needle(0) == 0 && h.needle(1) == 0
+                  && [a, b, c, d].allSatisfy { $0.session.brev.isLocked() }, "\(h)")
     }
 }
 
