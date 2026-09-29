@@ -4253,3 +4253,105 @@ WP5 and their reviews record.
   too weak, or too common, to lock on: most Mac users are admins, and the
   owner runs AI tools all day.
 - **Verified:** decision only.
+
+### D-0110 — Hand step 2: envelope v2 with the token, `received_at`, the facts-not-flags FFI, store v6
+
+- **Date:** 2026-09-29
+- **Decision:** Step 2 of docs/AUTHORSHIP.md §9, and the Rust half of step
+  4, as the owner's brief for this step fixed them (Rust only; the Swift
+  adapter is step 3, and the app build is red until it lands):
+  1. **Envelope.** `brev_proto::PROTOCOL_VERSION` is 2; nothing else in the
+     envelope changed. The payload inside the AEAD is `letter length (u32
+     BE) || letter || token length (u16 BE) || token`, `letter` being the old
+     payload (`encode_payload`), parsed strictly (the lengths make up the
+     whole unpadded payload; the token is at most `MAX_TOKEN`, 2 KiB), padded
+     as before. The relay and the app refuse version 1. A short letter now
+     fills the 1 KiB bucket.
+  2. **`received_at`.** The relay's file is version 3: `envelopes.received_at`,
+     its own clock in Unix seconds when it first stores an envelope; a
+     resubmit keeps it, the ack deletes it. The inbox answer is `count (u16
+     BE) || per envelope: received_at (u64 BE) || length (u32 BE) || wire`.
+     This is the only time of day the relay keeps (brev-relay's doc says
+     so). `Transport::poll` gives `(received_at, Envelope)`; `MockTransport`
+     stamps what it gets, with the system clock or `set_time`.
+  3. **FFI (facts, not flags).** `report_environment`, `EnvironmentReport`,
+     `ReportField` and the session's stored report are gone. New:
+     `observe(sample) -> [LockCause]`, `compose_started(design, admin,
+     key_origin)`, `compose_closed()`, `synthetic_dropped()`,
+     `paste_accepted()`, `attach_token_signature(der) -> envelope digest`,
+     `letter_proof(message) -> Proof?`; `confirm_active`, `prepare_send` and
+     `sign_request` take a `Sample`. Records `Sample`, `Window`, `Design`,
+     `Proof`; enum `LockCause` (`Sudo`, `SipOff`; not `LockReason`, which
+     the app already defines). `BrevError::Environment` now carries the
+     token's fact names (`Vec<String>`: `"key"`, `"max-gap"`, `"sip"`, …)
+     instead of `ReportField`s, since neither the lock reasons nor the new
+     facts fit that enum. The compose session keeps a brev-hand `FactLog`
+     on an `Instant` taken at `compose_started` (ms); `own_pid` is
+     `std::process::id()`.
+  4. **Send.** `prepare_send` computes the class of the log's facts with its
+     sample as an early exit; `sign_request` freezes them with its sample,
+     refuses below the threshold (unchanged, `allow-software-keys` as
+     before), and otherwise keeps the letter's plaintext (a vault
+     `Plaintext` in a `Draft`) and the claims, and returns the token digest.
+     `attach_token_signature` checks the signature with the own key over
+     `token::signed_bytes`, assembles the token, seals the letter with it and
+     wipes the plaintext; a bad signature forgets the letter and the ticket
+     (`Signing`). `cancel_send` and every lock wipe the plaintext, the
+     sealed letter, the ticket and the compose session. The own copy keeps
+     `env_class`. `Core::seal_letter` now seals a `Draft` with a token.
+  5. **Receive, store v6.** After the envelope's checks and the AEAD,
+     `brev_hand::verify(letter, token, pinned signing key, received_at)`
+     runs, and `Verification::encode` (a byte of per-check pass bits, then
+     the token) is sealed in the new column `messages.proof` (empty for a
+     sent letter), in the same transaction. A failing token does not refuse
+     the letter. Replay stays the stored message id (`Duplicate`), which
+     replaces the nonce cache §9 still mentions (§6 step 5). padcheck and
+     V18 check `messages.proof` and `user_version` 6.
+  6. **Badge.** `letter_proof` decodes the stored result: `verified`,
+     `class` (1/2/3 when verified), `failed` (the fixed check names
+     `"token"`, `"signature"`, `"app-attest"`, `"content"`, `"iat"`, and
+     for the class check the facts), `attested` (always false), and the
+     §4.2 numbers plus `sip` and `sudo` as options. `None` for a sent
+     letter. `scripts/ffi-surface.txt` pins the new surface.
+- **Choices the brief left open, taken the conservative way:**
+  1. The samples handed over with `prepare_send` and `sign_request` follow
+     the lock rule too (lock everything, `Environment` naming the facts),
+     not only those of `observe` and `confirm_active` (§4.3 says "a
+     sample").
+  2. `Proof`'s numbers are given only for a verified token; a failed one
+     shows no class and none of the sender's counts.
+  3. `prepare_send` forgets a letter waiting for its token signature, and
+     *Blokker* forgets one to the blocked contact, so the plaintext lives no
+     longer than one send attempt.
+  4. `Core::draft` checks the pinned bundle before the prompt, and
+     `seal_letter` checks the key change and the block again after it.
+  5. `Verification::decode` refuses stored bits the token contradicts (form
+     or class), and `letter_proof` opens `messages.proof` under an AD that
+     holds the direction before it answers `None` for a sent letter; either
+     mismatch is `Corrupt`, never a guess.
+  6. The new calls give `Locked` while locked or armed, `compose_closed`
+     too.
+- **Reasoning:** The token must be inside the ciphertext and cover the
+  exact letter, so the letter is fixed (and held) between the two
+  signatures of one Touch ID (D-0109 item 1). `received_at` is the only
+  independent time the recipient has (§6 step 6). Passing raw observations
+  and computing counts and class in Rust keeps the adapter from asserting
+  a class (§3.1).
+- **Verified:** `cargo fmt --check`; `cargo clippy --workspace
+  --all-targets -D warnings`, with and without `--all-features`; `cargo test
+  --workspace --no-default-features`: 237 tests pass (brev-hand 35,
+  brev-mail unit 69 and integration 44, brev-proto 19, brev-relay 39,
+  brev-vault 28, doc tests 3). New tests: the round trip A → B through
+  `MockTransport` verified as class A with the counts A's app saw, a
+  tampered token (signature, a token moved to another letter, a late
+  `received_at`) stored as not verified with that check, replay
+  `Duplicate`, a sudo sample locking with 0 live plaintexts, `confirm_active`
+  with SIP off refused and locked, a 6 s gap refusing `sign_request` and
+  clearing the pending letter, cancel and lock during the prompt, a wrong
+  token signature, `received_at` kept on resubmit at the relay, the stored
+  result's round trip. The bindings were generated from the release build
+  into a scratch folder and patched by `scripts/patch-bindings.py`; their
+  surface equals `scripts/ffi-surface.txt`, and the String checks of
+  `scripts/test.sh` pass on them. `padcheck.swift` type-checks. cargo-deny
+  bans, licenses and sources pass. Not run: `scripts/test.sh` (its Swift
+  steps fail until step 3), the app, `app/Generated` (not touched).
