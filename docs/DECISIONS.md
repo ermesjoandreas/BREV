@@ -4471,3 +4471,20 @@ WP5 and their reviews record.
   badge shows.
 - **Verified:** owner run, 2026-09-29, at 4d2e92c. Not run: the A parts of
   V82–V84 and SIP off (not practical on this Mac).
+
+### D-XXXX (UI redesign) — a calm, Mail-like window; Innboks read only on a click
+
+- **Date:** 2026-09-29
+- **Decision (Q1 of docs/UI_REDESIGN.md, a §1.10 matter):** Brev starts on
+  the first contact, as before, and never opens a letter on its own.
+  Innboks and Sendt are read only when a human clicks them, because each
+  read makes Rust decrypt every subject once per contact, and Swift keeps
+  every subject and a copy of every name while the mailbox is open. A sync
+  keeps the selected letter by thread id; if that thread is gone, the
+  reading pane is cleared and no other row is selected. Chosen by the
+  implementing agent from the two options the review gave (the owner was
+  not asked: the owner does not test this by hand); the owner can still ask
+  for a core call `all_threads()`.
+- **Reasoning:** CLAUDE.md §1.10 (plaintext no longer than needed). Starting
+  on Innboks would decrypt every subject at each unlock and each sync with
+  new letters, with nobody asking to see them.

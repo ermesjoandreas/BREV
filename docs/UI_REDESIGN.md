@@ -1,12 +1,31 @@
 # UI redesign: a calm, Mail-like Brev
 
-Status: spec, 2026-09-29. Nothing here is built yet.
+Status: spec, 2026-09-29, with the review of 2026-09-29 applied (below).
+Built on branch `claude/ui-redesign`; DECISIONS.md «D-XXXX (UI redesign)».
 Scope: the Swift app only (`app/Sources/App`, `app/Sources/UI`, one file in
 `app/Sources/Shared`), plus a new offscreen tool under `tools/`.
 No change to the Rust core or the FFI (`scripts/ffi-surface.txt` stays as it is).
 
 CLAUDE.md §1–§3 bind every line of this spec. When this spec and CLAUDE.md
 disagree, CLAUDE.md wins and the spec is wrong.
+
+## Review applied (2026-09-29)
+
+Every high and medium finding of the review is fixed in the sections below.
+The low ones too. In short:
+
+| # | Finding | Fix (where) |
+|---|---|---|
+| 1 (high) | `.fullSizeContentView` lets content scroll under the blurring toolbar; no capture probe covers that | **Dropped**: the style mask keeps no `.fullSizeContentView`, so nothing sits under the toolbar. The snapshot tool checks that no ContentView's frame leaves the window's `contentLayoutRect` (§2.1, §5.6). |
+| 2 (high) | Innboks as the start view decrypts every subject at each unlock and sync; a sync reload by row index would open another letter | **Start on the first contact, as today.** Innboks and Sendt are read only after a human clicks them. A sync keeps the selected letter by thread id; if it is gone, the reading pane is cleared and no other row is selected. Recorded as a §1.10 decision in DECISIONS.md (Q1 closed; §2.3, §2.4, §8). |
+| 3 (med) | `MailboxListView` rows would be AX-selectable: an agent could switch mailboxes and make Rust decrypt | The rows are AX static text only: no select, no press. Selection comes only from `mouseDown`/`keyDown`, which pass `BrevApplication.sendEvent`/InputFilter. The snapshot tool checks that AX attempts change nothing (§2.3, §5.6). |
+| 4 (med) | Svar is a new feature and does what Nytt brev does | **Svar dropped** (no `reply`, no ⌘R, no strings). The toolbar has Nytt brev and Lås (§2.2). |
+| 5 (med) | Key-change and blocked states hidden in Innboks and Sendt | With a mailbox selected and a letter whose contact has a changed key or is blocked, the whole ContactBar shows above the reading header. Scene `mail-inbox-keychanged` (§2.4, §2.5, §5.4). |
+| 6 (med) | The fixture moves out of ViewHost, which orders windows front and activates | `tools/fixture/Fixture.swift` holds only the relay, `User` and `fake()`. test.sh fails if `tools/fixture` or `tools/snapshot` names `orderFront`, `makeKeyAndOrderFront`, `activate(`, `runModal`, `beginSheet` or `.present(`. The tool aborts at once on any window becoming key or visible. Compose text is set through the model, never by focus or keys; after each compose scene secure input must be off (§5.2, §5.3). |
+| 7 (low-med) | A sidebar item can be collapsed by dragging, with no way back | `canCollapse = false` (and no collapse on window resize) on all three items; the tool checks it (§2.1). |
+| 8 (low) | Grep holes | `autosave` grepped case-insensitively (code lines), only `autosavesConfiguration = false` allowed; `NSCollectionView`, `NSBrowser`, `NSTokenField`, `NSComboBox` added to FORBIDDEN; any `drawContent(` call outside OpaqueView.swift fails (§6.3). |
+| 9 (low) | Empty states for a selected request and for a new user | A request: no list empty state, a blank reading pane. No contacts: the Innboks empty state carries «Legg til kontakt» (`sidebar.add`). No new strings (§2.4). |
+| 10 (low) | `SecureLineView` repeats `ContactTextView` | `ContactTextView(rows:font:)` draws the subject and the name; no new file. Only `TextLayout.firstLine`, clipped. The window subtitle is cleared whenever the toolbar is removed (§2.5, §4). |
 
 ## 0. Goals and rules
 
@@ -82,7 +101,7 @@ Words used below:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ ● ● ●  Brev                 [✎ Nytt brev] [↩ Svar]                   [🔒 Lås] │  unified toolbar
+│ ● ● ●  Brev                 [✎ Nytt brev]                            [🔒 Lås] │  unified toolbar
 ├───────────────┬───────────────────────────┬──────────────────────────────────┤
 │ ▢ Innboks     │ (ContactBar, only when a  │  Emne i stor skrift              │
 │ ➤ Sendt       │  contact/request is       │  Fra: ekko            12. sep.   │
@@ -100,41 +119,51 @@ Words used below:
    sidebar           message list                 reading pane
 ```
 
-- Window: default content size 1080×680, minimum 880×540. `.fullSizeContentView`
-  added to the style mask, so the sidebar runs under the toolbar as in Mail.
+- Window: default content size 1080×680, minimum 880×540. **No
+  `.fullSizeContentView`** (review 1): the toolbar blurs what lies under it,
+  and no capture probe has tested a protected layer blurred there. So no
+  view sits under the toolbar; the snapshot tool checks that every
+  ContentView's frame lies inside the window's `contentLayoutRect`.
   Still not miniaturizable, still not restorable, still no frame autosave.
 - An `NSSplitViewController` with three items replaces the NSSplitView:
   1. sidebar: `NSSplitViewItem(sidebarWithViewController:)` (AppKit gives it
      the `.sidebar` NSVisualEffectView material), width 220, min 180, max 280;
   2. message list: width 340, min 300;
   3. reading pane: min 380, takes the rest (lowest holding priority).
-  `splitView.autosaveName` stays nil (no state on disk).
+  `splitView.autosaveName` stays nil (no state on disk). Every item has
+  `canCollapse = false` and, on macOS 14+, `canCollapseFromWindowResize =
+  false` (review 7): there is no View menu to bring a hidden pane back.
 - The window title stays «Brev». The subtitle is the selected mailbox's
   fixed name («Innboks», «Sendt») and empty for a contact or a request.
   Never a name or address.
 - The toolbar exists only on the mail screen. `RootViewController.show`
-  sets it on the mail screen and removes it for every other screen. With
-  `.fullSizeContentView` the window frame does not change (the tool checks it).
+  sets it on the mail screen and removes it for every other screen, and
+  clears the subtitle whenever it removes it (review 10). Adding or removing
+  a toolbar would change the window's frame, so MainWindow puts the frame
+  back after each change: the frame is the same on every screen (the tool
+  checks it).
 
 ### 2.2 Toolbar
 
 An `NSToolbar` with `toolbarStyle = .unified`, `displayMode = .iconOnly`,
 `allowsUserCustomization = false`, `autosavesConfiguration = false`, and on
-macOS 15+ `allowsDisplayModeCustomization = false`. Three items, all standard
-`NSToolbarItem`s with an SF Symbol, a fixed label and `target = nil` (the
-responder chain, like the menu):
+macOS 15+ `allowsDisplayModeCustomization = false`. Two items, both standard
+`NSToolbarItem`s with an SF Symbol and a fixed label. Their target is the
+mail screen itself (the controller that also answers the menu's ⌘N), so they
+work whatever has focus:
 
 | Item | Symbol | Action | Enabled when |
 |---|---|---|---|
 | Nytt brev | `square.and.pencil` | `newLetter(_:)` | a recipient is known (below) and it is not key-changed or blocked |
-| Svar | `arrowshape.turn.up.left` | `reply(_:)` (new) | a received letter is selected and its sender is not key-changed or blocked |
-| Lås | `lock` | `LockController.lockNow(_:)` | always |
+| Lås | `lock` | the mail screen's `onLock` (as the old Lås button) | always |
 
-Flexible space between Svar and Lås. No search field, no share item, no
-sidebar toggle, no tracking separator item.
+Flexible space between Nytt brev and Lås. No search field, no share item, no
+sidebar toggle, no tracking separator item. **No Svar** (review 4): with a
+mailbox selected, Nytt brev already goes to the selected letter's contact,
+and an empty «Svar» without «Sv:» would only surprise Mail users.
 
 Why standard items and not HumanButtons: HumanButton guards actions that
-unlock, create keys, confirm, reset or send (HumanButton.swift). These three
+unlock, create keys, confirm, reset or send (HumanButton.swift). These two
 do none of those; each is already reachable through the menu, which
 accessibility can press (MainMenu.swift: "each action is harmless"). Every
 button inside the compose sheet stays a HumanButton.
@@ -142,21 +171,21 @@ button inside the compose sheet stays a HumanButton.
 Recipient rules (the core has no recipient picker, and this spec adds none):
 
 - Nytt brev: the contact selected in the sidebar; with a mailbox selected,
-  the contact of the selected letter; otherwise disabled.
-- Svar: the sender of the selected received letter. The compose sheet opens
-  **empty**. No «Sv: <emne>» prefill: that text would be in the letter
-  without being typed in this compose session, which weakens what Hand's
-  badge means (docs/AUTHORSHIP.md). No quoting of the old letter either.
-- Arkiv gets one item: «Svar» ⌘R (`MailActions.reply(_:)`), next to Nytt
-  brev ⌘N. Harmless for the same reason.
+  the contact of the selected letter; otherwise disabled. The compose sheet
+  opens empty, as today.
 
 ### 2.3 Sidebar (chrome frame, secure rows)
 
 A vertical, flipped stack inside the sidebar's scroll view, top to bottom:
 
 1. **Mailboxes** — `MailboxListView` (new, chrome): two rows, «Innboks»
-   (`tray`) and «Sendt» (`paperplane`). Fixed text, AX-visible as a list of
-   rows with their labels. No counts (there is no read flag).
+   (`tray`) and «Sendt» (`paperplane`). Fixed text. No counts (there is no
+   read flag). **AX sees each row as static text only** (review 3): no
+   list, no rows, no AXSelected that can be set, no press or pick action.
+   A selection comes only from `mouseDown` and `keyDown` (↑/↓), which reach
+   the view only through `BrevApplication.sendEvent` and InputFilter; the
+   view also drops a synthetic event itself. So no agent can switch
+   mailboxes, which would make Rust decrypt every subject.
 2. **Forespørsler** — section header (chrome), then `requestList`
    (SecureListView, asker's address). Both hidden while there are none.
 3. **Kontakter** — section header (chrome), then `contactList`
@@ -168,7 +197,10 @@ A vertical, flipped stack inside the sidebar's scroll view, top to bottom:
 
 One selection across the sidebar: `enum SidebarSelection { inbox, sent,
 contact(id), request(peer) }`. Selecting a row in one list deselects the
-others (as requests and contacts do today). Start selection: Innboks.
+others (as requests and contacts do today). **Start selection: the first
+contact, as today** (review 2; DECISIONS.md, Q1). With no contacts it is
+Innboks, which then reads nothing (there is no contact to read). Innboks
+and Sendt are read only after a human selects them.
 
 Row metrics: height 28, selection a rounded rect (radius 6) inset 8 pt from
 each side, `selectedContentBackgroundColor` when the list has focus, else
@@ -205,14 +237,21 @@ in both directions (older stores) is in both mailboxes. The sender line is a
 Cost, said plainly: with C contacts and T threads, Innboks makes Rust
 decrypt T subjects C times (each `threads(contact)` call opens all of them
 and drops the others at once; the zeroing allocator wipes them). Swift keeps
-only what the list shows: T subjects and T name copies. For Phase 0 sizes (a
-few contacts, tens of letters) this is small. A core call `all_threads()`
-would make it T, but it is a core change and out of scope (open question Q1).
+what the list shows while the mailbox is open: T subjects and T name copies.
+That is more plaintext than a contact's list, so it is a §1.10 matter, not
+only a cost (review 2). Decision (DECISIONS.md «D-XXXX (UI redesign)», Q1):
+Brev starts on the first contact, as today, and a mailbox is read only when
+a human clicks it. While a human keeps a mailbox open, a sync that brought
+letters reads it again. A core call `all_threads()` would make it T; it is a
+core change and out of scope.
 
 **No bodies are read to draw the list** (no previews, CLAUDE.md §1.10).
 **No letter is opened on its own**: the reading pane stays empty until a
 human selects a row. Today the newest thread is selected and its bodies are
-decrypted at once; that goes.
+decrypted at once; that goes. A sync or any other reload keeps the selected
+letter **by thread id**; if that thread is gone, the reading pane is cleared
+and no other row is selected (review 2). After a send, the list is read
+again and the selection is kept the same way; the sent letter is not opened.
 
 Row layout (height 56, the 16 pt left padding is where an unread dot would
 go later):
@@ -240,8 +279,11 @@ SecretTexts the list owns and wipes; `meta`, `trailing` and `chip` are
 fixed strings or dates.
 
 **ContactBar** (the old ContactHeaderView, reshaped; property name `header`
-kept for the tests). Shown at the top of the list column only while a
-contact or a request is selected, with a hairline under it:
+kept for the tests). Shown at the top of the list column while a contact or
+a request is selected, with a hairline under it. With a mailbox selected,
+it shows **above the reading header** when the selected letter's contact
+has a changed key or is blocked (review 5), so the warning and Godta ny
+kode are never hidden behind a 6 pt dot:
 
 - Contact: row 1 the address (ContactTextView, 13 semibold) and, right, the
   small HumanButton «Blokker» (hidden once blocked, as today). Row 2 the
@@ -270,6 +312,13 @@ window. The own address and code move to the Kontakter sheet (§2.7).
 | Contact with no letters | `envelope` | «Ingen brev med denne kontakten» |
 
 No explanation sentences under them (short copy, like the rest of Brev).
+Two more cases (review 9, no new strings):
+
+- A request is selected: no list empty state, and the reading pane is
+  blank (no «Ingen brev valgt»).
+- No contacts at all (a new user): the Innboks empty state also carries the
+  one button «Legg til kontakt» (`sidebar.add`), which opens the Kontakter
+  sheet like the sidebar footer.
 
 ### 2.5 Reading pane
 
@@ -289,10 +338,15 @@ With a letter selected, a header, then the letter:
 ```
 
 - `ReadingHeaderView` (new, chrome frame): the subject and the name are two
-  `SecureLineView`s (content; each owns a `SecretText.copy()` of the row's
-  text and wipes it on a new selection and on lock). «Fra:» for a received
-  letter, «Til:» for a sent one (chrome). The date is metadata, drawn by a
-  small meta view as LetterHeaderView does today.
+  `ContactTextView(rows: 1, font:)`s (content, review 10: no new
+  `SecureLineView`; each owns a `SecretText.copy()` of the row's text and
+  wipes it on a new selection and on lock). Each draws only
+  `TextLayout.firstLine` of its text, clipped at the view's edge, as the
+  list does: a subject never wraps. «Fra:» for a received letter, «Til:»
+  for a sent one (chrome). The date is metadata, drawn by a small meta view
+  as LetterHeaderView does today.
+- With a mailbox selected and the letter's contact key-changed or blocked,
+  the ContactBar stands above this header (§2.4, review 5).
 - The badge moves here, for received letters only: the same HumanButton
   with the same fixed title (`L10n.badge`), now with a leading symbol
   (`checkmark.seal` verified, `exclamationmark.triangle` not verified),
@@ -391,7 +445,7 @@ No new texts on these screens.
 
 ### 2.10 What is removed or merged
 
-1. The button bar above the panes → the unified toolbar (Nytt brev, Svar, Lås).
+1. The button bar above the panes → the unified toolbar (Nytt brev, Lås).
 2. The thread pane → merged into the message list (a thread is one letter).
 3. The contacts pane → the sidebar's «Kontakter» section.
 4. The requests block at the top of the contacts pane → the sidebar's
@@ -422,9 +476,7 @@ Quick Look, drag, Services, tooltips.
 "sidebar.add" = "Legg til kontakt";
 "sidebar.nocontacts" = "Ingen kontakter ennå";
 "toolbar.new" = "Nytt brev";
-"toolbar.reply" = "Svar";
 "toolbar.lock" = "Lås";
-"menu.file.reply" = "Svar";
 "list.empty.inbox" = "Ingen brev";
 "list.empty.sent" = "Ingen sendte brev";
 "list.empty.contact" = "Ingen brev med denne kontakten";
@@ -514,18 +566,16 @@ a light/dark switch redraws the protected layer. New content views must use
 
 | File | Change | Content or chrome |
 |---|---|---|
-| App/MainWindow.swift | size 1080×680, min 880×540, `.fullSizeContentView`, toolbar set/cleared per screen, subtitle from mailbox | chrome |
+| App/MainWindow.swift | size 1080×680, min 880×540, no `.fullSizeContentView`, toolbar set/cleared per screen with the frame kept, subtitle from mailbox (cleared with the toolbar) | chrome |
 | App/RootViewController.swift | tell the window which screen is shown (toolbar on/off); NoticeView → page style | chrome |
-| App/MainMenu.swift | Arkiv: «Svar» ⌘R; `MailActions.reply(_:)` | chrome |
 | App/L10n.swift, nb.lproj/Localizable.strings | §2.11 added, unused keys removed | chrome |
-| AppDelegate.swift | default window size; `onReply` wiring like `onNewLetter` | chrome |
-| UI/MailToolbar.swift (new) | NSToolbar delegate: the three items, no customization, no autosave | chrome |
-| UI/MailViewController.swift | NSSplitViewController with sidebar, list, reading pane; `SidebarSelection`; Innboks/Sendt reading; no auto-open; `reply(_:)`; keep `header`, `requestList`, `proofs`, `newLetter`, `showContacts`, `answerSelected`, `blockSelected` | chrome frame holding secure views |
-| UI/SidebarView.swift (new) | `MailboxListView` (chrome rows), section headers, the two SecureListViews, footer button | chrome + secure lists |
+| AppDelegate.swift | default window size | chrome |
+| UI/MailToolbar.swift (new) | NSToolbar delegate: the two items, no customization, no autosave | chrome |
+| UI/MailViewController.swift | NSSplitViewController with sidebar, list, reading pane; `SidebarSelection`; Innboks/Sendt reading (on a human's click only); no auto-open; selection kept by thread id; keep `header`, `requestList`, `proofs`, `newLetter`, `showContacts`, `answerSelected`, `blockSelected` | chrome frame holding secure views |
+| UI/SidebarView.swift (new) | `MailboxListView` (chrome rows, AX static text only), section headers, the two SecureListViews, footer button | chrome + secure lists |
 | UI/SecureListView.swift | fixed-height mode; two-line row style (`text2`, `trailing`, `chip`); rounded selection; leading symbol and trailing dot | **content** |
-| UI/ContactHeaderView.swift → ContactBar | vertical layout for a 300 pt column; key-change and request blocks; own-address row removed; `ContactTextView` takes a font | **content** (texts) + chrome (labels, buttons) |
-| UI/ReadingHeaderView.swift (new) | subject + name (`SecureLineView`), Fra/Til, date, badge button | **content** (subject, name) + chrome |
-| UI/SecureLineView.swift (new, or ContactTextView generalised) | one line of a SecretText in a given content font | **content** |
+| UI/ContactHeaderView.swift → ContactBar | vertical layout for a 300 pt column; key-change and request blocks; own-address row removed; `ContactTextView(rows:font:)` | **content** (texts) + chrome (labels, buttons) |
+| UI/ReadingHeaderView.swift (new) | subject + name (`ContactTextView(rows: 1, font:)`), Fra/Til, date, badge button | **content** (subject, name) + chrome |
 | UI/LetterStackView.swift | header moves out; insets 24; max measure 680; per-letter meta line only for multi-letter threads | **content** (bodies) |
 | UI/SecureTextView.swift | font F4; inset 24; max text width 680 | **content** |
 | UI/SecureComposeView.swift | font per instance (F1 subject/address, F4 body); no border | **content** |
@@ -577,14 +627,30 @@ activation).
 - Guard, checked after every scene and at exit (exit 1 if broken):
   `NSApp.windows.allSatisfy { !$0.isVisible }`, `NSApp.isActive == false`,
   and `CGWindowListCopyWindowInfo(.optionOnScreenOnly, …)` has no window with
-  the tool's PID.
+  the tool's PID. That guard sees a window only after it flashed, so the
+  tool also registers, before it makes any window, observers of
+  `NSWindow.didBecomeKey`, `didBecomeMain`, `didChangeOcclusionState` (to
+  visible) and `NSApplication.didBecomeActive` that print the failure and
+  exit at once (review 6).
+- No call that shows a window or takes focus exists in the tool's or the
+  fixture's source: test.sh fails if `tools/fixture` or `tools/snapshot`
+  names `orderFront`, `makeKeyAndOrderFront`, `activate(`, `runModal`,
+  `beginSheet` or `.present(` (review 6).
+- The compose scenes put their text in through the fields' `EditModel`
+  (`model.insert`), never through focus or key events, so no
+  SecureComposeView becomes first responder. After each compose scene the
+  tool checks `SecureInput.isOn == false` and that
+  `IsSecureEventInputEnabled()` is what it was before the tool started (off
+  unless another app holds it).
 
 ### 5.3 Fake data
 
-The fixture code in tools/viewhost/main.swift (relay start, root invite,
-users «testvert», «ekko», «speil», fake letters built with `fake(_:)`) moves
-to `tools/fixture/Fixture.swift`, compiled into both tools; ViewHost's
-behaviour and checks stay the same. The tool adds a few letters with Norwegian
+The fixture code in tools/viewhost/main.swift moves to
+`tools/fixture/Fixture.swift`, compiled into both tools, and it holds only
+the relay (start, root invite), `User` and `fake(_:)` (review 6). The
+users («testvert», «ekko», «speil») and letters are made by each tool's own
+main. ViewHost's behaviour and checks stay the same, apart from what the new
+layout changes (§4). The tool adds a few letters with Norwegian
 fake subjects and bodies (long and short), a sent letter, a contact with no
 letters, a key change and two requests (the relay tricks ViewHost's
 `--contacts` run already uses).
@@ -604,7 +670,7 @@ Each scene × light and dark (`window.appearance = .aqua / .darkAqua`), at 2×:
 | `lock`, `lock-notice` | lock screen, and with the sudo notice |
 | `notice-damaged`, `notice-unsafe` | NoticeViewController |
 | `address-invite`, `address-register` | the address page, both steps |
-| `mail-inbox`, `mail-inbox-letter`, `mail-sent`, `mail-contact`, `mail-contact-keychanged`, `mail-request`, `mail-empty` | the mail window in each state (empty = a new user with no contacts) |
+| `mail-inbox`, `mail-inbox-letter`, `mail-inbox-keychanged`, `mail-sent`, `mail-contact`, `mail-contact-keychanged`, `mail-request`, `mail-empty` | the mail window in each state (empty = a new user with no contacts; inbox-keychanged = a letter from a contact whose key changed, with the ContactBar above the reading header) |
 | `compose-empty`, `compose-filled` | compose sheet alone, and composited over the dimmed mail window |
 | `contacts`, `contacts-invite` | Kontakter sheet, and with an invite code shown |
 | `confirm-reset`, `confirm-key`, `proof-verified`, `proof-unverified` | the small sheets |
@@ -637,7 +703,13 @@ Plus `report.txt` (check lines, as ViewHost prints them) and nothing else.
 - The offscreen guard of §5.2.
 - Every window: `sharingType == .none`, `isRestorable == false`, not in the
   Windows menu; the toolbar has `autosavesConfiguration == false` and
-  `allowsUserCustomization == false`.
+  `allowsUserCustomization == false`; no `.fullSizeContentView`, and every
+  ContentView's frame inside the window's `contentLayoutRect` (review 1).
+- Every split view item: `canCollapse == false` (review 7).
+- MailboxListView: AX sees only static text; `setAccessibilitySelected`,
+  `accessibilityPerformPress` and `accessibilityPerformPick` on the view and
+  on each row element change neither the selection nor what the list shows
+  (review 3).
 - Every ContentView: `protectedLayer.preventsCapture`, `ContentView.allOpaque`,
   no `toolTip`, no `menu`.
 - The view tree holds no `NSTextField`, `NSTextView`, `NSTableView`,
@@ -648,8 +720,10 @@ Plus `report.txt` (check lines, as ViewHost prints them) and nothing else.
 - Window title is «Brev»; subtitle is empty or a mailbox name.
 - The window frame is the same on the lock screen and the mail screen.
 - Every letter body open in a scene was opened by a selection the tool made
-  (no auto-open: after `start()` no `body(message:)` call; counted through a
-  Session wrapper in the tool).
+  (no auto-open: after `start()` and after a sync the reading pane holds no
+  letter; Session is a final class, so the tool checks the reading pane
+  rather than counting `body(message:)` calls).
+- After each compose scene: secure input off (above).
 - `GlyphFlush.flush()` time per content font, printed (a budget of 50 ms
   per font, to keep the lock fast).
 
@@ -664,11 +738,12 @@ listed in docs/VERIFY.md where a row exists.
 - [ ] Hardening.apply unchanged; `sharingType .none`, not restorable, no tabs.
 - [ ] Title «Brev», subtitle only a fixed mailbox name.
 - [ ] Toolbar: no customization, no autosave, no search/share items, no tooltips.
-- [ ] Toolbar actions harmless (new letter, reply, lock), same as the menu.
+- [ ] Toolbar actions harmless (new letter, lock), same as the menu.
 - [ ] Frame unchanged across lock/unlock (toolbar on/off).
 
 **Sidebar (MailboxListView, section headers, footer)**
-- [ ] Mailbox rows and headers: fixed text only; AX shows only those labels.
+- [ ] Mailbox rows and headers: fixed text only; AX shows only those labels,
+      as static text with no action (review 3).
 - [ ] Contact and request rows: SecureListView (content view), AX-opaque.
 - [ ] The vibrant material holds no content view state; content views draw
       on a cleared buffer as today (the lists already do).
@@ -688,7 +763,7 @@ listed in docs/VERIFY.md where a row exists.
 - [ ] Blokker, Godta, Avslå are HumanButtons.
 - [ ] `clear()` wipes all texts on a new selection and on lock.
 
-**ReadingHeaderView + SecureLineView**
+**ReadingHeaderView**
 - [ ] Subject and name are copies owned by the header, wiped on a new
       selection and in `wipeAll()`.
 - [ ] Badge: HumanButton, fixed L10n text, opens ProofSheet as a sheet.
@@ -703,7 +778,7 @@ listed in docs/VERIFY.md where a row exists.
 - [ ] HardenedWindow; Hardening.apply at init and via beginSheet.
 - [ ] Secure event input on focus, synthetic input dropped, no pasteboard,
       no input client, Writing Tools off: unchanged (SecureComposeView).
-- [ ] Svar opens it empty: no prefill of subject or body.
+- [ ] It opens empty: no prefill of subject or body.
 - [ ] `composeStarted`/`composeClosed`, `cancelSend`, wipe on every close:
       unchanged.
 
@@ -732,12 +807,19 @@ listed in docs/VERIFY.md where a row exists.
 
 ### 6.3 New greps in scripts/test.sh
 
-- `drawContent(in:` is called only from OpaqueView.swift in `app/Sources`
-  (overrides in subclasses are fine; a call elsewhere fails).
+- Any `drawContent(` call (also `x.drawContent(` and `super.drawContent(`)
+  is made only in OpaqueView.swift in `app/Sources`; overrides
+  (`func drawContent(`) and comments are fine (review 8).
 - No `toolTip` in `app/Sources`.
 - No `NSPopover`, `NSSearchField`, `NSSharingService`, `NSTableView`,
-  `NSOutlineView` in `app/Sources` (add to the FORBIDDEN list).
-- `autosaveName` / `autosavesConfiguration = true` nowhere in `app/Sources`.
+  `NSOutlineView`, `NSCollectionView`, `NSBrowser`, `NSTokenField`,
+  `NSComboBox` in `app/Sources` (added to the FORBIDDEN list, review 8).
+- `autosave` in any case, on a code line of `app/Sources`, only as
+  `autosavesConfiguration = false` (review 8: `setFrameAutosaveName` and
+  `autosaveName` both fail).
+- `tools/fixture` and `tools/snapshot` name no `orderFront`,
+  `makeKeyAndOrderFront`, `activate(`, `runModal`, `beginSheet`, `.present(`
+  (review 6).
 
 ## 7. Order of work
 
@@ -748,7 +830,7 @@ Each step ends with `scripts/build.sh`, `scripts/build.sh --instance b`,
    fixture; ViewHost unchanged in behaviour.
 2. **Fonts**: F1–F4, GlyphFlush per font, TextLayout line height, SelfScan.
 3. **Main window**: toolbar, split view controller, sidebar, message list,
-   ContactBar, reading pane, empty states, `reply`.
+   ContactBar, reading pane, empty states.
 4. **Compose sheet** layout.
 5. **Sheets**: Kontakter (own code), Confirm, Proof.
 6. **Pages**: lock, onboarding, address, notice.
@@ -757,9 +839,10 @@ Each step ends with `scripts/build.sh`, `scripts/build.sh --instance b`,
 
 ## 8. Open questions for the owner
 
-- **Q1. Innboks across all contacts.** With today's FFI it makes Rust open
-  every subject once per contact (§2.4). Fine for now? The clean fix is a
-  core call `all_threads()`, which this redesign does not add.
+- **Q1. Innboks across all contacts.** Closed (review 2): a §1.10 matter,
+  decided in DECISIONS.md «D-XXXX (UI redesign)». Brev starts on the first
+  contact; a mailbox is read only when a human clicks it. The owner can
+  still choose the core call `all_threads()` later.
 - **Q2. New York for the letter body.** Proposed yes (§3.1). Say no, and F4
   becomes SF 15.
 - **Q3. Unread dot.** Needs `MessageRow.read` and a "mark read" call in the
