@@ -1,0 +1,39 @@
+name: HandSpike
+options:
+  deploymentTarget:
+    macOS: "14.0"
+targets:
+  HandSpike:
+    type: application
+    platform: macOS
+    sources:
+      - path: ../Sources
+    info:
+      path: Info.plist
+      properties:
+        CFBundleName: HandSpike
+        CFBundleIdentifier: no.brev.app
+        CFBundleShortVersionString: "0.0.1"
+        CFBundleVersion: "1"
+        LSUIElement: true
+        # false: the entitlement could not be provisioned, so A stops at isSupported.
+        HandSpikeAttest: false
+    entitlements:
+      path: HandSpike.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.developer.devicecheck.appattest-environment: development
+    settings:
+      base:
+        PRODUCT_NAME: HandSpike
+        PRODUCT_BUNDLE_IDENTIFIER: no.brev.app
+        DEVELOPMENT_TEAM: AV26DNQ5SC
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        CODE_SIGN_ENTITLEMENTS: HandSpike.entitlements
+        ENABLE_HARDENED_RUNTIME: "YES"
+        ENABLE_APP_SANDBOX: "YES"
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: "NO"
+        SWIFT_VERSION: "5.0"
+        ONLY_ACTIVE_ARCH: "YES"

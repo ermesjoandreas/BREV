@@ -4194,3 +4194,42 @@ WP5 and their reviews record.
   keeps the vault small and its whitelist meaningful.
 - **Verified:** decision only. First step: a spike on App Attest support
   and on which environment facts a sandboxed, team-signed app can read.
+
+### D-0108 — Hand on Mac: class A without App Attest; the spike's results
+
+- **Date:** 2026-09-29
+- **Decision:** App Attest is not available to native Mac apps, so on Mac
+  class A does not require it. Class A needs the Secure Enclave signature,
+  one fresh Touch ID for the letter, and every measured fact good
+  (docs/AUTHORSHIP.md §4). The token then carries no `"app-attest"` claim,
+  and the detail view says «Appen er ikke bekreftet av Apple (støttes ikke
+  på Mac)». A missing attestation never raises a class. An attestation that
+  is present must verify, and until a verifier exists it fails. The inbox
+  badge stays «Skrevet i Brev · klasse A» (D-0107 item 4). CLAUDE.md §2's
+  note that the class catches Swift bugs, not attackers, stays true on Mac.
+- **Spike (macOS 26.2 25C56, Xcode 26.2, team AV26DNQ5SC; sources and
+  Apple's root in `tools/verify/spikes/hand/`):**
+  - `DCAppAttestService.isSupported` was false in every build, with and
+    without a profile. devicecheckd logs that the `os_feature` flag
+    `DeviceCheck/mac` is off. Xcode's copy of the portal capability list
+    offers `APP_ATTEST` for iOS, tvOS and visionOS only.
+  - `xcodebuild -allowProvisioningUpdates` dropped the App Attest
+    entitlement without a warning. No account or profile changed. No test
+    vectors can come from this Mac.
+  - Apple App Attestation Root CA (P-384, valid 2020–2045), from
+    apple.com/certificateauthority: SHA-256 of the DER is
+    `1cb9823ba28ba6ad2d33a006941de2ae4f513ef1d4e831b9f7e0fa7b6242c932`.
+    Checking its chain will need `p384`, which is not approved yet.
+  - A sandboxed, team-signed app can read every fact without a prompt:
+    - admin group: `mbr_check_membership`;
+    - SIP: `csr_get_active_config` (via dlsym), and `csrutil status` as a
+      child process;
+    - processes: `sysctl KERN_PROC_ALL` (`proc_listallpids` is blocked);
+    - windows: `CGWindowListCopyWindowInfo` gives owners without Screen
+      Recording permission, but not titles;
+    - sudo: a live `sudo` is visible, a cached sudo login is not.
+- **Reasoning:** Requiring App Attest would make every Mac letter class B
+  until Apple changes the OS. The honest line in the detail view keeps the
+  badge from claiming more than is proven.
+- **Verified:** Spike runs 1–3; the logs are in the spike folder's history
+  (scratchpad) and the facts are summarised above.
