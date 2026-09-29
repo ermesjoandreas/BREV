@@ -1,16 +1,16 @@
 //! Brev relay (docs/PHASE3_DESIGN.md §4, docs/PHASE4_DESIGN.md §4): a
 //! minimal axum server on `127.0.0.1` only. An identity registers an address
-//! with a signed body and an invite; a token-authenticated caller looks up an
-//! address, asks for contact, answers what it is told, makes and redeems
-//! invites, submits its own signed envelopes, fetches its waiting envelopes
-//! and acknowledges them, and an acknowledged envelope is deleted. A letter
-//! is stored only if its recipient approved its sender, and only within the
-//! sender's daily limit.
+//! with a signed body, with no invite (registration is open,
+//! docs/DECISIONS.md D-0116); a token-authenticated caller looks
+//! up an address, asks for contact, answers what it is told, submits its own
+//! signed envelopes, fetches its waiting envelopes and acknowledges them, and
+//! an acknowledged envelope is deleted. A letter is stored only if its
+//! recipient approved its sender, and only within the sender's daily limit.
 //!
 //! The relay stores public keys, addresses (the directory), SHA-256 of each
 //! relay token, envelopes as they arrived (ciphertext and routing metadata),
-//! and from Phase 4 the invite graph, the approval graph, pending events,
-//! SHA-256 of each invite's relay key and daily counts (design §4.5). The
+//! and from Phase 4 the approval graph, pending events and daily counts
+//! (design §4.5). The
 //! only time of day it keeps is each waiting envelope's `received_at`, the
 //! Unix second it was first stored, which the inbox answer hands the
 //! recipient for the authorship token's time check (docs/AUTHORSHIP.md
@@ -50,13 +50,11 @@ pub enum Error {
     #[error("the database path must be absolute")]
     Path,
     /// A database file that is not a brev-relay database of this version.
-    /// A Phase 3 file (version 1) and a Phase 4 file (version 2, no
-    /// `received_at`) are refused too: no migration.
-    #[error("not a brev-relay database (version 3)")]
+    /// A Phase 3 file (version 1), a Phase 4 file (version 2, no
+    /// `received_at`) and one with invites (version 3) are refused too: no
+    /// migration.
+    #[error("not a brev-relay database (version 4)")]
     NotRelay,
-    /// The system's random number generator failed.
-    #[error("the system random number generator failed")]
-    Rng,
     /// A file or socket operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -118,16 +116,9 @@ pub struct Config {
     pub letters_per_day: u32,
     /// Contact requests per requester per UTC day (10).
     pub requests_per_day: u32,
-    /// Invites made per identity per UTC day (3).
-    pub invites_per_day: u32,
-    /// Invites an identity may have open, not redeemed and in life (5).
-    pub open_invites: u32,
     /// Requests pending at one recipient; more are answered alike but
     /// stored nowhere (16).
     pub pending_requests: u32,
-    /// Days an invite lives after the day it was made (7): an invite made
-    /// on day `d` works through day `d + 7`.
-    pub invite_days: u32,
     /// Where today comes from.
     pub clock: Clock,
 }
@@ -137,10 +128,7 @@ impl Default for Config {
         Config {
             letters_per_day: 50,
             requests_per_day: 10,
-            invites_per_day: 3,
-            open_invites: 5,
             pending_requests: 16,
-            invite_days: 7,
             clock: Clock::System,
         }
     }
@@ -173,10 +161,6 @@ pub enum Endpoint {
     Answer,
     /// `POST /v1/block` (Phase 4).
     Block,
-    /// `POST /v1/invites` (Phase 4).
-    InviteCreate,
-    /// `POST /v1/invites/redeem` (Phase 4).
-    InviteRedeem,
 }
 
 /// Test hooks (Phase 3's; kept as a deny hook in Phase 4, whose own rules
@@ -185,7 +169,7 @@ pub enum Endpoint {
 /// [`Decision::Deny`] answers 429.
 pub trait Policy: Send + Sync {
     /// A registration of `address` with a valid signature. In Phase 4 asked
-    /// last, after the invite, conflict and identity checks.
+    /// last, after the conflict and identity checks.
     fn register(&self, address: &str) -> Decision;
     /// A submitted envelope of `len` wire bytes, signed by its registered
     /// `sender`, to the registered `recipient`. In Phase 4 asked after the

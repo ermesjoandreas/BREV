@@ -10,7 +10,7 @@
 // BREV_PASTE_MENU (spike P1's variant (b), docs/PHASE4_DESIGN.md §6.2; not
 // built by default) adds «Rediger» with one item, «Lim inn» (⌘V), whose
 // paste: only ContactField answers, so AppKit enables it only while an
-// address or invite code field has focus; that build must pass V15's
+// address field on the contact sheet has focus; that build must pass V15's
 // variant-(b) row, which looks for items macOS adds to such a menu.
 
 import AppKit

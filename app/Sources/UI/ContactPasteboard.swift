@@ -1,13 +1,13 @@
-// ContactPasteboard.swift — the pasteboard, for an address or an invite code
-// on the contact screen, and for nothing else.
+// ContactPasteboard.swift — the pasteboard, for an address on the contact
+// screen, and for nothing else.
 //
 // Upholds CLAUDE.md §1.3 and §5 Phase 4 (docs/PHASE4_DESIGN.md §6.2):
-// addresses and invite codes are not message content, so they may be copied
+// addresses are not message content, so they may be copied
 // and pasted, on the contact screen only. The only file in app/Sources that
 // touches the pasteboard's contents (scripts/test.sh fails if this type is
 // named outside ContactField, ContactSheet and AppDelegate's quit hook).
-// `write` has two callers in ContactSheet: Kopier adressen min (the own
-// address) and Kopier koden (a code from `createInvite`). It clears the
+// `write` has one caller in ContactSheet: Kopier adressen min (the own
+// address). It clears the
 // pasteboard for this Mac only (no Universal Clipboard to other devices),
 // sets nspasteboard.org's concealed and transient markers (clipboard managers
 // that honour them neither show nor keep the entry), then the bytes as plain
@@ -41,7 +41,7 @@ enum ContactPasteboard {
     private static var written: Int?
     private static var timer: Timer?
 
-    /// Puts `bytes` (an address or an invite code) on the pasteboard as
+    /// Puts `bytes` (an address) on the pasteboard as
     /// plain text with the two markers, and starts the self-clear. The
     /// caller wipes `bytes`.
     static func write(_ bytes: SecretBytes) {

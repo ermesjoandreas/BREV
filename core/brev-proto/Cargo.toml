@@ -10,8 +10,6 @@ publish.workspace = true
 [dependencies]
 p256 = { workspace = true }
 sha2 = { workspace = true }
-# The invite tag (src/invite.rs, docs/PHASE4_DESIGN.md §3.1).
-hkdf = { workspace = true }
 # The padding lives in the vault and is re-exported here. No allocator: the
 # relay gets none through this line (docs/VAULT_SPLIT_PLAN.md §4).
 brev-vault = { path = "../brev-vault", default-features = false }

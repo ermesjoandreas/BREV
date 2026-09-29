@@ -14,7 +14,7 @@
 # audit, the cargo-deny policy (core/deny.toml), a relay
 # on 127.0.0.1 with a fresh database and the owner's limits (macOS; stopped
 # when the script ends), the Swift heap-scan harness and the lock probe
-# against it, each run with a root invite of its own (macOS), a type-check
+# against it (macOS), a type-check
 # of spike P1's variant (b) (macOS), a
 # compile check of the view host (macOS), a type-check of the verification
 # tools and capture-probe's self-test (macOS), an Xcode compile check
@@ -438,8 +438,8 @@ pb_uses() {  # pb_uses <pattern> <file>: the lines of app/Sources that name <pat
   grep -c . <<<"$hits"
 }
 pb_uses 'ContactPasteboard.read(' app/Sources/UI/ContactField.swift >/dev/null
-if [[ "$(pb_uses 'ContactPasteboard.write(' app/Sources/UI/ContactSheet.swift)" != 2 ]]; then
-  echo "error: ContactSheet must write to the pasteboard in exactly two places (Kopier adressen min, Kopier koden)" >&2
+if [[ "$(pb_uses 'ContactPasteboard.write(' app/Sources/UI/ContactSheet.swift)" != 1 ]]; then
+  echo "error: ContactSheet must write to the pasteboard in exactly one place (Kopier adressen min)" >&2
   exit 1
 fi
 pb_uses 'ContactPasteboard.clearOwn()' app/Sources/AppDelegate.swift >/dev/null
@@ -526,19 +526,14 @@ fi
 # 127.0.0.1 with a port the OS picks, a fresh database under core/target and
 # the default limits (the owner's), written to --port-file; the script waits
 # for /v1/health and stops the relay when it ends, also on a failure (trap).
-# Nothing listens anywhere but 127.0.0.1. `root_invite` prints a new root
-# invite (the operator's `brev-relay invite`, which works while the relay
-# serves): each harness run and the lock probe get one in BREV_ROOT_INVITE
-# for their first user, who brings in the others with its own codes.
+# Nothing listens anywhere but 127.0.0.1. Registration is open (D-0116), so
+# the harness and the lock probe register their users with no invite.
 if [[ "$DARWIN" == yes ]]; then
   echo "==> relay for the harness and the lock probe (127.0.0.1, fresh database, default limits)"
   cargo build --manifest-path "$MANIFEST" --target-dir "$TARGET_DIR" --release -p brev-relay
   RELAY_DIR="$TARGET_DIR/test-relay"
   rm -rf "$RELAY_DIR"
   mkdir -p -m 700 "$RELAY_DIR"
-  root_invite() {
-    "$TARGET_DIR/release/brev-relay" invite --db "$RELAY_DIR/relay.db"
-  }
   "$TARGET_DIR/release/brev-relay" serve --db "$RELAY_DIR/relay.db" --listen 127.0.0.1:0 \
     --port-file "$RELAY_DIR/port" 2>"$RELAY_DIR/relay.log" &
   RELAY_PID=$!
@@ -571,9 +566,8 @@ fi
 # 65000). Case 7's proves that the scribble probe SelfScan runs in the
 # Verify build (docs/VERIFY.md V39) can fail: without scribbling, the freed
 # block keeps its pattern. Cases 4, 5, 8 and 9 send their letters through
-# the relay above (BREV_RELAY_URL), their first user registered with the
-# run's root invite (BREV_ROOT_INVITE); case 8 is the network round trip of
-# docs/PHASE3_DESIGN.md §8, case 9 the invite, approval, letter and Blokker
+# the relay above (BREV_RELAY_URL); case 8 is the network round trip of
+# docs/PHASE3_DESIGN.md §8, case 9 the request, approval, letter and Blokker
 # round trip of docs/PHASE4_DESIGN.md §8.
 if [[ "$DARWIN" == yes ]]; then
   echo "==> Swift harness (app/Tests)"
@@ -595,7 +589,7 @@ if [[ "$DARWIN" == yes ]]; then
     local env_args=(TMPDIR="$HARNESS_DIR/tmp/" BREV_RELAY_URL="$BREV_RELAY_URL")
     if [[ "$mode" == scribble ]]; then env_args+=(MallocScribble=1); else env_args=(-u MallocScribble "${env_args[@]}"); fi
     for i in 1 2 3 4 5; do
-      if ! out="$(env "${env_args[@]}" BREV_ROOT_INVITE="$(root_invite)" "$HARNESS_DIR/harness" "$@" 2>&1)"; then
+      if ! out="$(env "${env_args[@]}" "$HARNESS_DIR/harness" "$@" 2>&1)"; then
         echo "$out"
         echo "error: harness $label failed in run $i of 5" >&2
         exit 1
@@ -620,7 +614,7 @@ if [[ "$DARWIN" == yes ]]; then
   run_harness "case 7 (scribble probe)" scribble scribble
   run_harness "case 7 (no scribbling: the freed block is kept)" none scribble --no-scribble
   run_harness "case 8 (network round trip through the relay)" scribble network
-  run_harness "case 9 (invite, approval, letters and Blokker through the relay)" scribble invite
+  run_harness "case 9 (request, approval, letters and Blokker through the relay)" scribble approval
 else
   echo "==> Swift harness skipped: not macOS ($(uname -s))"
 fi
@@ -649,7 +643,7 @@ if [[ "$DARWIN" == yes ]]; then
     "$REPO_ROOT"/app/Sources/Shared/*.swift "$REPO_ROOT"/app/Sources/App/*.swift \
     "$REPO_ROOT"/app/Sources/UI/*.swift "$REPO_ROOT"/app/Sources/Keys/*.swift \
     "$BINDINGS" "$REPO_ROOT/app/Tests/Lock/main.swift" "$TEST_ARCHIVE_DIR/release/libbrev_core.a" -o "$LOCK_DIR/lock-probe"
-  if ! out="$(env TMPDIR="$LOCK_DIR/tmp/" BREV_RELAY_URL="$BREV_RELAY_URL" BREV_ROOT_INVITE="$(root_invite)" \
+  if ! out="$(env TMPDIR="$LOCK_DIR/tmp/" BREV_RELAY_URL="$BREV_RELAY_URL" \
       "$LOCK_DIR/lock-probe" 2>&1)"; then
     echo "$out"
     echo "error: the lock probe failed" >&2

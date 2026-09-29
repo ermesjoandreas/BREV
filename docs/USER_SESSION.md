@@ -2,6 +2,9 @@
 
 Skrevet 29. september 2026 for eieren. Denne listen erstatter fase 3-listen på den andre grenen. Kjør alt i Terminal fra en utsjekk av `claude/phase4` (for eksempel `~/BREV` etter `git switch claude/phase4`; nekter git fordi grenen er sjekket ut et annet sted, si fra til meg). Ber macOS om en tillatelse du ikke venter: trykk «Ikke tillat» og noter det.
 
+
+**Merk (D-0116):** Invitasjonskoder finnes ikke lenger. Registreringen er åpen, og kontakter legges til med adresse og «Godta». Stegene om invitasjoner i Runde 1 og Runde 2 er historikk.
+
 ## Hvor vi er
 
 - Fase 3, delingen av kjernen og fase 4 er ferdig kodet på grenen `claude/phase4`. Ingenting er pushet.
@@ -149,10 +152,9 @@ Beviset og lageret er nye (profil hand-v2, lager v7). Gamle lagre kan ikke åpne
    - Bygg: `scripts/build.sh && scripts/build.sh --instance b && (cd core && cargo build --release -p brev-relay)`
    - Terminal: lim inn blokken under «Setup» i `docs/VERIFY.md`.
    - Nytt relé: `[ -e "$RD" ] && mv "$RD" "$R/relay-v2-$(date +%s)"`, så `scripts/relay.sh --trace > "$R/relay.log"` i et eget vindu.
-   - Én rot-invitasjon: `"$RELAY" invite --db "$RDB" | pbcopy`
-   - `open "$APP"`: «Filene til Brev er skadet» → «Slett alt og start på nytt» → «Slett alt». Onboarding, Touch ID, ⌘V invitasjonen, adresse `brev-secret-me`, «Registrer».
-   - `open "$APPB"`: det samme, men stopp på «Lim inn invitasjonen».
-   - I Brev: «Kontakter» → «Lag invitasjon» → «Kopier koden». I Brev B: ⌘V, «Fortsett», adresse `brev-secret-peer`, «Registrer».
+   - `open "$APP"`: «Filene til Brev er skadet» → «Slett alt og start på nytt» → «Slett alt». Onboarding, Touch ID, adresse `brev-secret-me`, «Registrer». Ingen invitasjon (D-0116).
+   - `open "$APPB"`: det samme, med adresse `brev-secret-peer`.
+   - I Brev B: «Kontakter», skriv `brev-secret-me`, «Legg til». I Brev: «Godta» på forespørselen.
 
 1. **Ett brev, én Touch ID (V84).** I Brev: nytt brev til Brev B, skriv noe, «Send». Forventet: nøyaktig én dialog, «… sende brevet», ingen passordknapp. Brevet kommer frem hos Brev B.
    - Et nytt brev, «Send», og «Avbryt» i dialogen. Forventet: tilbake til utkastet, ingenting sendt, ingen ny dialog.

@@ -9,26 +9,24 @@
 // core/target/harness.
 //
 // usage: harness units | shell | compose | dek | content <units> [--no-scribble] | kept | control
-//        harness scribble [--no-scribble] | network | invite
+//        harness scribble [--no-scribble] | network | approval
 //        harness needles <file>     (the helper run that `dek` starts: ECIES needles)
 //        harness argdomain -NSTraceEvents YES -NSZombieEnabled YES
 //                                   (the helper run that `shell` starts)
-// content, kept, network and invite need BREV_RELAY_URL: the relay
+// content, kept, network and approval need BREV_RELAY_URL: the relay
 // scripts/test.sh starts on 127.0.0.1 for the whole run (docs/PHASE3_DESIGN.md
-// §8), and BREV_ROOT_INVITE: a root invite test.sh mints for each run
-// (`brev-relay invite`), the only way in for a run's first user
-// (docs/PHASE4_DESIGN.md §4.6).
+// §8). Registration is open (D-0116): users register with no invite.
 //
 // Case numbers are those of §11; case 7 (SelfScan's scribble probe) came
 // with review round 1 (docs/DECISIONS.md D-0063), case 8 (`network`, the
-// round trip through the relay) with Phase 3, case 9 (`invite`: invites,
+// round trip through the relay) with Phase 3, case 9 (`approval`: requests,
 // approval, letters and Blokker) with Phase 4. Case 2 has two parts: the app shell's
 // (InputFilter, LockState, LaunchGuard, UnlockFailure) is `shell`, the compose core's
 // (EditModel, ComposeKey, KeyTranslator) is `compose`. Since Phase 3 there are no
 // built-in contacts: every letter goes through the relay between users made
 // here (software KEK and identity key; `Enclave.sign` signs the digests, as in
-// the app). Since Phase 4 a run's first user registers with the root invite
-// and brings in the others with its own invite codes. Since Hand
+// the app). Since Phase 4 users become contacts by a request the other
+// approves. Since Hand
 // (docs/AUTHORSHIP.md; D-0111) a letter goes out with its authorship token:
 // a compose session, a fixed clean sample (so a sudo or SIP state of the Mac
 // running the tests cannot lock the harness's sessions; HandSampler's own
@@ -168,22 +166,6 @@ func relayURL() -> String {
     return url
 }
 
-/// The root invite scripts/test.sh minted for this run (BREV_ROOT_INVITE),
-/// copied into a SecretBytes without a String. Each is good for one
-/// registration.
-func rootInvite() -> SecretBytes {
-    guard let p = getenv("BREV_ROOT_INVITE"), strlen(p) > 0 else {
-        print("FAIL this case needs BREV_ROOT_INVITE (the root invite scripts/test.sh mints)")
-        exit(2)
-    }
-    let code = SecretBytes(capacity: Int(limits().maxInvite))
-    guard code.append(UnsafeRawBufferPointer(start: p, count: strlen(p))) else {
-        print("FAIL BREV_ROOT_INVITE is longer than an invite code")
-        exit(2)
-    }
-    return code
-}
-
 /// An address no run used before: the relay lives through every run of
 /// test.sh, and an address is taken for good.
 func freshAddress(_ who: String) -> String {
@@ -276,23 +258,14 @@ final class User {
         try unlock(session, wrapped: wrapped, kek: kek)
     }
 
-    /// Registers `address` with the invite opened last, typed as the app
-    /// passes it: the digest, the signature, the post (with NoAttestor's
+    /// Registers `address` (no invite), typed as the app passes it: the
+    /// digest, the signature, the post (with NoAttestor's
     /// empty attestation).
     func register(_ address: String) throws {
         let typed = secret(address)
         defer { typed.wipe() }
         let digest = try session.registerRequest(address: typed)
         try session.register(signature: try Enclave.sign(digest: digest, key: identity), digest: digest)
-    }
-
-    /// Opens the invite `code` (the caller wipes it), then registers
-    /// `address` with it.
-    func register(_ address: String, invite code: SecretBytes) throws {
-        let opened = try session.openInvite(code: code)
-        opened.address.wipe()
-        opened.code.wipe()
-        try register(address)
     }
 
     /// Adds the contact with `address`; returns its local id.
@@ -308,7 +281,7 @@ final class User {
         let items = try session.contacts()
         defer { items.forEach { $0.name.wipe() } }
         guard let c = items.first(where: { unitsOf($0.name) == Array(address.utf16) }) else { throw BrevError.NotFound }
-        return Seen(id: c.id, waiting: c.waiting, verified: c.verified, blocked: c.blocked)
+        return Seen(id: c.id, waiting: c.waiting, blocked: c.blocked)
     }
 
     /// Where the identity key lives, as the key says: software, which the
@@ -338,7 +311,7 @@ final class User {
 /// A contact's local id and state (docs/PHASE4_DESIGN.md §5.2).
 struct Seen {
     let id: Data
-    let waiting: Bool, verified: Bool, blocked: Bool
+    let waiting: Bool, blocked: Bool
 }
 
 /// Two registered users who are each other's contacts.
@@ -349,22 +322,23 @@ struct Pair {
     let addressA: String, addressB: String
 }
 
-/// A registers with the run's root invite and B with an invite code A made;
-/// B pins A as it registers, and A's sync pins B (its invited event), as two
-/// people who meet through an invite (docs/PHASE4_DESIGN.md §3.4, §5.3).
+/// A and B register (no invite); B adds A, which asks A; A's sync fetches
+/// the request and A approves it; B's sync learns of the approval
+/// (docs/PHASE4_DESIGN.md §5.2, §5.3; as brev-mail's tests' `pair`).
 func makePair(in dir: URL, relay: String) throws -> Pair {
     let a = try User(in: dir.appendingPathComponent("a"), relay: relay)
     let b = try User(in: dir.appendingPathComponent("b"), relay: relay)
     let addressA = freshAddress("a"), addressB = freshAddress("b")
-    let root = rootInvite()
-    defer { root.wipe() }
-    try a.register(addressA, invite: root)
-    let code = try a.session.createInvite()
-    defer { code.wipe() }
-    try b.register(addressB, invite: code)
+    try a.register(addressA)
+    try b.register(addressB)
+    let bSeesA = try b.add(addressA)
     _ = try a.session.sync()
-    return Pair(a: a, b: b, aSeesB: try a.contact(addressB).id, bSeesA: try b.contact(addressA).id,
-                addressA: addressA, addressB: addressB)
+    let asks = try a.session.requests()
+    defer { asks.forEach { $0.address.wipe(); $0.code.wipe() } }
+    guard asks.count == 1 else { throw BrevError.NotFound }
+    let aSeesB = try a.session.answerRequest(peer: asks[0].peer, approve: true)
+    _ = try b.session.sync()
+    return Pair(a: a, b: b, aSeesB: aSeesB, bSeesA: bSeesA, addressA: addressA, addressB: addressB)
 }
 
 func throwsError<R>(_ expected: BrevError, _ f: () throws -> R) -> Bool {
@@ -944,33 +918,29 @@ func caseEditModel() {
     check("EditModel, address: no paste", Array("abc".utf8).withUnsafeBytes { !a.insertPasted($0) }
             && a.text.length == 32)
 
-    // A contact field (docs/PHASE4_DESIGN.md §6.2): an address or an invite
-    // code, so also "."; the only field a paste goes into.
-    let f = EditModel(maxBytes: 96, multiline: false, charset: .contact)
-    let contactMap = (UInt16(0)...UInt16(0xFFFF)).allSatisfy { u in
-        EditModel.contactUnit(u) == (u == 0x2E ? u : EditModel.addressUnit(u))
-    }
-    check("EditModel, contact: the address rule and \".\", over every UTF-16 unit", contactMap)
-    check("EditModel, contact: keys type a code, A–Z become a–z; æ, space, _ and a newline are refused",
-          typeUnits(f, "brev1.Ab-2") && unitsOf(f.text) == Array("brev1.ab-2".utf16)
-            && ["æ", " ", "_", "@"].allSatisfy { !typeUnits(f, $0) } && !f.insertNewline())
+    // A contact field (docs/PHASE4_DESIGN.md §6.2): an address to add, and
+    // the only field a paste goes into (no invite codes, D-0116).
+    let f = EditModel(maxBytes: 32, multiline: false, charset: .contact)
+    check("EditModel, contact: keys type an address, A–Z become a–z; \".\", æ, space, _ and a newline are refused",
+          typeUnits(f, "Brev-2x") && unitsOf(f.text) == Array("brev-2x".utf16)
+            && [".", "æ", " ", "_", "@"].allSatisfy { !typeUnits(f, $0) } && !f.insertNewline())
     f.wipe()
     func paste(_ m: EditModel, _ bytes: [UInt8]) -> Bool { bytes.withUnsafeBytes { m.insertPasted($0) } }
-    let code = "brev1.brev-secret-me.abcdefghijklmnopqrstuvwxyz2345.abcdefghijklmnopqrstuvwxyz"
+    let address = "brev-secret-me"
     check("EditModel, contact: a paste goes in at the caret as one insert, folded; spaces, tabs and line breaks left out",
-          paste(f, Array(" \t\(code.uppercased())\r\n".utf8)) && unitsOf(f.text) == Array(code.utf16)
-            && f.caret == code.utf16.count)
+          paste(f, Array(" \t\(address.uppercased())\r\n".utf8)) && unitsOf(f.text) == Array(address.utf16)
+            && f.caret == address.utf16.count)
     f.moveToStart()
-    check("EditModel, contact: a paste in the middle", paste(f, Array("x.".utf8)) && f.caret == 2
-            && unitsOf(f.text) == Array(("x." + code).utf16))
+    check("EditModel, contact: a paste in the middle", paste(f, Array("x-".utf8)) && f.caret == 2
+            && unitsOf(f.text) == Array(("x-" + address).utf16))
     let pasted = unitsOf(f.text)
-    check("EditModel, contact: a paste with one refused byte (æ in UTF-8, a comma, a NUL, a control) changes nothing",
-          [Array("abcæ".utf8), Array("ab,c".utf8), [0x61, 0x00], [0x61, 0x1B]].allSatisfy { !paste(f, $0) }
+    check("EditModel, contact: a paste with one refused byte (æ in UTF-8, a dot, a comma, a NUL, a control) changes nothing",
+          [Array("abcæ".utf8), Array("ab.c".utf8), Array("ab,c".utf8), [0x61, 0x00], [0x61, 0x1B]].allSatisfy { !paste(f, $0) }
             && unitsOf(f.text) == pasted && f.caret == 2)
     check("EditModel, contact: only whitespace, or nothing, is refused", !paste(f, Array(" \n".utf8)) && !paste(f, []))
     f.wipe()
-    check("EditModel, contact: a paste past 96 bytes of text, or of more than 256 bytes, is refused whole",
-          !paste(f, Array(repeating: 0x61, count: 97)) && f.text.length == 0
+    check("EditModel, contact: a paste past 32 bytes of text, or of more than 256 bytes, is refused whole",
+          !paste(f, Array(repeating: 0x61, count: 33)) && f.text.length == 0
             && !paste(f, Array(repeating: 0x20, count: 256) + [0x61]) && f.text.length == 0
             && paste(f, Array(repeating: 0x20, count: 255) + [0x61]) && unitsOf(f.text) == [0x61])
     check("EditModel: a body takes no paste", Array("abc".utf8).withUnsafeBytes { !b.insertPasted($0) })
@@ -1512,8 +1482,8 @@ func caseScribble(scribble: Bool) {
 
 // MARK: - Case 8: the network round trip (docs/PHASE3_DESIGN.md §8)
 
-/// Two users register at the relay test.sh started (A with the run's root
-/// invite, B with A's invite code), are each other's contacts and compare
+/// Two users register at the relay test.sh started (no invite), become
+/// each other's contacts by B's request and A's approval, and compare
 /// codes; a letter cancelled after signing goes nowhere; A sends a
 /// marker letter in the app's steps, B syncs and reads it (acknowledged, so
 /// a second sync gets nothing), B answers and A reads that. While the
@@ -1530,44 +1500,44 @@ func caseNetwork() {
         let a = try! User(in: dir.appendingPathComponent("a"), relay: relay)
         let b = try! User(in: dir.appendingPathComponent("b"), relay: relay)
         let before = try! a.session.me()
-        check("before registration: not registered, no address, a 35-byte code; sync is NotFound; "
-                + "registering without an opened invite is InviteInvalid",
+        check("before registration: not registered, no address, a 35-byte code; sync is NotFound",
               !before.registered && before.address.length == 0 && before.code.count == 35
-                  && throwsError(.NotFound) { try a.session.sync() }
-                  && throwsError(.InviteInvalid) { try a.register(freshAddress("a")) })
+                  && throwsError(.NotFound) { try a.session.sync() })
         before.address.wipe()
         before.code.wipe()
 
         let addressA = freshAddress("a"), addressB = freshAddress("b")
-        let root = rootInvite()
         do {
-            try a.register(addressA, invite: root)
-            let code = try a.session.createInvite()
-            defer { code.wipe() }
-            try b.register(addressB, invite: code)
+            try a.register(addressA)
+            try b.register(addressB)
         } catch {
-            check("both users register (A with the root invite, B with A's invite code)", false, "\(error)")
+            check("both users register with no invite (open registration)", false, "\(error)")
             return
         }
-        root.wipe()
-        let pinned = try? a.session.sync()
-        check("A's sync pins B, whose invite it made: a contact changed, no letter, no request",
-              pinned?.contactsChanged == true && pinned?.letters == 0 && pinned?.requests == 0)
+        let bSeesA = try! b.add(addressA)
+        let asked = try? a.session.sync()
+        check("B adds A: A's sync fetches one request, no letter",
+              asked?.requests == 1 && asked?.letters == 0)
+        let asks = (try? a.session.requests()) ?? []
+        let aSeesB = asks.count == 1 ? try! a.session.answerRequest(peer: asks[0].peer, approve: true) : Data()
+        asks.forEach { $0.address.wipe(); $0.code.wipe() }
+        let learned = try? b.session.sync()
+        check("A approves with one click; B's sync learns it: a contact changed, no letter",
+              learned?.contactsChanged == true && learned?.letters == 0)
         let meA = try! a.session.me(), meB = try! b.session.me()
         check("registered: the own address as typed", meA.registered && meB.registered
                   && unitsOf(meA.address) == Array(addressA.utf16) && unitsOf(meB.address) == Array(addressB.utf16))
         check("registering again is Duplicate", throwsError(.Duplicate) { try a.register(freshAddress("a")) })
-        let aSeesB = try! a.contact(addressB).id, bSeesA = try! b.contact(addressA).id
         check("adding a known address again is Duplicate, an unknown one NotFound",
               throwsError(.Duplicate) { try a.add(addressB) } && throwsError(.NotFound) { try a.add(freshAddress("n")) })
         let infoB = try! a.session.contactInfo(contact: aSeesB), infoA = try! b.session.contactInfo(contact: bSeesA)
         let rowsA = try! a.session.contacts()
-        check("each pinned the other's own code, verified by the invite and approved; no key changed",
+        check("each pinned the other's own code and is approved; no key changed",
               infoB.code.withBytes { Array($0) } == meB.code.withBytes { Array($0) }
                   && infoA.code.withBytes { Array($0) } == meA.code.withBytes { Array($0) }
                   && infoB.newCode.count == 0 && unitsOf(infoB.address) == Array(addressB.utf16)
-                  && rowsA.count == 1 && !rowsA[0].keyChanged && rowsA[0].verified && !rowsA[0].waiting
-                  && infoA.verified && !infoA.waiting && !infoA.blocked)
+                  && rowsA.count == 1 && !rowsA[0].keyChanged && !rowsA[0].waiting
+                  && !infoA.waiting && !infoA.blocked)
         for t in [meA.address, meB.address, infoA.address, infoB.address] + rowsA.map(\.name) { t.wipe() }
         for c in [meA.code, meB.code, infoA.code, infoB.code, infoA.newCode, infoB.newCode] { c.wipe() }
 
@@ -1672,50 +1642,7 @@ func caseNetwork() {
     }
 }
 
-// MARK: - Case 9: invites, approval, letters and Blokker (docs/PHASE4_DESIGN.md §8)
-
-/// Whether `code` is an invite code of the user with `address` and identity
-/// code `identity` (design §3.1): `brev1.<address>.<fingerprint>.<secret>`,
-/// at most `Limits.maxInvite` ASCII bytes, the fingerprint the identity
-/// code in lower case without its spaces, the secret 26 of a–z and 2–7.
-func isInviteCode(_ code: SecretBytes, address: String, identity: SecretBytes) -> Bool {
-    let head = Array("brev1.\(address).".utf8)
-    let fingerprint = identity.withBytes { $0.filter { $0 != 0x20 }.map { $0 | 0x20 } }
-    let base32 = { (c: UInt8) in (0x61...0x7A).contains(c) || (0x32...0x37).contains(c) }
-    return code.withBytes { b in
-        b.count <= Int(limits().maxInvite) && b.count == head.count + 30 + 1 + 26 && b.starts(with: head)
-            && fingerprint.count == 30 && b[head.count..<head.count + 30].elementsEqual(fingerprint)
-            && b[head.count + 30] == UInt8(ascii: ".") && b[(head.count + 31)...].allSatisfy(base32)
-    }
-}
-
-/// Scanner needles 0 and 1: the code's secret as text, its last 26 bytes,
-/// and as Rust keeps it once the code is parsed, the 16 bytes that base32
-/// text decodes to (design §3.1; the last 2 of its 130 bits are zero). Both
-/// XORed as scan.c takes them; each byte is XORed as it is decoded, so no
-/// plain copy is made here.
-func setSecretNeedles(_ code: SecretBytes) -> Bool {
-    var text = code.withBytes { $0.suffix(26).map { $0 ^ 0x5A } }
-    var raw = [UInt8](repeating: 0, count: 16)
-    defer {
-        _ = text.withUnsafeMutableBytes { memset_s($0.baseAddress!, $0.count, 0, $0.count) }
-        _ = raw.withUnsafeMutableBytes { memset_s($0.baseAddress!, $0.count, 0, $0.count) }
-    }
-    var bits: UInt32 = 0, pending = 0, n = 0
-    for x in text {
-        let c = x ^ 0x5A
-        guard (0x61...0x7A).contains(c) || (0x32...0x37).contains(c) else { return false }
-        bits = (bits << 5) | UInt32(c >= 0x61 ? c - 0x61 : c - 0x32 + 26)
-        pending += 5
-        if pending >= 8 {
-            pending -= 8
-            if n < 16 { raw[n] = UInt8(truncatingIfNeeded: bits >> pending) ^ 0x5A }
-            n += 1
-        }
-    }
-    return text.count == 26 && n == 16 && brev_scan_set_needle(0, text, text.count) == 0
-        && brev_scan_set_needle(1, raw, raw.count) == 0
-}
+// MARK: - Case 9: requests, approval, letters and Blokker (docs/PHASE4_DESIGN.md §8)
 
 /// Scanner needles 2 and 3: `address`'s units as UTF-16LE bytes and
 /// `code`'s bytes (an identity code), each XORed as scan.c takes them, so no
@@ -1730,37 +1657,20 @@ func setContactNeedles(address: SecretText, code: SecretBytes) -> Bool {
     return c.count == 35 && brev_scan_set_needle(2, a, a.count) == 0 && brev_scan_set_needle(3, c, c.count) == 0
 }
 
-/// A copy of `code` with the first character of its fingerprint changed
-/// (still base32, so it parses). The caller wipes it.
-func editedFingerprint(_ code: SecretBytes, address: String) -> SecretBytes {
-    let copy = SecretBytes(capacity: code.capacity)
-    code.withBytes { _ = copy.append($0) }
-    let at = copy.base.assumingMemoryBound(to: UInt8.self) + ("brev1.".utf8.count + address.utf8.count + 1)
-    at.pointee = at.pointee == UInt8(ascii: "a") ? UInt8(ascii: "b") : UInt8(ascii: "a")
-    return copy
-}
-
 /// The Phase 4 round trip through the relay test.sh started, in the app's
-/// calls: A opens the run's root invite and registers with it; A makes an
-/// invite code (A's address and fingerprint); a copy with one character of
-/// the fingerprint changed is InviteMismatch at B, and nothing is kept; the
-/// real code shows A's address and code, B registers with it, and the used
-/// code is refused after that; A's sync pins B; both are approved and
-/// verified; a marker letter goes each way. C, brought in by B's invite,
-/// adds A by address: a request without text, and C cannot send to A
-/// (NotApproved, before any digest); A's sync shows the request with C's
-/// address and code, one answer approves it, C's sync learns it, and C's
-/// letter arrives. Then A blocks C (Blokker): A cannot send to C, and C's
-/// letters no longer reach A. D opens A's code too and holds it opened
-/// until the lock, never registering. While the letters are open, the code
-/// is kept and an opened invite is held the scanner sees them (positive
-/// controls: the code's secret as text in Swift, as 16 bytes in Rust);
-/// after the wipe, the flush and the locks, nothing: no UTF-8, UTF-16 or
-/// glyph copy of the marker, and no copy of the code's secret, as text or
-/// as bytes. The same holds for contact data (docs/SWIFT_MEMORY_REVIEW.md):
-/// B's address as UTF-16 and B's identity code, seen while B's own and A's
-/// reads of them are held, and gone after the wipe and the locks.
-func caseInvite() {
+/// calls, with open registration (no invites, D-0116): A and B register and
+/// become contacts by B's request and A's approval, and a marker letter goes
+/// each way. C registers and adds A by address: a request without text, and
+/// C cannot send to A (NotApproved, before any digest); A's sync shows the
+/// request with C's address and code, one answer approves it, C's sync
+/// learns it, and C's letter arrives. Then A blocks C (Blokker): A cannot
+/// send to C, and C's letters no longer reach A. While the letters are open
+/// the scanner sees them (positive controls); after the wipe, the flush and
+/// the locks, nothing: no UTF-8, UTF-16 or glyph copy of the marker. The
+/// same holds for contact data (docs/SWIFT_MEMORY_REVIEW.md): B's address
+/// as UTF-16 and B's identity code, seen while B's own and A's reads of
+/// them are held, and gone after the wipe and the locks.
+func caseApproval() {
     requireScribble(true)
     let relay = relayURL()
     let font = CTFontCreateWithName("Helvetica" as CFString, 13, nil)
@@ -1768,69 +1678,17 @@ func caseInvite() {
     withStoreDir { dir in
         var h = scan()
         check("baseline: no marker, no glyph needle", h.u8 == 0 && h.u16 == 0 && h.glyph == 0, "\(h)")
-        let a = try! User(in: dir.appendingPathComponent("a"), relay: relay)
-        let b = try! User(in: dir.appendingPathComponent("b"), relay: relay)
-        let c = try! User(in: dir.appendingPathComponent("c"), relay: relay)
-        let d = try! User(in: dir.appendingPathComponent("d"), relay: relay)
-        let addressA = freshAddress("a"), addressB = freshAddress("b"), addressC = freshAddress("c")
-
-        // A: the root invite.
-        let root = rootInvite()
-        let opened = try? a.session.openInvite(code: root)
-        root.wipe()
-        check("the root invite opens as one: no inviter, no address, no code",
-              opened.map { $0.root && $0.address.length == 0 && $0.code.count == 0 } ?? false)
-        opened?.address.wipe()
-        opened?.code.wipe()
-        do { try a.register(addressA) } catch {
-            check("A registers with the root invite", false, "\(error)")
+        guard let pair = try? makePair(in: dir, relay: relay) else {
+            check("A and B register with no invite and become contacts by request and approval", false)
             return
         }
-
-        // A's invite code; an edited copy is refused at B, the real one names A.
-        let meA = try! a.session.me()
-        guard let code = try? a.session.createInvite() else {
-            check("A makes an invite code", false)
-            return
-        }
-        check("the invite code is brev1.<A's address>.<A's code as fingerprint>.<secret>, at most 96 ASCII bytes",
-              isInviteCode(code, address: addressA, identity: meA.code))
-        check("scanner takes the code's secret as needles 0 (text) and 1 (its 16 bytes)", setSecretNeedles(code))
-        let edited = editedFingerprint(code, address: addressA)
-        check("a copy with one character of the fingerprint changed is InviteMismatch at B, which keeps nothing",
-              throwsError(.InviteMismatch) { try b.session.openInvite(code: edited) }
-                  && throwsError(.InviteInvalid) { try b.register(addressB) })
-        edited.wipe()
-        let held = try? d.session.openInvite(code: code)
-        check("D opens the real code and holds it opened (D never registers)", held.map { !$0.root } ?? false)
-        held?.address.wipe()
-        held?.code.wipe()
-        let invited = try? b.session.openInvite(code: code)
-        check("the real code shows A as the inviter: A's address and code",
-              invited.map { !$0.root && unitsOf($0.address) == Array(addressA.utf16)
-                  && $0.code.withBytes { Array($0) } == meA.code.withBytes { Array($0) } } ?? false)
-        invited?.address.wipe()
-        invited?.code.wipe()
-        h = scan()
-        check("while B and D hold the opened invite: the scanner sees Rust's 16 bytes of the secret (positive control)",
-              h.needle(1) > 0, "\(h)")
-        do { try b.register(addressB) } catch {
-            check("B registers with A's invite code", false, "\(error)")
-            return
-        }
-        check("the used code is InviteInvalid", throwsError(.InviteInvalid) { try c.session.openInvite(code: code) })
-        h = scan()
-        check("while the code is kept: the scanner sees its secret (positive control)", h.needle(0) > 0, "\(h)")
-        code.wipe()
-        meA.address.wipe()
-        meA.code.wipe()
-        let pinned = try? a.session.sync()
-        check("A's sync pins B through the invite: a contact changed, no request",
-              pinned?.contactsChanged == true && pinned?.requests == 0)
-        let aSeesB = try? a.contact(addressB), bSeesA = try? b.contact(addressA)
-        check("A and B are approved and verified contacts of each other",
-              [aSeesB, bSeesA].allSatisfy { $0.map { !$0.waiting && $0.verified && !$0.blocked } ?? false })
+        let (a, b) = (pair.a, pair.b)
+        let aSeesB = try? a.contact(pair.addressB), bSeesA = try? b.contact(pair.addressA)
+        check("A and B register with no invite and are approved contacts of each other",
+              [aSeesB, bSeesA].allSatisfy { $0.map { !$0.waiting && !$0.blocked } ?? false })
         guard let aSeesB, let bSeesA else { return }
+        let c = try! User(in: dir.appendingPathComponent("c"), relay: relay)
+        let addressA = pair.addressA, addressC = freshAddress("c")
 
         // A marker letter each way.
         let subject = markerText(units: 32, emoji: false), body = markerText(units: 1000, emoji: true)
@@ -1843,19 +1701,15 @@ func caseInvite() {
         check("a marker letter goes each way", thread != nil && arrived == 1 && reply != nil && back == 1,
               "\(String(describing: arrived)), \(String(describing: back))")
 
-        // C, brought in by B, asks A by address.
-        do {
-            let codeB = try b.session.createInvite()
-            defer { codeB.wipe() }
-            try c.register(addressC, invite: codeB)
-        } catch {
-            check("C registers with B's invite code", false, "\(error)")
+        // C asks A by address.
+        do { try c.register(addressC) } catch {
+            check("C registers with no invite", false, "\(error)")
             return
         }
         let cSeesA = try? c.add(addressA)
         let asking = try? c.contact(addressA)
-        check("C adds A by address: a request goes out, and A waits at C (not verified)",
-              cSeesA != nil && asking.map { $0.waiting && !$0.verified && !$0.blocked } ?? false)
+        check("C adds A by address: a request goes out, and A waits at C",
+              cSeesA != nil && asking.map { $0.waiting && !$0.blocked } ?? false)
         guard let cSeesA else { return }
         let note = secret("Hei"), noteBody = secret("Et brev fra C.")
         defer { note.wipe(); noteBody.wipe() }
@@ -1874,7 +1728,7 @@ func caseInvite() {
         meC.code.wipe()
         check("one answer approves C: C is A's contact, approved, and no request is left",
               aSeesC?.count == 16 && (try? a.session.requests())?.isEmpty == true
-                  && (try? a.contact(addressC)).map { !$0.waiting && !$0.verified } ?? false)
+                  && (try? a.contact(addressC)).map { !$0.waiting } ?? false)
         let approved = try? c.session.sync()
         check("C's sync learns the approval: A no longer waits at C",
               approved?.contactsChanged == true && (try? c.contact(addressA))?.waiting == false)
@@ -1904,10 +1758,10 @@ func caseInvite() {
         check("A and B each hold both marker letters at full length",
               letters.count == 4 && letters.allSatisfy { $0.length == 1002 })
         // Contact data, as the screens hold it: B's own address and code
-        // (the header's line 1), A's contacts (the list's names) and B's
-        // details at A (line 2). Needle 2 is B's address as UTF-16, the form
-        // SecretText keeps (the harness's own Strings are UTF-8); needle 3
-        // B's identity code.
+        // (the Kontakter sheet), A's contacts (the list's names) and B's
+        // details at A (the contact bar). Needle 2 is B's address as UTF-16,
+        // the form SecretText keeps (the harness's own Strings are UTF-8);
+        // needle 3 B's identity code.
         let meB = try! b.session.me(), infoB = try! a.session.contactInfo(contact: aSeesB.id)
         let namesA = try! a.session.contacts()
         check("scanner takes B's address (UTF-16) and identity code as needles 2 and 3",
@@ -1916,8 +1770,6 @@ func caseInvite() {
         letters.forEach(drawing.draw)
         h = scan()
         check("while open: the letters are in memory (positive control)", h.u16 > 0, "\(h)")
-        check("before the lock: D's opened invite still holds the secret's 16 bytes (positive control)",
-              h.needle(1) > 0, "\(h)")
         check("while read: B's address and identity code are in memory (positive control)",
               h.needle(2) >= 3 && h.needle(3) >= 2, "\(h)")
         h = drawing.scanWithLiveLine(letters[0], font: font)
@@ -1928,14 +1780,12 @@ func caseInvite() {
         for s in [meB.code, infoB.code, infoB.newCode] { s.wipe() }
         GlyphFlush.flush()
         drawing.layout.reset()
-        for u in [a, b, c, d] { u.lock() }
-        check("after lock: the invite calls are Locked (no request)",
-              throwsLocked { try a.session.createInvite() } && throwsLocked { try a.session.requests() }
-                  && throwsLocked { try a.session.sync() })
+        for u in [a, b, c] { u.lock() }
+        check("after lock: the contact calls are Locked (no request)",
+              throwsLocked { try a.session.requests() } && throwsLocked { try a.session.sync() })
         h = scan()
-        check("after wipe, flush and lock: no copy of the marker (UTF-8, UTF-16, glyphs) or of the code's secret (text, bytes)",
-              h.u8 == 0 && h.u16 == 0 && h.glyph == 0 && h.needle(0) == 0 && h.needle(1) == 0
-                  && [a, b, c, d].allSatisfy { $0.session.brev.isLocked() }, "\(h)")
+        check("after wipe, flush and lock: no copy of the marker (UTF-8, UTF-16, glyphs)",
+              h.u8 == 0 && h.u16 == 0 && h.glyph == 0 && [a, b, c].allSatisfy { $0.session.brev.isLocked() }, "\(h)")
         check("after wipe and lock: no copy of B's address (UTF-16) or identity code",
               h.needle(2) == 0 && h.needle(3) == 0, "\(h)")
     }
@@ -1971,10 +1821,10 @@ case ("scribble", 1), ("scribble", 2):
     }
     caseScribble(scribble: args.count == 1)
 case ("network", 1): caseNetwork()
-case ("invite", 1): caseInvite()
+case ("approval", 1): caseApproval()
 default:
     print("usage: harness units | shell | compose | dek | content <units> [--no-scribble] | kept | control"
-          + " | scribble [--no-scribble] | network | invite | needles <file>")
+          + " | scribble [--no-scribble] | network | approval | needles <file>")
     exit(2)
 }
 print(failures == 0 ? "PASS" : "FAIL: \(failures) check(s)")

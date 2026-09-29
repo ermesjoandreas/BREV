@@ -4,10 +4,11 @@
 //! answers. All binary; every parser here borrows the body and refuses
 //! anything but the exact layout.
 //!
-//! Phase 4 (docs/PHASE4_DESIGN.md §3.2) adds registration v2 (with the
-//! invite and an attestation), the envelope submit with the sender's token,
-//! the lookup reply with its status byte, contact requests, events and their
-//! answers, *Blokker*, and the invite bodies. The Phase 3 forms stay until
+//! Phase 4 (docs/PHASE4_DESIGN.md §3.2) adds the registration with an
+//! attestation (v3 since registration is open, docs/DECISIONS.md D-0116
+//! invites); v2 carried an invite), the envelope submit with the sender's
+//! token, the lookup reply with its status byte, contact requests, events
+//! and their answers, and *Blokker*. The Phase 3 forms stay until
 //! brev-mail and brev-relay move to the new ones.
 
 use sha2::{Digest, Sha256};
@@ -49,10 +50,10 @@ pub enum BodyError {
     /// than [`EVENTS_MAX`].
     Count,
     /// A byte outside the values its field allows: an event kind, a status
-    /// or a verdict other than 0 or 1, a non-zero tag where zeros belong.
+    /// or a verdict other than 0 or 1.
     Value,
-    /// Events in the wrong order: an invited or approved event after a
-    /// request ([`events_answer`]).
+    /// Events in the wrong order: an approved event after a request
+    /// ([`events_answer`]).
     Order,
 }
 
@@ -160,75 +161,48 @@ impl<'a> Registration<'a> {
     }
 }
 
-/// Signing domain of a registration v2 (docs/PHASE4_DESIGN.md §3.3). It
-/// differs from [`REGISTER_DOMAIN`], so a v1 body never verifies as v2.
-pub const REGISTER_DOMAIN_V2: &[u8] = b"brev/v2/register\0";
+/// Signing domain of a registration v3 (docs/DECISIONS.md D-0116
+/// invites); v2 carried an invite, docs/PHASE4_DESIGN.md §3.3). It differs
+/// from [`REGISTER_DOMAIN`] and from v2's, so no other version's signature
+/// verifies as v3.
+pub const REGISTER_DOMAIN_V3: &[u8] = b"brev/v3/register\0";
 
-/// Largest attestation in a registration v2 (design §7.1). Real App Attest
-/// objects are about 5 to 6 KB.
+/// Largest attestation in a registration v3 (docs/PHASE4_DESIGN.md §7.1).
+/// Real App Attest objects are about 5 to 6 KB.
 pub const MAX_ATTESTATION: usize = 8192;
 
-/// A registration v2 before its signature, without the address: length
-/// byte, signing key, X25519 key, token hash, `a`, tag. `194 + L` bytes.
-const REGISTER_V2_UNSIGNED: usize = 1 + KEY_LEN + 32 + 32 + 32 + 32;
+/// A registration v3 before its signature, without the address: length
+/// byte, signing key, X25519 key, token hash. `130 + L` bytes, the same
+/// fields as v1 ([`registration_body`] builds both).
+const REGISTER_V3_UNSIGNED: usize = 1 + KEY_LEN + 32 + 32;
 
-/// The rest of a registration v2 around the address and the attestation:
+/// The rest of a registration v3 around the address and the attestation:
 /// the signature and the attestation length.
-const REGISTER_V2_FIXED: usize = REGISTER_V2_UNSIGNED + SIG_LEN + 2;
+const REGISTER_V3_FIXED: usize = REGISTER_V3_UNSIGNED + SIG_LEN + 2;
 
-/// Largest registration v2 (8 484 bytes): the longest address and the
+/// Largest registration v3 (8 420 bytes): the longest address and the
 /// largest attestation. Below the relay's 16 KiB limit for small bodies.
-pub const REGISTRATION_V2_MAX: usize = REGISTER_V2_FIXED + ADDRESS_MAX + MAX_ATTESTATION;
+pub const REGISTRATION_V3_MAX: usize = REGISTER_V3_FIXED + ADDRESS_MAX + MAX_ATTESTATION;
 
-/// The registration v2 body without its signature, bytes `[0, 194 + L)` of
-/// design §3.2: `L ‖ address ‖ signing key ‖ X25519 key ‖ token hash ‖ a ‖
-/// tag`, where `a` is the invite's relay key (`invite::relay_key`) and `tag`
-/// the invitee's proof (`invite::tag`, zeros for a root invite). Refuses an
-/// address that breaks the rules and a key that is not a valid point. The
-/// identity key signs [`register_preimage_v2`] of it; the caller then builds
-/// the body with [`signed_registration_v2`].
-pub fn registration_body_v2(
-    address: &[u8],
-    signing_key: &[u8],
-    x25519: &[u8; 32],
-    token_hash: &[u8; 32],
-    invite: &[u8; 32],
-    tag: &[u8; 32],
-) -> Result<Vec<u8>, BodyError> {
-    if !is_valid_address(address) {
-        return Err(BodyError::Address);
-    }
-    let signing_key = sig::check_key(signing_key).map_err(|_| BodyError::Key)?;
-    let len = u8::try_from(address.len()).map_err(|_| BodyError::Address)?;
-    let mut out = Vec::with_capacity(REGISTER_V2_UNSIGNED + address.len());
-    out.push(len);
-    out.extend_from_slice(address);
-    out.extend_from_slice(signing_key);
-    out.extend_from_slice(x25519);
-    out.extend_from_slice(token_hash);
-    out.extend_from_slice(invite);
-    out.extend_from_slice(tag);
-    Ok(out)
+/// What the identity key signs for a registration v3: [`REGISTER_DOMAIN_V3`]
+/// ‖ `unsigned`, the body [`registration_body`] built. The Enclave signs its
+/// SHA-256, and an attestation is made over the same digest
+/// ([`RegistrationV3::digest`]).
+pub fn register_preimage_v3(unsigned: &[u8]) -> Vec<u8> {
+    [REGISTER_DOMAIN_V3, unsigned].concat()
 }
 
-/// What the identity key signs for a registration v2: [`REGISTER_DOMAIN_V2`]
-/// ‖ `unsigned`. The Enclave signs its SHA-256, and an attestation is made
-/// over the same digest ([`RegistrationV2::digest`]).
-pub fn register_preimage_v2(unsigned: &[u8]) -> Vec<u8> {
-    [REGISTER_DOMAIN_V2, unsigned].concat()
-}
-
-/// The registration v2 body: `unsigned` ‖ signature ‖ attestation length
+/// The registration v3 body: `unsigned` ‖ signature ‖ attestation length
 /// (u16 BE) ‖ attestation. The attestation is not signed: it is made over
-/// the signed digest. Refuses an `unsigned` that is not `194 + L` bytes and
+/// the signed digest. Refuses an `unsigned` that is not `130 + L` bytes and
 /// an attestation over [`MAX_ATTESTATION`].
-pub fn signed_registration_v2(
+pub fn signed_registration_v3(
     unsigned: &[u8],
     signature: &[u8; SIG_LEN],
     attestation: &[u8],
 ) -> Result<Vec<u8>, BodyError> {
     let (&len, _) = unsigned.split_first().ok_or(BodyError::Length)?;
-    if unsigned.len() != REGISTER_V2_UNSIGNED + usize::from(len)
+    if unsigned.len() != REGISTER_V3_UNSIGNED + usize::from(len)
         || attestation.len() > MAX_ATTESTATION
     {
         return Err(BodyError::Length);
@@ -243,9 +217,9 @@ pub fn signed_registration_v2(
     .concat())
 }
 
-/// A parsed registration v2, borrowing the body. No `Debug`: brev-core
+/// A parsed registration v3, borrowing the body. No `Debug`: brev-core
 /// treats an address as content.
-pub struct RegistrationV2<'a> {
+pub struct RegistrationV3<'a> {
     /// The address, valid by [`is_valid_address`].
     pub address: &'a [u8],
     /// The identity signing key, a valid point.
@@ -254,27 +228,22 @@ pub struct RegistrationV2<'a> {
     pub x25519: &'a [u8; 32],
     /// SHA-256 of the relay token ([`token_hash`]).
     pub token_hash: &'a [u8; 32],
-    /// The invite's relay key `a`; the relay looks up SHA-256 of it.
-    pub invite: &'a [u8; 32],
-    /// The invitee's proof for the inviter; zeros for a root invite, which
-    /// the relay ignores.
-    pub tag: &'a [u8; 32],
-    /// Raw r ‖ s over [`register_preimage_v2`] of `unsigned`.
+    /// Raw r ‖ s over [`register_preimage_v3`] of `unsigned`.
     pub signature: &'a [u8; SIG_LEN],
     /// 0 to [`MAX_ATTESTATION`] bytes, not covered by the signature.
     pub attestation: &'a [u8],
     unsigned: &'a [u8],
 }
 
-impl<'a> RegistrationV2<'a> {
-    /// Parses a registration v2: exact length (the attestation length
+impl<'a> RegistrationV3<'a> {
+    /// Parses a registration v3: exact length (the attestation length
     /// included, at most [`MAX_ATTESTATION`]), address rules, signing key a
-    /// valid point. The signature is checked by [`RegistrationV2::verify`].
-    pub fn parse(body: &'a [u8]) -> Result<RegistrationV2<'a>, BodyError> {
+    /// valid point. The signature is checked by [`RegistrationV3::verify`].
+    pub fn parse(body: &'a [u8]) -> Result<RegistrationV3<'a>, BodyError> {
         let (&len, _) = body.split_first().ok_or(BodyError::Length)?;
         let len = usize::from(len);
         let (unsigned, rest) = body
-            .split_at_checked(REGISTER_V2_UNSIGNED + len)
+            .split_at_checked(REGISTER_V3_UNSIGNED + len)
             .ok_or(BodyError::Length)?;
         let (signature, rest) = rest
             .split_first_chunk::<SIG_LEN>()
@@ -294,43 +263,40 @@ impl<'a> RegistrationV2<'a> {
             .split_first_chunk::<KEY_LEN>()
             .ok_or(BodyError::Length)?;
         sig::check_key(signing_key).map_err(|_| BodyError::Key)?;
-        let (x25519, rest) = rest.split_first_chunk::<32>().ok_or(BodyError::Length)?;
-        let (token_hash, rest) = rest.split_first_chunk::<32>().ok_or(BodyError::Length)?;
-        let (invite, tag) = rest.split_first_chunk::<32>().ok_or(BodyError::Length)?;
-        Ok(RegistrationV2 {
+        let (x25519, token_hash) = rest.split_first_chunk::<32>().ok_or(BodyError::Length)?;
+        Ok(RegistrationV3 {
             address,
             signing_key,
             x25519,
-            token_hash,
-            invite,
-            tag: tag.try_into().map_err(|_| BodyError::Length)?,
+            token_hash: token_hash.try_into().map_err(|_| BodyError::Length)?,
             signature,
             attestation,
             unsigned,
         })
     }
 
-    /// Checks the signature over [`register_preimage_v2`] with the
+    /// Checks the signature over [`register_preimage_v3`] with the
     /// registration's own signing key: proof that the sender holds it, and
-    /// that it chose this address, token, invite and tag.
+    /// that it chose this address and token.
     pub fn verify(&self) -> Result<(), SigError> {
         sig::verify(
             self.signing_key,
-            &register_preimage_v2(self.unsigned),
+            &register_preimage_v3(self.unsigned),
             self.signature,
         )
     }
 
-    /// SHA-256 of [`register_preimage_v2`]: the digest the Enclave signed,
-    /// and the client data hash an attestation is made over (design §7.1).
+    /// SHA-256 of [`register_preimage_v3`]: the digest the Enclave signed,
+    /// and the client data hash an attestation is made over
+    /// (docs/PHASE4_DESIGN.md §7.1).
     pub fn digest(&self) -> [u8; 32] {
-        Sha256::digest(register_preimage_v2(self.unsigned)).into()
+        Sha256::digest(register_preimage_v3(self.unsigned)).into()
     }
 }
 
 /// Length of the prefix of every token-authenticated body (lookup, inbox,
 /// ack, and from Phase 4 submit, contact request, events, event answer,
-/// *Blokker*, invite create and redeem): the caller's identity id (32) ‖
+/// *Blokker*): the caller's identity id (32) ‖
 /// relay token (32).
 pub const REQUEST_PREFIX_LEN: usize = 64;
 
@@ -424,23 +390,6 @@ pub fn block_body(caller: &[u8; 32], token: &[u8; 32], peer: &[u8; 32]) -> Vec<u
     request_body(caller, token, peer)
 }
 
-/// An invite create body (`/v1/invites`): prefix ‖ SHA-256(`a`)
-/// (`invite::stored_hash`). The relay never sees the secret or `a` here.
-pub fn invite_create_body(caller: &[u8; 32], token: &[u8; 32], hash: &[u8; 32]) -> Vec<u8> {
-    request_body(caller, token, hash)
-}
-
-/// An invite redeem body (`/v1/invites/redeem`): prefix ‖ `a` ‖ the
-/// invitee's tag for the inviter (`invite::tag`).
-pub fn invite_redeem_body(
-    caller: &[u8; 32],
-    token: &[u8; 32],
-    invite: &[u8; 32],
-    tag: &[u8; 32],
-) -> Vec<u8> {
-    request_body(caller, token, &[&invite[..], &tag[..]].concat())
-}
-
 /// A parsed token-authenticated body, borrowing it. The endpoint says which
 /// payload to expect. No `Debug`: it holds the relay token and may hold an
 /// address.
@@ -522,18 +471,6 @@ impl<'a> Request<'a> {
     /// The payload of a *Blokker*: the peer's identity id.
     pub fn block(&self) -> Result<&'a [u8; 32], BodyError> {
         self.payload.try_into().map_err(|_| BodyError::Length)
-    }
-
-    /// The payload of an invite create: SHA-256(`a`).
-    pub fn invite_create(&self) -> Result<&'a [u8; 32], BodyError> {
-        self.payload.try_into().map_err(|_| BodyError::Length)
-    }
-
-    /// The payload of an invite redeem: `a` and the tag.
-    pub fn invite_redeem(&self) -> Result<(&'a [u8; 32], &'a [u8; 32]), BodyError> {
-        let payload: &[u8; 64] = self.payload.try_into().map_err(|_| BodyError::Length)?;
-        let (invite, tag) = payload.split_first_chunk::<32>().ok_or(BodyError::Length)?;
-        Ok((invite, tag.try_into().map_err(|_| BodyError::Length)?))
     }
 }
 
@@ -667,7 +604,7 @@ pub fn parse_inbox_answer(body: &[u8]) -> Result<Vec<(u64, &[u8])>, BodyError> {
     Ok(out)
 }
 
-/// An identity as an event or an invite-open answer names it:
+/// An identity as an event names it:
 /// `L ‖ address ‖ signing key 65 ‖ X25519 key 32`. The receiver computes
 /// its id with [`crate::identity_id`]. No `Debug`: brev-core treats an
 /// address as content.
@@ -727,8 +664,8 @@ impl<'a> Peer<'a> {
 pub enum EventKind {
     /// The peer asks to write to the recipient.
     Request = 1,
-    /// The peer redeemed the recipient's invite; the event carries its tag.
-    Invited = 2,
+    // 2 was an invite the peer redeemed (docs/DECISIONS.md D-0116);
+    // it is not reused.
     /// The peer approved the recipient's request.
     Approved = 3,
 }
@@ -738,7 +675,6 @@ impl EventKind {
     pub fn from_byte(byte: u8) -> Option<EventKind> {
         match byte {
             1 => Some(EventKind::Request),
-            2 => Some(EventKind::Invited),
             3 => Some(EventKind::Approved),
             _ => None,
         }
@@ -757,55 +693,44 @@ pub struct Event<'a> {
     pub kind: EventKind,
     /// Who it is about.
     pub peer: Peer<'a>,
-    /// The invitee's proof ([`crate::invite::tag`]) for
-    /// [`EventKind::Invited`]; 32 zero bytes for the other kinds.
-    pub tag: &'a [u8; 32],
 }
 
 /// Most events in one events answer.
 pub const EVENTS_MAX: usize = 32;
 
-/// Longest events answer (5 217 bytes): the count and 32 events at the
+/// Longest events answer (4 193 bytes): the count and 32 events at the
 /// longest address.
-pub const EVENTS_ANSWER_MAX: usize = 1 + EVENTS_MAX * (1 + PEER_MAX + 32);
-
-/// A tag of 32 zero bytes, as every event but [`EventKind::Invited`] has.
-const ZERO_TAG: [u8; 32] = [0; 32];
+pub const EVENTS_ANSWER_MAX: usize = 1 + EVENTS_MAX * (1 + PEER_MAX);
 
 /// An events answer (docs/PHASE4_DESIGN.md §3.2): count (u8) ‖ per event
-/// kind ‖ peer ‖ tag. Invited and approved events come first, then
-/// requests, each oldest first, so requests never hide the others; the
-/// relay picks them in that order (oldest first is its part). Refuses more
-/// than [`EVENTS_MAX`] events, an invited or approved event after a request
-/// ([`BodyError::Order`]), a peer that breaks the rules, and a non-zero tag
-/// on a request or approved event.
+/// kind ‖ peer. Approved events come first, then requests, each oldest
+/// first, so requests never hide the others; the relay picks them in that
+/// order (oldest first is its part). Refuses more than [`EVENTS_MAX`]
+/// events, an approved event after a request ([`BodyError::Order`]), and a
+/// peer that breaks the rules.
 pub fn events_answer(events: &[Event<'_>]) -> Result<Vec<u8>, BodyError> {
     if events.len() > EVENTS_MAX {
         return Err(BodyError::Count);
     }
     let count = u8::try_from(events.len()).map_err(|_| BodyError::Count)?;
-    let mut out = Vec::with_capacity(1 + events.len() * (1 + PEER_MAX + 32));
+    let mut out = Vec::with_capacity(1 + events.len() * (1 + PEER_MAX));
     out.push(count);
     let mut requests = false;
     for event in events {
-        if event.kind != EventKind::Invited && event.tag != &ZERO_TAG {
-            return Err(BodyError::Value);
-        }
         if requests && event.kind != EventKind::Request {
             return Err(BodyError::Order);
         }
         requests = event.kind == EventKind::Request;
         out.push(event.kind.byte());
         event.peer.write(&mut out)?;
-        out.extend_from_slice(event.tag);
     }
     Ok(out)
 }
 
 /// Parses an events answer, borrowing it: at most [`EVENTS_MAX`] events,
-/// each with a known kind, a valid peer and a tag that is zero unless the
-/// kind is [`EventKind::Invited`], and no byte after the last. The order is
-/// not checked: the reader handles every event it gets, in any order.
+/// each with a known kind and a valid peer, and no byte after the last. The
+/// order is not checked: the reader handles every event it gets, in any
+/// order.
 pub fn parse_events_answer(body: &[u8]) -> Result<Vec<Event<'_>>, BodyError> {
     let (&count, mut rest) = body.split_first().ok_or(BodyError::Length)?;
     let count = usize::from(count);
@@ -816,12 +741,8 @@ pub fn parse_events_answer(body: &[u8]) -> Result<Vec<Event<'_>>, BodyError> {
     for _ in 0..count {
         let (&kind, tail) = rest.split_first().ok_or(BodyError::Length)?;
         let (peer, tail) = Peer::take(tail)?;
-        let (tag, tail) = tail.split_first_chunk::<32>().ok_or(BodyError::Length)?;
         let kind = EventKind::from_byte(kind).ok_or(BodyError::Value)?;
-        if kind != EventKind::Invited && tag != &ZERO_TAG {
-            return Err(BodyError::Value);
-        }
-        out.push(Event { kind, peer, tag });
+        out.push(Event { kind, peer });
         rest = tail;
     }
     if !rest.is_empty() {
@@ -830,50 +751,9 @@ pub fn parse_events_answer(body: &[u8]) -> Result<Vec<Event<'_>>, BodyError> {
     Ok(out)
 }
 
-/// Parses an invite open body (`/v1/invites/open`, no prefix): exactly `a`,
-/// 32 bytes.
-pub fn parse_invite_open(body: &[u8]) -> Result<&[u8; 32], BodyError> {
-    body.try_into().map_err(|_| BodyError::Length)
-}
-
-/// The invite open answer of a root invite: one zero byte. No address is
-/// that short, so it cannot be read as a peer.
-const ROOT_INVITE: [u8; 1] = [0];
-
-/// Longest invite open answer (130 bytes): a peer at the longest address.
-pub const INVITE_OPEN_ANSWER_MAX: usize = PEER_MAX;
-
-/// An invite open answer (docs/PHASE4_DESIGN.md §3.2): the inviter as a
-/// [`Peer`], or the single byte `00` for a root invite (`None`). Refuses a
-/// peer that breaks the rules.
-pub fn invite_open_answer(inviter: Option<&Peer<'_>>) -> Result<Vec<u8>, BodyError> {
-    match inviter {
-        None => Ok(ROOT_INVITE.to_vec()),
-        Some(peer) => {
-            let mut out = Vec::with_capacity(PEER_MAX);
-            peer.write(&mut out)?;
-            Ok(out)
-        }
-    }
-}
-
-/// Parses an invite open answer: `00` (a root invite, `None`) or exactly one
-/// valid peer.
-pub fn parse_invite_open_answer(body: &[u8]) -> Result<Option<Peer<'_>>, BodyError> {
-    if body == ROOT_INVITE {
-        return Ok(None);
-    }
-    let (peer, rest) = Peer::take(body)?;
-    if !rest.is_empty() {
-        return Err(BodyError::Length);
-    }
-    Ok(Some(peer))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::invite;
     use crate::test_keys::TestKey;
 
     const LONGEST: &[u8] = b"abcdefghijklmnopqrstuvwxyz012345";
@@ -1116,29 +996,18 @@ mod tests {
         assert_eq!(parse_inbox_answer(&body), Err(BodyError::Length));
     }
 
-    /// Design §3.2's registration v2: offsets, the v2 domain (a v1
-    /// signature fails), the attestation at 0 and 8 192 bytes and not
+    /// Registration v3 (D-0116): offsets, the v3 domain (a v1
+    /// or v2 signature fails), the attestation at 0 and 8 192 bytes and not
     /// 8 193, and the largest body.
     #[test]
-    fn registration_v2_layout() {
+    fn registration_v3_layout() {
         let key = TestKey::new(1);
         let hash = token_hash(&[9; 32]);
-        let (a, tag) = ([0xA1u8; 32], [0x7Au8; 32]);
-        let unsigned =
-            registration_body_v2(b"anna-1", &key.public, &[7; 32], &hash, &a, &tag).unwrap();
+        let unsigned = registration_body(b"anna-1", &key.public, &[7; 32], &hash).unwrap();
         let l = 6;
-        assert_eq!((unsigned.len(), unsigned.capacity()), (194 + l, 194 + l));
-        assert_eq!(unsigned[0], 6);
-        assert_eq!(&unsigned[1..1 + l], b"anna-1");
-        assert_eq!(&unsigned[1 + l..66 + l], &key.public);
-        assert_eq!(&unsigned[66 + l..98 + l], &[7; 32]);
-        assert_eq!(&unsigned[98 + l..130 + l], &hash);
-        assert_eq!(&unsigned[130 + l..162 + l], &a);
-        assert_eq!(&unsigned[162 + l..194 + l], &tag);
-        let v1 = registration_body(b"anna-1", &key.public, &[7; 32], &hash).unwrap();
-        assert_eq!(&unsigned[..130 + l], &v1[..], "v1's fields come first");
-        let preimage = register_preimage_v2(&unsigned);
-        assert_eq!(&preimage[..17], b"brev/v2/register\0");
+        assert_eq!(unsigned.len(), 130 + l);
+        let preimage = register_preimage_v3(&unsigned);
+        assert_eq!(&preimage[..17], b"brev/v3/register\0");
         assert_eq!(&preimage[17..], &unsigned[..]);
         let signature = key.sign(&preimage);
 
@@ -1146,22 +1015,20 @@ mod tests {
         let full = [0x5Au8; MAX_ATTESTATION];
         for attestation in [&[][..], &dev[..], &full[..]] {
             let n = attestation.len();
-            let body = signed_registration_v2(&unsigned, &signature, attestation).unwrap();
-            assert_eq!(body.len(), 260 + l + n);
-            assert_eq!(&body[..194 + l], &unsigned[..]);
-            assert_eq!(&body[194 + l..258 + l], &signature);
+            let body = signed_registration_v3(&unsigned, &signature, attestation).unwrap();
+            assert_eq!(body.len(), 196 + l + n);
+            assert_eq!(&body[..130 + l], &unsigned[..]);
+            assert_eq!(&body[130 + l..194 + l], &signature);
             assert_eq!(
-                &body[258 + l..260 + l],
+                &body[194 + l..196 + l],
                 &u16::try_from(n).unwrap().to_be_bytes()
             );
-            assert_eq!(&body[260 + l..], attestation);
-            let reg = RegistrationV2::parse(&body).unwrap();
+            assert_eq!(&body[196 + l..], attestation);
+            let reg = RegistrationV3::parse(&body).unwrap();
             assert_eq!(reg.address, b"anna-1");
             assert_eq!(reg.signing_key, &key.public);
             assert_eq!(reg.x25519, &[7; 32]);
             assert_eq!(reg.token_hash, &hash);
-            assert_eq!(reg.invite, &a);
-            assert_eq!(reg.tag, &tag);
             assert_eq!(reg.signature, &signature);
             assert_eq!(reg.attestation, attestation);
             assert_eq!(reg.verify(), Ok(()));
@@ -1170,100 +1037,95 @@ mod tests {
 
         // 8 193 bytes: refused when built and when parsed.
         assert_eq!(
-            signed_registration_v2(&unsigned, &signature, &[0; MAX_ATTESTATION + 1]),
+            signed_registration_v3(&unsigned, &signature, &[0; MAX_ATTESTATION + 1]),
             Err(BodyError::Length)
         );
-        let body = signed_registration_v2(&unsigned, &signature, &full).unwrap();
+        let body = signed_registration_v3(&unsigned, &signature, &full).unwrap();
         let mut over = body.clone();
-        over[258 + l..260 + l].copy_from_slice(&8193u16.to_be_bytes());
+        over[194 + l..196 + l].copy_from_slice(&8193u16.to_be_bytes());
         over.push(0x5A);
-        assert_eq!(RegistrationV2::parse(&over).err(), Some(BodyError::Length));
+        assert_eq!(RegistrationV3::parse(&over).err(), Some(BodyError::Length));
         // The attestation length must match what follows it.
-        let body = signed_registration_v2(&unsigned, &signature, dev).unwrap();
+        let body = signed_registration_v3(&unsigned, &signature, dev).unwrap();
         for cut in 0..body.len() {
-            assert!(RegistrationV2::parse(&body[..cut]).is_err(), "{cut}");
+            assert!(RegistrationV3::parse(&body[..cut]).is_err(), "{cut}");
         }
         assert_eq!(
-            RegistrationV2::parse(&[&body[..], &[0]].concat()).err(),
+            RegistrationV3::parse(&[&body[..], &[0]].concat()).err(),
             Some(BodyError::Length)
         );
         // An unsigned part of the wrong length is refused when built.
         assert_eq!(
-            signed_registration_v2(&unsigned[..unsigned.len() - 1], &signature, &[]),
+            signed_registration_v3(&unsigned[..unsigned.len() - 1], &signature, &[]),
             Err(BodyError::Length)
         );
         assert_eq!(
-            signed_registration_v2(&[], &signature, &[]),
+            signed_registration_v3(&[], &signature, &[]),
             Err(BodyError::Length)
         );
 
-        // The largest body: 8 484 bytes, under the relay's 16 KiB (16 384).
-        let big = registration_body_v2(LONGEST, &key.public, &[7; 32], &hash, &a, &tag).unwrap();
-        let big_sig = key.sign(&register_preimage_v2(&big));
-        let body = signed_registration_v2(&big, &big_sig, &full).unwrap();
-        assert_eq!((body.len(), REGISTRATION_V2_MAX), (8484, 8484));
-        assert_eq!(RegistrationV2::parse(&body).unwrap().verify(), Ok(()));
+        // The largest body: 8 420 bytes, under the relay's 16 KiB (16 384).
+        let big = registration_body(LONGEST, &key.public, &[7; 32], &hash).unwrap();
+        let big_sig = key.sign(&register_preimage_v3(&big));
+        let body = signed_registration_v3(&big, &big_sig, &full).unwrap();
+        assert_eq!((body.len(), REGISTRATION_V3_MAX), (8420, 8420));
+        assert_eq!(RegistrationV3::parse(&body).unwrap().verify(), Ok(()));
 
-        // The v1 domain fails, and neither version parses as the other.
-        let v1_sig = key.sign(&register_preimage(&unsigned));
-        let bad = signed_registration_v2(&unsigned, &v1_sig, &[]).unwrap();
-        assert_eq!(
-            RegistrationV2::parse(&bad).unwrap().verify(),
-            Err(SigError::BadSignature)
-        );
-        let v1_body = [&v1[..], &key.sign(&register_preimage(&v1))].concat();
+        // The v1 and v2 domains fail, and v1 and v3 do not parse as each
+        // other.
+        for domain in [&b"brev/v1/register\0"[..], b"brev/v2/register\0"] {
+            let old = key.sign(&[domain, &unsigned[..]].concat());
+            let bad = signed_registration_v3(&unsigned, &old, &[]).unwrap();
+            assert_eq!(
+                RegistrationV3::parse(&bad).unwrap().verify(),
+                Err(SigError::BadSignature)
+            );
+        }
+        let v1_body = [&unsigned[..], &key.sign(&register_preimage(&unsigned))].concat();
         assert!(Registration::parse(&v1_body).is_ok());
         assert_eq!(
-            RegistrationV2::parse(&v1_body).err(),
+            RegistrationV3::parse(&v1_body).err(),
             Some(BodyError::Length)
         );
-        let v2_body = signed_registration_v2(&unsigned, &signature, &[]).unwrap();
-        assert_eq!(Registration::parse(&v2_body).err(), Some(BodyError::Length));
+        let v3_body = signed_registration_v3(&unsigned, &signature, &[]).unwrap();
+        assert_eq!(Registration::parse(&v3_body).err(), Some(BodyError::Length));
 
         // The signature covers every byte before it, and not the
         // attestation (which is made over the same digest).
         for i in 0..unsigned.len() {
-            let mut bad = v2_body.clone();
+            let mut bad = v3_body.clone();
             bad[i] ^= 0x01;
-            if let Ok(reg) = RegistrationV2::parse(&bad) {
+            if let Ok(reg) = RegistrationV3::parse(&bad) {
                 assert_eq!(reg.verify(), Err(SigError::BadSignature), "byte {i}");
             }
         }
-        let mut other = signed_registration_v2(&unsigned, &signature, dev).unwrap();
+        let mut other = signed_registration_v3(&unsigned, &signature, dev).unwrap();
         *other.last_mut().unwrap() ^= 1;
-        let reg = RegistrationV2::parse(&other).unwrap();
+        let reg = RegistrationV3::parse(&other).unwrap();
         assert_eq!(reg.verify(), Ok(()));
         assert_eq!(reg.digest(), <[u8; 32]>::from(Sha256::digest(&preimage)));
         let by_other = TestKey::new(2).sign(&preimage);
-        let bad = signed_registration_v2(&unsigned, &by_other, &[]).unwrap();
+        let bad = signed_registration_v3(&unsigned, &by_other, &[]).unwrap();
         assert_eq!(
-            RegistrationV2::parse(&bad).unwrap().verify(),
+            RegistrationV3::parse(&bad).unwrap().verify(),
             Err(SigError::BadSignature)
         );
 
         // Refusals of the fields.
-        assert_eq!(RegistrationV2::parse(&[]).err(), Some(BodyError::Length));
-        let mut bad = v2_body.clone();
+        assert_eq!(RegistrationV3::parse(&[]).err(), Some(BodyError::Length));
+        let mut bad = v3_body.clone();
         bad[1] = b'A';
-        assert_eq!(RegistrationV2::parse(&bad).err(), Some(BodyError::Address));
-        let mut bad = v2_body.clone();
+        assert_eq!(RegistrationV3::parse(&bad).err(), Some(BodyError::Address));
+        let mut bad = v3_body.clone();
         bad[1 + l] = 0x02; // a compressed prefix
-        assert_eq!(RegistrationV2::parse(&bad).err(), Some(BodyError::Key));
-        let mut bad = v2_body.clone();
+        assert_eq!(RegistrationV3::parse(&bad).err(), Some(BodyError::Key));
+        let mut bad = v3_body.clone();
         bad[65 + l] ^= 1; // off the curve
-        assert_eq!(RegistrationV2::parse(&bad).err(), Some(BodyError::Key));
-        let short = [&[2u8, b'a', b'b'][..], &v2_body[1 + l..]].concat();
+        assert_eq!(RegistrationV3::parse(&bad).err(), Some(BodyError::Key));
+        let short = [&[2u8, b'a', b'b'][..], &v3_body[1 + l..]].concat();
         assert_eq!(
-            RegistrationV2::parse(&short).err(),
+            RegistrationV3::parse(&short).err(),
             Some(BodyError::Address)
-        );
-        assert_eq!(
-            registration_body_v2(b"Anna", &key.public, &[7; 32], &hash, &a, &tag),
-            Err(BodyError::Address)
-        );
-        assert_eq!(
-            registration_body_v2(b"anna", &key.compressed(), &[7; 32], &hash, &a, &tag),
-            Err(BodyError::Key)
         );
     }
 
@@ -1308,41 +1170,33 @@ mod tests {
     }
 
     /// The events answer: layout, round trip, the 32-event cap, every cut,
-    /// the address, kind, tag and key rules.
+    /// the address, kind and key rules.
     #[test]
     fn events_answer_parse() {
         let (k1, k2) = (TestKey::new(1), TestKey::new(2));
-        let tag = [0x7A; 32];
         let (x1, x2, x3) = ([1; 32], [2; 32], [3; 32]);
         let events = [
             Event {
-                kind: EventKind::Invited,
+                kind: EventKind::Approved,
                 peer: peer(b"anna", &k1, &x1),
-                tag: &tag,
             },
             Event {
                 kind: EventKind::Approved,
                 peer: peer(b"per-2", &k2, &x2),
-                tag: &ZERO_TAG,
             },
             Event {
                 kind: EventKind::Request,
                 peer: peer(LONGEST, &k1, &x3),
-                tag: &ZERO_TAG,
             },
         ];
         let body = events_answer(&events).unwrap();
-        assert_eq!(
-            body.len(),
-            1 + (2 + 4 + 129) + (2 + 5 + 129) + (2 + 32 + 129)
-        );
-        assert_eq!(&body[..3], &[3, 2, 4]);
+        assert_eq!(body.len(), 1 + (2 + 4 + 97) + (2 + 5 + 97) + (2 + 32 + 97));
+        assert_eq!(&body[..3], &[3, 3, 4]);
         assert_eq!(&body[3..7], b"anna");
         assert_eq!(&body[7..72], &k1.public);
         assert_eq!(&body[72..104], &x1);
-        assert_eq!(&body[104..136], &tag);
-        assert_eq!(&body[136..138], &[3, 5]);
-        assert_eq!(&body[138..143], b"per-2");
+        assert_eq!(&body[104..106], &[3, 5]);
+        assert_eq!(&body[106..111], b"per-2");
         let parsed = parse_events_answer(&body).unwrap();
         assert_eq!(parsed.len(), 3);
         for (got, want) in parsed.iter().zip(&events) {
@@ -1350,37 +1204,32 @@ mod tests {
             assert_eq!(got.peer.address, want.peer.address);
             assert_eq!(got.peer.signing_key, want.peer.signing_key);
             assert_eq!(got.peer.x25519, want.peer.x25519);
-            assert_eq!(got.tag, want.tag);
         }
         assert_eq!(events_answer(&[]).unwrap(), [0]);
         assert!(parse_events_answer(&[0]).unwrap().is_empty());
 
-        // Invited and approved events before requests, in any mix of the
-        // two; one after a request is refused when built (not when read).
-        let [invited, approved, request] = events;
-        for order in [[approved, invited, request], [invited, request, request]] {
+        // Approved events before requests; one after a request is refused
+        // when built (not when read).
+        let [approved, _, request] = events;
+        for order in [[approved, approved, request], [approved, request, request]] {
             assert!(events_answer(&order).is_ok());
         }
-        for order in [[request, invited, approved], [invited, request, approved]] {
+        for order in [[request, approved, approved], [approved, request, approved]] {
             assert_eq!(events_answer(&order).err(), Some(BodyError::Order));
         }
-        let swapped = [&[2u8][..], &body[136..272], &body[1..136]].concat();
-        let late = [&[2u8][..], &body[272..], &body[1..136]].concat();
-        assert_eq!(parse_events_answer(&swapped).unwrap().len(), 2);
+        let late = [&[2u8][..], &body[208..], &body[1..104]].concat();
         assert_eq!(
             parse_events_answer(&late).unwrap()[1].kind,
-            EventKind::Invited
+            EventKind::Approved
         );
-        for (byte, kind) in [
-            (1, EventKind::Request),
-            (2, EventKind::Invited),
-            (3, EventKind::Approved),
-        ] {
+        for (byte, kind) in [(1, EventKind::Request), (3, EventKind::Approved)] {
             assert_eq!(EventKind::from_byte(byte), Some(kind));
             assert_eq!(kind.byte(), byte);
         }
-        assert_eq!(EventKind::from_byte(0), None);
-        assert_eq!(EventKind::from_byte(4), None);
+        // 2 was the invited event (D-0116); it is gone.
+        for byte in [0, 2, 4] {
+            assert_eq!(EventKind::from_byte(byte), None, "{byte}");
+        }
 
         // Every cut and every extra byte is refused.
         for cut in 0..body.len() {
@@ -1396,16 +1245,15 @@ mod tests {
             .map(|_| Event {
                 kind: EventKind::Request,
                 peer: peer(LONGEST, &k1, &x3),
-                tag: &ZERO_TAG,
             })
             .collect();
         assert_eq!(events_answer(&many).err(), Some(BodyError::Count));
         let full = events_answer(&many[..EVENTS_MAX]).unwrap();
-        assert_eq!((full.len(), EVENTS_ANSWER_MAX), (5217, 5217));
+        assert_eq!((full.len(), EVENTS_ANSWER_MAX), (4193, 4193));
         assert_eq!(parse_events_answer(&full).unwrap().len(), 32);
         let mut over = full.clone();
         over[0] = 33;
-        over.extend_from_slice(&full[1..1 + 163]);
+        over.extend_from_slice(&full[1..1 + 131]);
         assert_eq!(parse_events_answer(&over).err(), Some(BodyError::Count));
         let mut bad = full;
         bad[0] = 0xFF;
@@ -1415,23 +1263,22 @@ mod tests {
         let mut bad = body.clone();
         bad[3] = b'A';
         assert_eq!(parse_events_answer(&bad).err(), Some(BodyError::Address));
-        let short = [&[1u8, 1, 2, b'a', b'n'][..], &body[7..136]].concat();
+        let short = [&[1u8, 1, 2, b'a', b'n'][..], &body[7..104]].concat();
         assert_eq!(parse_events_answer(&short).err(), Some(BodyError::Address));
-        let long = [&[1u8, 1, 33][..], LONGEST, b"6", &body[7..136]].concat();
+        let long = [&[1u8, 1, 33][..], LONGEST, b"6", &body[7..104]].concat();
         assert_eq!(parse_events_answer(&long).err(), Some(BodyError::Address));
-        let first = [&[1u8][..], &body[1..136]].concat();
+        let first = [&[1u8][..], &body[1..104]].concat();
         assert_eq!(parse_events_answer(&first).unwrap().len(), 1, "control");
         for address in [&b"Anna"[..], b"an", b"an.a"] {
             let bad = Event {
                 kind: EventKind::Request,
                 peer: peer(address, &k1, &x1),
-                tag: &ZERO_TAG,
             };
             assert_eq!(events_answer(&[bad]).err(), Some(BodyError::Address));
         }
 
-        // Kinds, tags and keys.
-        for kind in [0u8, 4, 0xFF] {
+        // Kinds and keys.
+        for kind in [0u8, 2, 4, 0xFF] {
             let mut bad = first.clone();
             bad[1] = kind;
             assert_eq!(
@@ -1439,26 +1286,6 @@ mod tests {
                 Some(BodyError::Value),
                 "{kind}"
             );
-        }
-        for kind in [1u8, 3] {
-            let mut bad = first.clone();
-            bad[1] = kind; // a request or approval with Invited's tag
-            assert_eq!(
-                parse_events_answer(&bad).err(),
-                Some(BodyError::Value),
-                "{kind}"
-            );
-        }
-        let mut zeroed = first.clone();
-        zeroed[104..136].fill(0);
-        assert_eq!(parse_events_answer(&zeroed).unwrap()[0].tag, &ZERO_TAG);
-        for kind in [EventKind::Request, EventKind::Approved] {
-            let bad = Event {
-                kind,
-                peer: peer(b"anna", &k1, &x1),
-                tag: &tag,
-            };
-            assert_eq!(events_answer(&[bad]).err(), Some(BodyError::Value));
         }
         let mut bad = first;
         bad[71] ^= 1; // off the curve
@@ -1472,7 +1299,6 @@ mod tests {
                 signing_key: &off_curve,
                 x25519: &x1,
             },
-            tag: &ZERO_TAG,
         };
         assert_eq!(events_answer(&[bad]).err(), Some(BodyError::Key));
     }
@@ -1519,8 +1345,8 @@ mod tests {
         assert_eq!(submit_body(&id, &token, &env), Err(WireError::Signature));
     }
 
-    /// Contact request, events, event answer, *Blokker*, invite create and
-    /// invite redeem: prefix, then exactly their payload.
+    /// Contact request, events, event answer and *Blokker*: prefix, then
+    /// exactly their payload.
     #[test]
     fn phase4_prefix_bodies() {
         let (id, token) = ([1u8; 32], [2u8; 32]);
@@ -1586,103 +1412,5 @@ mod tests {
                 "{n}"
             );
         }
-
-        let a = invite::relay_key(&[0; 16]);
-        let hash = invite::stored_hash(&a);
-        let body = invite_create_body(&id, &token, &hash);
-        assert_eq!(body, [&prefix[..], &hash[..]].concat());
-        assert_eq!(Request::parse(&body).unwrap().invite_create(), Ok(&hash));
-        let body = request_body(&id, &token, &[0; 31]);
-        assert_eq!(
-            Request::parse(&body).unwrap().invite_create(),
-            Err(BodyError::Length)
-        );
-
-        let tag = invite::tag(&[0; 16], &id, &peer, b"anna").unwrap();
-        let body = invite_redeem_body(&id, &token, &a, &tag);
-        assert_eq!(body, [&prefix[..], &a[..], &tag[..]].concat());
-        assert_eq!(
-            Request::parse(&body).unwrap().invite_redeem(),
-            Ok((&a, &tag))
-        );
-        for n in [32, 63, 65] {
-            let body = request_body(&id, &token, &vec![0; n]);
-            assert_eq!(
-                Request::parse(&body).unwrap().invite_redeem().err(),
-                Some(BodyError::Length),
-                "{n}"
-            );
-        }
-    }
-
-    /// Invite open: `a` alone, answered by the inviter or `00` for a root
-    /// invite.
-    #[test]
-    fn invite_open_bodies() {
-        let key = TestKey::new(1);
-        let a = invite::relay_key(&[0; 16]);
-        assert_eq!(parse_invite_open(&a), Ok(&a));
-        for n in [0, 31, 33, 64] {
-            assert_eq!(
-                parse_invite_open(&vec![1; n]),
-                Err(BodyError::Length),
-                "{n}"
-            );
-        }
-
-        let root = invite_open_answer(None).unwrap();
-        assert_eq!(root, [0]);
-        assert!(parse_invite_open_answer(&root).unwrap().is_none());
-
-        let x = [7u8; 32];
-        let body = invite_open_answer(Some(&peer(b"anna", &key, &x))).unwrap();
-        assert_eq!(body.len(), 1 + 4 + 97);
-        assert_eq!(body[0], 4);
-        assert_eq!(&body[1..5], b"anna");
-        assert_eq!(&body[5..], &lookup_answer(&key.public, &x));
-        let inviter = parse_invite_open_answer(&body).unwrap().unwrap();
-        assert_eq!(inviter.address, b"anna");
-        assert_eq!(inviter.signing_key, &key.public);
-        assert_eq!(inviter.x25519, &x);
-        let longest = invite_open_answer(Some(&peer(LONGEST, &key, &x))).unwrap();
-        assert_eq!((longest.len(), INVITE_OPEN_ANSWER_MAX), (130, 130));
-        assert_eq!(
-            parse_invite_open_answer(&longest).unwrap().unwrap().address,
-            LONGEST
-        );
-
-        for cut in 0..body.len() {
-            assert!(parse_invite_open_answer(&body[..cut]).is_err(), "{cut}");
-        }
-        for bad in [
-            &[&body[..], &[0]].concat()[..],
-            &[0, 0],
-            &[1],
-            &[&root[..], &body[..]].concat(),
-        ] {
-            assert!(parse_invite_open_answer(bad).is_err(), "{bad:?}");
-        }
-        let mut bad = body.clone();
-        bad[1] = b'A';
-        assert_eq!(
-            parse_invite_open_answer(&bad).err(),
-            Some(BodyError::Address)
-        );
-        let mut bad = body.clone();
-        bad[69] ^= 1; // the last key byte: off the curve
-        assert_eq!(parse_invite_open_answer(&bad).err(), Some(BodyError::Key));
-        assert_eq!(
-            invite_open_answer(Some(&peer(b"an", &key, &x))).err(),
-            Some(BodyError::Address)
-        );
-        let compressed = key.compressed();
-        let mut short_key = [0u8; KEY_LEN];
-        short_key[..33].copy_from_slice(&compressed);
-        let bad = Peer {
-            address: b"anna",
-            signing_key: &short_key,
-            x25519: &x,
-        };
-        assert_eq!(invite_open_answer(Some(&bad)).err(), Some(BodyError::Key));
     }
 }

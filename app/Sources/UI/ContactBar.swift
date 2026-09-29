@@ -9,7 +9,7 @@
 // its address (semibold) with Blokker at the end (hidden once blocked,
 // unless telling the relay failed, when net.error shows below and a press
 // tells it again), its state (contact.blocked, else contact.waiting, else
-// contact.verified, else nothing), «Sikkerhetskode» over its pinned code.
+// nothing), «Sikkerhetskode» over its pinned code.
 // While the contact's key has changed, a block below, on a faint orange
 // fill with an orange bar at its edge, shows contact.changed, «Ny kode:»
 // beside the new code (protected too) and Godta ny kode, and accept.error
@@ -133,7 +133,6 @@ final class ContactBar: NSView {
 
     private let stack = NSStackView()
     private let waiting = InterfaceText(L10n.contactWaiting, style: .caption, width: 240, alignment: .left)
-    private let verified = InterfaceText(L10n.contactVerified, style: .caption, width: 240, alignment: .left)
     private let blocked = InterfaceText(L10n.contactBlocked, style: .caption, width: 240, alignment: .left)
     private let blockError = InterfaceText(L10n.netError, style: .caption, width: 240, alignment: .left,
                                            color: .systemOrange)
@@ -199,7 +198,7 @@ final class ContactBar: NSView {
         addresses.setContentHuggingPriority(.defaultLow, for: .horizontal)
         addresses.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let nameRow = Self.row([addresses, block])
-        stateRow = Self.column([waiting, verified, blocked, blockError], spacing: 2)
+        stateRow = Self.column([waiting, blocked, blockError], spacing: 2)
         let codeLabel = InterfaceText(L10n.contactsCode, style: .caption, width: 200, alignment: .left)
         codes.translatesAutoresizingMaskIntoConstraints = false
 
@@ -287,7 +286,6 @@ final class ContactBar: NSView {
         contact.code.wipe()
         blocked.isHidden = !contact.blocked
         waiting.isHidden = contact.blocked || !contact.waiting
-        verified.isHidden = contact.blocked || contact.waiting || !contact.verified
         blockButton?.isHidden = contact.blocked && !blockFailed
         blockButton?.isEnabled = true
         blockError.isHidden = !blockFailed
@@ -326,11 +324,10 @@ final class ContactBar: NSView {
     var showsKeyChange: Bool { !changed.isHidden }
     /// Whether a request's block is shown.
     var showsRequest: Bool { !request.isHidden }
-    /// The state shown for the contact: "blocked", "waiting", "verified" or
-    /// "" (for the tools' checks).
+    /// The state shown for the contact: "blocked", "waiting" or "" (for the
+    /// tools' checks).
     var shownState: String {
-        stateRow.isHidden ? "" : !blocked.isHidden ? "blocked" : !waiting.isHidden ? "waiting"
-            : !verified.isHidden ? "verified" : ""
+        stateRow.isHidden ? "" : !blocked.isHidden ? "blocked" : !waiting.isHidden ? "waiting" : ""
     }
 
     /// Everything wiped and zeroed: a new selection, a new screen or the

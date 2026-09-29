@@ -2,10 +2,8 @@
 //! docs/PHASE4_DESIGN.md §3.2). One blocking reqwest client per `Brev`,
 //! speaking binary bodies to `http://127.0.0.1:<port>` and nowhere else.
 //!
-//! Only ciphertext envelopes, public keys, addresses, ids, the relay token
-//! and the values derived from an invite's secret (`a`, SHA-256(`a`), the
-//! tag; never the secret) pass through here, never letter content; the
-//! zeroing allocator wipes every buffer reqwest frees. No call takes the
+//! Only ciphertext envelopes, public keys, addresses, ids and the relay
+//! token pass through here, never letter content; the zeroing allocator wipes every buffer reqwest frees. No call takes the
 //! session mutex: the caller copies what a request needs, releases the
 //! mutex, and calls in (§5.2).
 //!
@@ -17,9 +15,7 @@
 use std::io::Read;
 use std::time::Duration;
 
-use brev_proto::body::{
-    self, EventKind, EVENTS_ANSWER_MAX, INBOX_ANSWER_MAX, INVITE_OPEN_ANSWER_MAX, LOOKUP_REPLY_LEN,
-};
+use brev_proto::body::{self, EventKind, EVENTS_ANSWER_MAX, INBOX_ANSWER_MAX, LOOKUP_REPLY_LEN};
 use brev_proto::{Envelope, MAX_WIRE};
 use reqwest::blocking::Client;
 use reqwest::header::CONTENT_TYPE;
@@ -38,13 +34,7 @@ pub(crate) struct Incoming {
     pub bundle: PublicBundle,
     /// And its address, valid by the address rules.
     pub address: Zeroizing<Vec<u8>>,
-    /// The invitee's proof for an invited event; zeros otherwise.
-    pub tag: [u8; 32],
 }
-
-/// The inviter an invite-open answer names: its bundle and address; `None`
-/// for a root invite.
-pub(crate) type Inviter = Option<(PublicBundle, Zeroizing<Vec<u8>>)>;
 
 /// A peer of an answer body, owned.
 fn owned(peer: &body::Peer<'_>) -> (PublicBundle, Zeroizing<Vec<u8>>) {
@@ -96,10 +86,10 @@ impl RelayTransport {
         })
     }
 
-    /// `POST /v1/register` with a signed registration v2 body. 201 and 200
-    /// (already registered, same identity, address and token) are success;
-    /// 403 (no valid invite), 409 (address taken) and 428 (attestation or
-    /// identity check) are `Refused` with their status.
+    /// `POST /v1/register` with a signed registration v3 body (no invite).
+    /// 201 and 200 (already registered, same identity, address and token)
+    /// are success; 409 (address taken) and 428 (attestation or identity
+    /// check) are `Refused` with their status.
     pub(crate) fn register(&self, body: &[u8]) -> Result<(), NetError> {
         self.post("/v1/register", body, &[201, 200], 0).map(drop)
     }
@@ -168,8 +158,8 @@ impl RelayTransport {
         Ok(status == 200)
     }
 
-    /// `POST /v1/events`: the events waiting for the caller, invited and
-    /// approved first. Deletes nothing.
+    /// `POST /v1/events`: the events waiting for the caller, approved
+    /// first. Deletes nothing.
     pub(crate) fn events(
         &self,
         caller: &[u8; 32],
@@ -186,7 +176,6 @@ impl RelayTransport {
                     kind: e.kind,
                     bundle,
                     address,
-                    tag: *e.tag,
                 }
             })
             .collect())
@@ -219,47 +208,6 @@ impl RelayTransport {
     ) -> Result<(), NetError> {
         let request = Zeroizing::new(body::block_body(caller, token, peer));
         self.post("/v1/block", &request, &[204], 0).map(drop)
-    }
-
-    /// `POST /v1/invites`: registers an invite by SHA-256(`a`). 201, or 200
-    /// for the same hash again; 409 held by another; 429 at a cap.
-    pub(crate) fn invite_create(
-        &self,
-        caller: &[u8; 32],
-        token: &[u8; 32],
-        hash: &[u8; 32],
-    ) -> Result<(), NetError> {
-        let request = Zeroizing::new(body::invite_create_body(caller, token, hash));
-        self.post("/v1/invites", &request, &[201, 200], 0).map(drop)
-    }
-
-    /// `POST /v1/invites/open` with `a` and no token: the inviter the relay
-    /// holds for it, `None` for a root invite. 404 unknown, used or
-    /// expired.
-    pub(crate) fn invite_open(&self, relay_key: &[u8; 32]) -> Result<Inviter, NetError> {
-        let (_, answer) = self.post(
-            "/v1/invites/open",
-            relay_key,
-            &[200],
-            INVITE_OPEN_ANSWER_MAX,
-        )?;
-        let inviter = body::parse_invite_open_answer(&answer).map_err(|_| NetError::Network)?;
-        Ok(inviter.as_ref().map(owned))
-    }
-
-    /// `POST /v1/invites/redeem` with `a` and the caller's tag: 200, also
-    /// again; 404 unknown, used by another or expired; 400 a root invite or
-    /// the caller's own.
-    pub(crate) fn invite_redeem(
-        &self,
-        caller: &[u8; 32],
-        token: &[u8; 32],
-        relay_key: &[u8; 32],
-        tag: &[u8; 32],
-    ) -> Result<(), NetError> {
-        let request = Zeroizing::new(body::invite_redeem_body(caller, token, relay_key, tag));
-        self.post("/v1/invites/redeem", &request, &[200], 0)
-            .map(drop)
     }
 
     /// `POST /v1/inbox`: the envelopes waiting for `caller`, oldest first,

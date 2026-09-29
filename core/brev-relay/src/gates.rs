@@ -8,7 +8,7 @@
 //! Attest root for both App IDs (`AV26DNQ5SC.no.brev.app` and `.b`); those
 //! crates are not in CLAUDE.md §4. And an ID-porten/BankID verifier: the
 //! operator runs a web login outside Brev that hands out a one-time text
-//! code, the app pastes it like an invite, a registration v3 carries it, and
+//! code, the app pastes it, a registration v4 carries it, and
 //! the relay keeps only SHA-256(pairwise `sub` ‖ relay salt), so one person
 //! holds one identity; the relay would then link each identity to a person.
 
@@ -31,7 +31,7 @@ impl IdentityVerifier for DevVerifier {
 
 /// Decides whether a registration comes from a genuine app build (design
 /// §7.1). `client_data_hash` is the registration's signed digest, so an
-/// attestation binds to its key, address, token and invite. Asked after
+/// attestation binds to its key, address and token. Asked after
 /// the signature check; `false` answers 428 before anything is read or
 /// written.
 #[cfg(feature = "app-attest")]

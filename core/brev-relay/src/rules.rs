@@ -6,13 +6,11 @@
 //! The approval graph is `links(owner, peer)`: approved means the owner
 //! takes letters from the peer, declined means it does not and hears no more
 //! requests from the peer. An event is what the relay tells its recipient
-//! about a peer: a request, an invite the peer redeemed (with the peer's
-//! proof tag), or an approval of the recipient's own request. At most one
-//! event waits per pair.
+//! about a peer: a request, or an approval of the recipient's own request.
+//! At most one event waits per pair.
 
 use axum::http::StatusCode;
 use brev_proto::body::{self, Event, EventKind, Peer, EVENTS_MAX};
-use brev_proto::invite;
 use brev_proto::sig::KEY_LEN;
 use rusqlite::{params, OptionalExtension, Transaction};
 
@@ -28,11 +26,6 @@ const DECLINED: i64 = 2;
 const LETTERS: i64 = 1;
 /// `counts.kind`: contact requests made.
 const REQUESTS: i64 = 2;
-/// `counts.kind`: invites made.
-const INVITES: i64 = 3;
-
-/// The tag of every event but an invited one.
-const ZERO_TAG: [u8; 32] = [0; 32];
 
 /// Why a rule gave no success: an answer with nothing written, or a store
 /// failure (500). Content-free.
@@ -56,16 +49,6 @@ fn refuse<T>(status: StatusCode) -> Result<T, Fail> {
 /// A limit from [`crate::Config`] as SQLite counts.
 fn limit(n: u32) -> i64 {
     i64::from(n)
-}
-
-/// Deletes the invites past their life: made before day `today - days`.
-/// Each invite write calls it first (design §4.2).
-pub(crate) fn sweep_invites(tx: &Transaction<'_>, today: i64, days: u32) -> rusqlite::Result<()> {
-    tx.execute(
-        "DELETE FROM invites WHERE day < ?1",
-        [today.saturating_sub(limit(days))],
-    )?;
-    Ok(())
 }
 
 fn link(tx: &Transaction<'_>, owner: &[u8], peer: &[u8]) -> rusqlite::Result<Option<i64>> {
@@ -105,25 +88,17 @@ fn delete_event(tx: &Transaction<'_>, recipient: &[u8], peer: &[u8]) -> rusqlite
 }
 
 /// Puts an event at `recipient` about `peer`; a newer event for a pair
-/// replaces the older, as the newest in the queue. One exception: an
-/// approved event does not replace an invited one, which says more (the
-/// peer takes my letters, and here is its proof of my invite) and without
-/// which the inviter would never learn the invitee's verified key.
+/// replaces the older, as the newest in the queue.
 fn put_event(
     tx: &Transaction<'_>,
     recipient: &[u8],
     peer: &[u8],
     kind: EventKind,
-    tag: &[u8; 32],
 ) -> rusqlite::Result<()> {
-    let invited = i64::from(EventKind::Invited.byte());
-    if kind == EventKind::Approved && event(tx, recipient, peer)? == Some(invited) {
-        return Ok(());
-    }
     delete_event(tx, recipient, peer)?;
     tx.execute(
-        "INSERT INTO events (recipient, peer, kind, tag) VALUES (?1, ?2, ?3, ?4)",
-        params![recipient, peer, kind.byte(), tag],
+        "INSERT INTO events (recipient, peer, kind) VALUES (?1, ?2, ?3)",
+        params![recipient, peer, kind.byte()],
     )?;
     Ok(())
 }
@@ -166,10 +141,6 @@ fn id_of(tx: &Transaction<'_>, address: &str) -> rusqlite::Result<Option<Vec<u8>
 /// An identity as stored: address, signing key, X25519 key.
 type Stored = (String, Vec<u8>, Vec<u8>);
 
-/// An invite as stored: its inviter (NULL for a root invite) and who
-/// redeemed it.
-type InviteRow = (Option<Vec<u8>>, Option<Vec<u8>>);
-
 /// A lookup's find: signing key, X25519 key, and whether that identity
 /// takes letters from the caller.
 type Listing = (Vec<u8>, Vec<u8>, bool);
@@ -185,7 +156,7 @@ fn peer(stored: &Stored) -> Result<Peer<'_>, Fail> {
     })
 }
 
-/// A registration v2 the server parsed and verified (signature and, with
+/// A registration v3 the server parsed and verified (signature and, with
 /// `app-attest`, attestation).
 pub(crate) struct NewIdentity<'a> {
     pub id: &'a [u8; 32],
@@ -193,23 +164,17 @@ pub(crate) struct NewIdentity<'a> {
     pub signing_key: &'a [u8],
     pub x25519: &'a [u8; 32],
     pub token_hash: &'a [u8; 32],
-    pub invite: &'a [u8; 32],
-    pub tag: &'a [u8; 32],
 }
 
 impl Relay {
-    /// Register (design §4.3), in this order: exactly this identity,
-    /// address and token hash already → 200 (a retry after the invite was
-    /// used; only the key holder can make it); the invite by SHA-256(`a`)
-    /// must exist, be unused and in life → else 403; then the address or
-    /// the id taken → 409 (the invite is not used); the identity verifier →
-    /// 428; the policy → 429. So nobody without a valid invite learns which
-    /// addresses are taken. Then 201: the identity with `invited_by` = the
-    /// inviter (NULL for a root invite), the invite used, and unless root
-    /// both links approved and an invited event with the tag at the
-    /// inviter.
-    pub(crate) fn register_v2(&self, new: &NewIdentity<'_>) -> Result<StatusCode, Fail> {
-        let today = self.day();
+    /// Register (design §4.3; open since docs/DECISIONS.md D-0116), in
+    /// this order: exactly this identity, address and token
+    /// hash already → 200 (a retry whose answer was lost; only the key
+    /// holder can make it); the address or the id taken → 409; the identity
+    /// verifier → 428; the policy → 429. Then 201: the identity, with no
+    /// link and no event, so it reaches nobody until a contact request is
+    /// approved.
+    pub(crate) fn register(&self, new: &NewIdentity<'_>) -> Result<StatusCode, Fail> {
         let mut db = self.db();
         let tx = db.transaction()?;
         let same: Option<i64> = tx
@@ -222,18 +187,6 @@ impl Relay {
         if same.is_some() {
             return Ok(StatusCode::OK);
         }
-        sweep_invites(&tx, today, self.config.invite_days)?;
-        let hash = invite::stored_hash(new.invite);
-        let row: Option<InviteRow> = tx
-            .query_row(
-                "SELECT inviter, redeemed_by FROM invites WHERE hash = ?1",
-                [hash],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((inviter, None)) = row else {
-            return refuse(StatusCode::FORBIDDEN);
-        };
         let taken: Option<i64> = tx
             .query_row(
                 "SELECT 1 FROM identities WHERE address = ?1 OR id = ?2",
@@ -251,26 +204,16 @@ impl Relay {
             return refuse(StatusCode::TOO_MANY_REQUESTS);
         }
         tx.execute(
-            "INSERT INTO identities (id, address, signing_key, x25519, token_hash, invited_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO identities (id, address, signing_key, x25519, token_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 new.id,
                 new.address,
                 new.signing_key,
                 new.x25519,
-                new.token_hash,
-                inviter
+                new.token_hash
             ],
         )?;
-        tx.execute(
-            "UPDATE invites SET redeemed_by = ?1 WHERE hash = ?2",
-            params![new.id, hash],
-        )?;
-        if let Some(inviter) = inviter {
-            set_link(&tx, &inviter, new.id, APPROVED)?;
-            set_link(&tx, new.id, &inviter, APPROVED)?;
-            put_event(&tx, &inviter, new.id, EventKind::Invited, new.tag)?;
-        }
         tx.commit()?;
         Ok(StatusCode::CREATED)
     }
@@ -359,7 +302,7 @@ impl Relay {
             set_link(&tx, caller, &target, APPROVED)?;
             if event(&tx, caller, &target)? == Some(request) {
                 delete_event(&tx, caller, &target)?;
-                put_event(&tx, &target, caller, EventKind::Approved, &ZERO_TAG)?;
+                put_event(&tx, &target, caller, EventKind::Approved)?;
             }
             tx.commit()?;
             return Ok(StatusCode::OK);
@@ -378,20 +321,20 @@ impl Relay {
             && event(&tx, &target, caller)?.is_none()
             && pending < limit(self.config.pending_requests)
         {
-            put_event(&tx, &target, caller, EventKind::Request, &ZERO_TAG)?;
+            put_event(&tx, &target, caller, EventKind::Request)?;
         }
         tx.commit()?;
         Ok(StatusCode::ACCEPTED)
     }
 
-    /// The events waiting for `caller`, at most [`EVENTS_MAX`]: invited and
-    /// approved first, then requests, each oldest first, so requests never
-    /// hide the others. Deletes nothing.
+    /// The events waiting for `caller`, at most [`EVENTS_MAX`]: approved
+    /// first, then requests, each oldest first, so requests never hide the
+    /// others. Deletes nothing.
     pub(crate) fn events(&self, caller: &[u8; 32]) -> Result<Vec<u8>, Fail> {
-        let rows: Vec<(u8, Stored, [u8; 32])> = {
+        let rows: Vec<(u8, Stored)> = {
             let db = self.db();
             let mut stmt = db.prepare(
-                "SELECT e.kind, i.address, i.signing_key, i.x25519, e.tag
+                "SELECT e.kind, i.address, i.signing_key, i.x25519
                  FROM events e JOIN identities i ON i.id = e.peer
                  WHERE e.recipient = ?1
                  ORDER BY e.kind = ?2, e.seq
@@ -403,16 +346,15 @@ impl Relay {
                     EventKind::Request.byte(),
                     i64::try_from(EVENTS_MAX).map_err(|_| Fail::Db)?
                 ],
-                |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?), r.get(4)?)),
+                |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))),
             )?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         let mut events = Vec::with_capacity(rows.len());
-        for (kind, stored, tag) in &rows {
+        for (kind, stored) in &rows {
             events.push(Event {
                 kind: EventKind::from_byte(*kind).ok_or(Fail::Db)?,
                 peer: peer(stored)?,
-                tag,
             });
         }
         body::events_answer(&events).map_err(|_| Fail::Db)
@@ -420,8 +362,8 @@ impl Relay {
 
     /// `caller`'s (R's) answer to the event about `peer` (P): none waiting
     /// → 404. A request: yes → R takes P's letters and P gets an approved
-    /// event; no → R declines P. An invited or approved event: yes means
-    /// seen; no → 400. The answered event is deleted; 204.
+    /// event; no → R declines P. An approved event: yes means seen; no →
+    /// 400. The answered event is deleted; 204.
     pub(crate) fn answer(
         &self,
         caller: &[u8; 32],
@@ -437,7 +379,7 @@ impl Relay {
         match (request, yes) {
             (true, true) => {
                 set_link(&tx, caller, peer, APPROVED)?;
-                put_event(&tx, peer, caller, EventKind::Approved, &ZERO_TAG)?;
+                put_event(&tx, peer, caller, EventKind::Approved)?;
             }
             (true, false) => set_link(&tx, caller, peer, DECLINED)?,
             (false, true) => {}
@@ -475,119 +417,5 @@ impl Relay {
         }
         tx.commit()?;
         Ok(StatusCode::NO_CONTENT)
-    }
-
-    /// Invite create by `caller` with SHA-256(`a`) = `hash`: the same hash
-    /// of the same inviter again → 200, not counted; a hash another holds →
-    /// 409; `caller`'s open invites under the cap and invites made today
-    /// under the daily cap → else 429; then stored and counted, 201.
-    pub(crate) fn invite_create(
-        &self,
-        caller: &[u8; 32],
-        hash: &[u8; 32],
-    ) -> Result<StatusCode, Fail> {
-        let today = self.day();
-        let mut db = self.db();
-        let tx = db.transaction()?;
-        sweep_invites(&tx, today, self.config.invite_days)?;
-        let holder: Option<Option<Vec<u8>>> = tx
-            .query_row("SELECT inviter FROM invites WHERE hash = ?1", [hash], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        match holder {
-            Some(Some(inviter)) if inviter == caller => return Ok(StatusCode::OK),
-            Some(_) => return refuse(StatusCode::CONFLICT),
-            None => {}
-        }
-        let open: i64 = tx.query_row(
-            "SELECT count(*) FROM invites WHERE inviter = ?1 AND redeemed_by IS NULL",
-            [caller],
-            |r| r.get(0),
-        )?;
-        if open >= limit(self.config.open_invites)
-            || count(&tx, caller, INVITES, today)? >= limit(self.config.invites_per_day)
-        {
-            return refuse(StatusCode::TOO_MANY_REQUESTS);
-        }
-        tx.execute(
-            "INSERT INTO invites (hash, inviter, day, redeemed_by) VALUES (?1, ?2, ?3, NULL)",
-            params![hash, caller, today],
-        )?;
-        bump(&tx, caller, INVITES, today)?;
-        tx.commit()?;
-        Ok(StatusCode::CREATED)
-    }
-
-    /// Invite open (no token): the inviter's address and bundle for `a`,
-    /// or `00` for a root invite; unknown, used or past its life → 404.
-    pub(crate) fn invite_open(&self, relay_key: &[u8; 32]) -> Result<Vec<u8>, Fail> {
-        let oldest = self.day().saturating_sub(limit(self.config.invite_days));
-        let db = self.db();
-        let inviter: Option<Option<Vec<u8>>> = db
-            .query_row(
-                "SELECT inviter FROM invites
-                 WHERE hash = ?1 AND redeemed_by IS NULL AND day >= ?2",
-                params![invite::stored_hash(relay_key), oldest],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(inviter) = inviter else {
-            return refuse(StatusCode::NOT_FOUND);
-        };
-        let Some(inviter) = inviter else {
-            return body::invite_open_answer(None).map_err(|_| Fail::Db);
-        };
-        let stored: Stored = db.query_row(
-            "SELECT address, signing_key, x25519 FROM identities WHERE id = ?1",
-            [inviter],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-        body::invite_open_answer(Some(&peer(&stored)?)).map_err(|_| Fail::Db)
-    }
-
-    /// Invite redeem by a registered `caller` (B): unknown or past its life
-    /// → 404; used by B → 200 again; used by another → 404; a root invite
-    /// or B's own → 400. Else used by B, both links approved (an explicit
-    /// invite overrides an earlier decline) and an invited event with
-    /// `tag` at the inviter; 200. B's `invited_by` does not change.
-    pub(crate) fn invite_redeem(
-        &self,
-        caller: &[u8; 32],
-        relay_key: &[u8; 32],
-        tag: &[u8; 32],
-    ) -> Result<StatusCode, Fail> {
-        let today = self.day();
-        let hash = invite::stored_hash(relay_key);
-        let mut db = self.db();
-        let tx = db.transaction()?;
-        sweep_invites(&tx, today, self.config.invite_days)?;
-        let row: Option<InviteRow> = tx
-            .query_row(
-                "SELECT inviter, redeemed_by FROM invites WHERE hash = ?1",
-                [hash],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((inviter, redeemed_by)) = row else {
-            return refuse(StatusCode::NOT_FOUND);
-        };
-        match redeemed_by {
-            Some(by) if by == caller => return Ok(StatusCode::OK),
-            Some(_) => return refuse(StatusCode::NOT_FOUND),
-            None => {}
-        }
-        let Some(inviter) = inviter.filter(|inviter| inviter != caller) else {
-            return refuse(StatusCode::BAD_REQUEST);
-        };
-        tx.execute(
-            "UPDATE invites SET redeemed_by = ?1 WHERE hash = ?2",
-            params![caller, hash],
-        )?;
-        set_link(&tx, &inviter, caller, APPROVED)?;
-        set_link(&tx, caller, &inviter, APPROVED)?;
-        put_event(&tx, &inviter, caller, EventKind::Invited, tag)?;
-        tx.commit()?;
-        Ok(StatusCode::OK)
     }
 }

@@ -1,13 +1,11 @@
 //! brev-relay (docs/PHASE3_DESIGN.md §4.5, docs/PHASE4_DESIGN.md §4.6):
 //! `serve` runs the relay on `127.0.0.1:<port>` with its limits; `release`
-//! is the operator command that frees an address; `invite` is the operator
-//! command that prints a root invite. Arguments are parsed by hand;
-//! everything else is in the library.
+//! is the operator command that frees an address. Arguments are parsed by
+//! hand; everything else is in the library.
 
 #![forbid(unsafe_code)]
 
 use std::ffi::OsString;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -16,12 +14,10 @@ use brev_proto::body::is_valid_address;
 use brev_relay::{parse_listen, Config, Gates, Open, Relay, Server};
 
 const USAGE: &str = "usage: brev-relay serve --db <absolute path> --listen 127.0.0.1:<port> [--port-file <path>] [--trace]
-                        [--letters-per-day N] [--requests-per-day N] [--invites-per-day N]
-                        [--open-invites N] [--pending-requests N] [--invite-days N]
+                        [--letters-per-day N] [--requests-per-day N] [--pending-requests N]
        brev-relay release --db <absolute path> <address>
-       brev-relay invite --db <absolute path>
-defaults: 50 letters, 10 requests and 3 invites per identity per UTC day, 5 open
-invites, 16 pending requests per recipient, invites live 7 days.";
+defaults: 50 letters and 10 requests per identity per UTC day, 16 pending
+requests per recipient.";
 
 /// A usage error (exit 2) or a failure (exit 1), with its message.
 enum Fail {
@@ -87,10 +83,7 @@ fn run(args: Vec<OsString>) -> Result<(), Fail> {
             }
             Some("--letters-per-day") => Some(&mut config.letters_per_day),
             Some("--requests-per-day") => Some(&mut config.requests_per_day),
-            Some("--invites-per-day") => Some(&mut config.invites_per_day),
-            Some("--open-invites") => Some(&mut config.open_invites),
             Some("--pending-requests") => Some(&mut config.pending_requests),
-            Some("--invite-days") => Some(&mut config.invite_days),
             _ => {
                 rest.push(arg.clone());
                 None
@@ -130,12 +123,6 @@ fn run(args: Vec<OsString>) -> Result<(), Fail> {
                 ))?;
             release(&db, address)
         }
-        Some("invite") => {
-            if !only_db || !rest.is_empty() {
-                return Err(Fail::Usage("invite takes only --db".into()));
-            }
-            invite(&db)
-        }
         _ => Err(Fail::Usage(format!("unknown command {command:?}"))),
     }
 }
@@ -172,7 +159,7 @@ fn write_port_file(path: &Path, port: u16) -> std::io::Result<()> {
 }
 
 /// Opens the relay file for an operator command, with Phase 4's default
-/// config (the commands use only its clock and the invite life).
+/// config.
 fn open(db: &Path) -> Result<Relay, Fail> {
     Relay::open_with(db, Box::new(Open), Config::default(), Gates::default())
         .map_err(|e| Fail::Run(e.to_string()))
@@ -186,24 +173,11 @@ fn release(db: &Path, address: &str) -> Result<(), Fail> {
     match open(db)?.release(address) {
         Ok(true) => {
             eprintln!(
-                "brev-relay: released; its waiting letters, links, events, invites and counts are deleted"
+                "brev-relay: released; its waiting letters, links, events and counts are deleted"
             );
             Ok(())
         }
         Ok(false) => Err(Fail::Run("no identity has that address".into())),
         Err(e) => Err(Fail::Run(e.to_string())),
     }
-}
-
-/// Prints a new root invite code and a newline on stdout. Creates the
-/// relay file if it is missing: a root invite brings in the first identity.
-fn invite(db: &Path) -> Result<(), Fail> {
-    let code = open(db)?
-        .root_invite()
-        .map_err(|e| Fail::Run(e.to_string()))?;
-    let mut out = std::io::stdout().lock();
-    out.write_all(&code)
-        .and_then(|()| out.write_all(b"\n"))
-        .and_then(|()| out.flush())
-        .map_err(|e| Fail::Run(format!("cannot print the code: {e}")))
 }

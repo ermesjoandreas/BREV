@@ -6,7 +6,8 @@
 //! the zeroing global allocator. The UniFFI surface is [`ping`], [`limits`],
 //! [`Brev`] and [`OpenText`] (`ffi.rs`); the relay client is in `relay.rs`
 //! (docs/PHASE3_DESIGN.md §5). Phase 4 (docs/PHASE4_DESIGN.md §5) adds
-//! contact approval, invites and *Blokker*; Hand (docs/AUTHORSHIP.md, on
+//! contact approval and *Blokker*, with open registration and no invites
+//! (docs/DECISIONS.md D-0116); Hand (docs/AUTHORSHIP.md, on
 //! brev-hand) the authorship token of every letter and its check.
 //!
 //! `unsafe_code = "forbid"` is set at the workspace level. The UniFFI
@@ -28,9 +29,9 @@ mod transport;
 pub use brev_proto::Envelope;
 pub use brev_vault::Plaintext;
 pub use ffi::{
-    limits, Brev, BrevError, ContactInfo, ContactRow, Design, InviteInfo, KeyOrigin, Limits,
-    LockCause, MeInfo, MessageRow, OpenText, Proof, RequestRow, Sample, SyncResult, ThreadRow,
-    Window, CHUNK, MAX_BODY, MAX_SUBJECT,
+    limits, Brev, BrevError, ContactInfo, ContactRow, Design, KeyOrigin, Limits, LockCause, MeInfo,
+    MessageRow, OpenText, Proof, RequestRow, Sample, SyncResult, ThreadRow, Window, CHUNK,
+    MAX_BODY, MAX_SUBJECT,
 };
 pub use store::{
     Contact, ContactId, Core, Draft, IdentityId, Letter, Message, MessageId, PublicBundle, Thread,
@@ -124,14 +125,6 @@ pub enum Error {
     /// The relay's daily limit for this kind of request is reached.
     #[error("rate limited")]
     RateLimited,
-    /// An invite code that does not parse, or that the relay does not know
-    /// (unknown, used or expired), or no opened invite where one is needed.
-    #[error("invite invalid")]
-    InviteInvalid,
-    /// The relay's answer to an invite code does not match the code: its
-    /// form (root or not), the inviter's address or the key fingerprint.
-    #[error("invite mismatch")]
-    InviteMismatch,
 }
 
 impl From<rusqlite::Error> for Error {

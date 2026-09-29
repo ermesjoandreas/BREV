@@ -275,7 +275,7 @@ fn locked_core_refuses_every_content_call() {
     locked(a.core.address().map(drop));
     locked(a.core.is_registered().map(drop));
     locked(a.core.set_address(b"anna"));
-    locked(a.core.registration(b"anna", &[1; 32], &[2; 32]).map(drop));
+    locked(a.core.registration(b"anna").map(drop));
     locked(a.core.relay_token().map(drop));
     locked(a.core.verify_own(b"x", &der).map(drop));
     locked(a.core.check_new_address(b"carl"));
