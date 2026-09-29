@@ -114,8 +114,9 @@ fi
 
 # -allowProvisioningUpdates: Brev is signed by team AV26DNQ5SC with automatic
 # signing (docs/DECISIONS.md D-0035), so xcodebuild may fetch or renew the
-# Mac App Development profile. This Mac and the App ID are registered; the
-# first --instance b build registers no.brev.app.b the same way.
+# Mac App Development profile. This Mac is registered; both instances are
+# signed with the team's wildcard profile, so no App ID is registered for
+# no.brev.app.b (D-0084).
 echo "==> Building $PRODUCT ($CONFIGURATION, $ARCH)"
 xcodebuild \
   -project "$APP_DIR/Brev.xcodeproj" \

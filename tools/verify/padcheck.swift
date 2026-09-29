@@ -8,7 +8,8 @@
 // 4096 or 16384 bytes, or a larger multiple of 16384 up to 1 MiB
 // (brev-proto::padded_len). The sealed columns are identity.keys,
 // identity.address, contacts.bundle, contacts.address, contacts.pending,
-// threads.subject and messages.body (brev-mail/src/store.rs, schema v4;
+// contacts.flags, invites.body, threads.subject and messages.body
+// (brev-mail/src/store.rs, schema v5;
 // docs/PHASE3_DESIGN.md §6.1; messages.env_class is plaintext,
 // docs/VAULT_SPLIT_PLAN.md §6). Phase 2's version read three stores; the
 // echo peers' stores went with Phase 3.
@@ -16,7 +17,7 @@
 // usage: padcheck [<dir>]
 //   <dir> holds brev.db; the default is Brev's folder,
 //   ~/Library/Containers/no.brev.app/Data/Library/Application Support/Brev.
-//   Prints the store's application_id and user_version (must be BREV and 4)
+//   Prints the store's application_id and user_version (must be BREV and 5)
 //   and per column the rows checked and any row whose length is not padded
 //   (rowid and length only). Exit 0 when the store passes and has at least
 //   one checked column value (the control); 1 otherwise; 3 when it cannot be
@@ -31,7 +32,8 @@ let dir = CommandLine.arguments.dropFirst().first
     ?? "\(home)/Library/Containers/no.brev.app/Data/Library/Application Support/Brev"
 let nonce = 24, tag = 16
 let columns = [("identity", "keys"), ("identity", "address"), ("contacts", "bundle"), ("contacts", "address"),
-               ("contacts", "pending"), ("threads", "subject"), ("messages", "body")]
+               ("contacts", "pending"), ("contacts", "flags"), ("invites", "body"),
+               ("threads", "subject"), ("messages", "body")]
 
 func padded(_ n: Int) -> Bool {
     if [256, 1024, 4096, 16384].contains(n) { return true }
@@ -55,7 +57,7 @@ for store in ["brev.db"] {
         return sqlite3_step(st) == SQLITE_ROW ? Int(sqlite3_column_int64(st, 0)) : nil
     }
     let appID = int("PRAGMA application_id"), version = int("PRAGMA user_version")
-    let header = appID == 0x4252_4556 && version == 4
+    let header = appID == 0x4252_4556 && version == 5
     print("\(store): application_id=0x\(String(appID ?? -1, radix: 16)) user_version=\(version ?? -1) \(header ? "ok" : "BAD")")
     if !header { failed = true }
     var checked = 0

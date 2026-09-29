@@ -4090,3 +4090,28 @@ WP5 and their reviews record.
   `spctl` check has been made: pending the owner, who holds the Developer ID
   certificate. That a Developer ID build opens the keys a development build
   made is expected, not verified (`docs/DISTRIBUTION.md` §1).
+
+### D-0103 — Corrections after the Phase 3–5 log: phase order, cargo-deny result, padcheck for schema v5
+
+- **Date:** 2026-09-29
+- **Decision:**
+  1. **Phase order (corrects D-0085).** The owner wrote "CONTINUE" on
+     2026-09-29 at about 00:50, after the Phase 4 WP0–WP2 report that said
+     the rest waited for the Phase 3 run, and at about 01:00 asked for "as
+     much work as possible" overnight. Phase 4 WP3–WP5 and the no-human
+     Phase 5 items were built on that instruction, on `claude/phase4`,
+     leaving `/Users/andypandy/BREV` on the Phase 3 code for the owner's
+     session. The human DoD runs of Phases 3 and 4 are still open.
+  2. **cargo-deny result (D-0098 did not record one).** `cargo deny check`
+     in `core/` at this commit's parent: advisories ok, bans ok, licenses
+     ok, sources ok; exit 0; one warning, `syn` in two versions (allowed as
+     a warning by `deny.toml`).
+  3. **padcheck and V18 for schema v5 (noted in D-0091).**
+     `tools/verify/padcheck.swift` now requires `user_version` 5 and also
+     checks `contacts.flags` and `invites.body`; V18's text says v5. The
+     `scripts/build.sh` comment no longer claims the first `--instance b`
+     build registers an App ID (D-0084).
+- **Verified:** `xcrun swiftc -typecheck -warnings-as-errors` on
+  `padcheck.swift` passes; `bash -n scripts/build.sh` passes; the
+  `cargo deny check` output is as quoted. `scripts/test.sh` was not run
+  (Mac on low battery); it runs padcheck only through the type-check.
