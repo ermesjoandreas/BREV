@@ -4,8 +4,12 @@
 // (docs/PHASE2_DESIGN.md §4.2, §6.2, §7.3, §8.1, §8.4; docs/PHASE3_DESIGN.md
 // §3.2, §6.5). An own window, presented as a sheet on the main window: a
 // HardenedWindow that gets Hardening.apply when it is made and again from
-// the window it joins, and takes nothing but the fields below. "Til:" and
-// "Emne:" are interface text. The recipient is a copy of the contact's name
+// the window it joins, and takes nothing but the fields below. Laid out
+// like a Mac mail app's compose window (docs/UI_REDESIGN.md §2.6): «Til:»
+// and «Emne:» rows, then the body, divided by hairlines, with no boxes
+// around the fields, and a bottom bar with the status on the left and
+// Avbryt, Prøv igjen and Send on the right. "Til:" and "Emne:" are
+// interface text. The recipient is a copy of the contact's name
 // (its address) that the sheet owns, drawn by RecipientView; the subject and
 // the body are SecureComposeViews. Every one of them is a ContentView, so it
 // draws through the protected layer.
@@ -60,10 +64,13 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
                         _ done: @escaping (Result<Data, Error>) -> Void) -> Void
 
     private static let log = Logger(subsystem: "no.brev.app", category: "compose")
-    static let contentSize = NSSize(width: 600, height: 460)
-    private static let margin: CGFloat = 20
-    private static let labelWidth: CGFloat = 52
-    private static let messageWidth: CGFloat = 300
+    static let contentSize = NSSize(width: 640, height: 540)
+    private static let margin: CGFloat = 16
+    /// Where the recipient and the subject start (after «Til:», «Emne:»).
+    private static let fieldX: CGFloat = 72
+    private static let rowHeight: CGFloat = 36
+    private static let barHeight: CGFloat = 52
+    private static let messageWidth: CGFloat = 340
 
     /// Where a letter is (PHASE3 §3.2).
     private enum Step {
@@ -92,6 +99,15 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
     /// compose.environment with the facts short of class A: made for each
     /// refusal, in the place of the texts above.
     private var environmentFailure: InterfaceText?
+    /// A small orange triangle before an error (not before «Sender …»).
+    private let warning: NSImageView = {
+        let image = NSImageView()
+        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        image.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)
+        image.contentTintColor = .systemOrange
+        return image
+    }()
     private var buttonRow: NSStackView?
     private weak var session: Session?
     private let contact: Data
@@ -168,9 +184,10 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
     // MARK: - Content
 
     private func makeContent() -> NSView {
-        let root = NSView(frame: NSRect(origin: .zero, size: Self.contentSize))
-        let to = InterfaceText(L10n.composeTo, width: Self.labelWidth, alignment: .right)
-        let about = InterfaceText(L10n.composeSubject, width: Self.labelWidth, alignment: .right)
+        let root = ComposeBackground(frame: NSRect(origin: .zero, size: Self.contentSize))
+        let to = InterfaceText(L10n.composeTo, style: .secondary, width: Self.fieldX - Self.margin, alignment: .left)
+        let about = InterfaceText(L10n.composeSubject, style: .secondary, width: Self.fieldX - Self.margin,
+                                  alignment: .left)
         let subjectField = Self.field(subject, multiline: false)
         let bodyField = Self.field(body, multiline: true)
         let cancel = HumanButton(title: L10n.composeCancel, target: self, action: #selector(cancel(_:)))
@@ -179,54 +196,67 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         let retry = HumanButton(title: L10n.composeRetry, target: self, action: #selector(retryPressed(_:)))
         retryButton = retry
         let send = HumanButton(title: L10n.composeSend, target: self, action: #selector(sendPressed(_:)))
+        // The default look without a Return key equivalent: Return in the
+        // body is a new line, and ⌘↩ sends from a field.
+        send.bezelColor = .controlAccentColor
         sendButton = send
         let buttons = NSStackView(views: [cancel, retry, send])
-        buttons.spacing = 12
+        buttons.spacing = 8
         buttonRow = buttons
+        let lines = (0..<3).map { _ in Hairline() }
         let messages = [failure, keyChanged, notApproved, rateLimited, netFailure, sending]
-        for v in [to, about, recipient, subjectField, bodyField, buttons] + messages as [NSView] {
+        for v in [to, about, recipient, subjectField, bodyField, buttons, warning] + lines + messages as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
-        let m = Self.margin
+        let m = Self.margin, row = Self.rowHeight
         NSLayoutConstraint.activate([
-            recipient.topAnchor.constraint(equalTo: root.topAnchor, constant: m),
-            recipient.leadingAnchor.constraint(equalTo: to.trailingAnchor, constant: 8),
+            recipient.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
+            recipient.heightAnchor.constraint(equalToConstant: row - 8),
+            recipient.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.fieldX - 6),
             recipient.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -m),
-            recipient.heightAnchor.constraint(equalToConstant: 22),
             to.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: m),
             to.centerYAnchor.constraint(equalTo: recipient.centerYAnchor),
+            lines[0].topAnchor.constraint(equalTo: root.topAnchor, constant: row + 4),
 
-            subjectField.topAnchor.constraint(equalTo: recipient.bottomAnchor, constant: 10),
+            subjectField.topAnchor.constraint(equalTo: lines[0].bottomAnchor, constant: 4),
+            subjectField.heightAnchor.constraint(equalToConstant: row - 8),
             subjectField.leadingAnchor.constraint(equalTo: recipient.leadingAnchor),
             subjectField.trailingAnchor.constraint(equalTo: recipient.trailingAnchor),
-            subjectField.heightAnchor.constraint(equalToConstant: 26),
             about.leadingAnchor.constraint(equalTo: to.leadingAnchor),
             about.centerYAnchor.constraint(equalTo: subjectField.centerYAnchor),
+            lines[1].topAnchor.constraint(equalTo: subjectField.bottomAnchor, constant: 4),
 
-            bodyField.topAnchor.constraint(equalTo: subjectField.bottomAnchor, constant: 12),
-            bodyField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: m),
-            bodyField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -m),
+            bodyField.topAnchor.constraint(equalTo: lines[1].bottomAnchor, constant: 12),
+            bodyField.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            bodyField.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            bodyField.bottomAnchor.constraint(equalTo: lines[2].topAnchor, constant: -8),
+            lines[2].bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -Self.barHeight),
 
-            buttons.topAnchor.constraint(equalTo: bodyField.bottomAnchor, constant: 16),
+            buttons.centerYAnchor.constraint(equalTo: root.bottomAnchor, constant: -Self.barHeight / 2),
             buttons.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -m),
-            buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -m),
-        ] + messages.flatMap { [
-            $0.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: m),
+            warning.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: m),
+            warning.centerYAnchor.constraint(equalTo: buttons.centerYAnchor),
+        ] + lines.enumerated().flatMap { i, line in [
+            line.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: i < 2 ? m : 0),
+            line.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: i < 2 ? -m : 0),
+            line.heightAnchor.constraint(equalToConstant: 1),
+        ] } + messages.flatMap { [
+            $0.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: m + 22),
             $0.centerYAnchor.constraint(equalTo: buttons.centerYAnchor),
         ] })
         return root
     }
 
-    /// A field's scroll view. The subject scrolls sideways, without
-    /// scrollers; the body scrolls down.
+    /// A field's scroll view, with no border or background of its own. The
+    /// subject scrolls sideways, without scrollers; the body scrolls down.
     private static func field(_ view: SecureComposeView, multiline: Bool) -> NSScrollView {
         let scroll = NSScrollView()
-        scroll.borderType = .bezelBorder
-        scroll.drawsBackground = true
-        scroll.backgroundColor = .textBackgroundColor
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
         scroll.hasVerticalScroller = multiline
         scroll.autohidesScrollers = true
+        scroll.automaticallyAdjustsContentInsets = false
         if !multiline {
             scroll.verticalScrollElasticity = .none
             scroll.horizontalScrollElasticity = .none
@@ -245,6 +275,7 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
             + [environmentFailure].compactMap({ $0 }) {
             m.isHidden = m !== shown
         }
+        warning.isHidden = shown == nil || shown === sending
         sendButton?.isHidden = next == .retry
         sendButton?.isEnabled = next == .editing
         retryButton?.isHidden = next != .retry
@@ -371,7 +402,7 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         text.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(text)
         NSLayoutConstraint.activate([
-            text.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.margin),
+            text.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.margin + 22),
             text.centerYAnchor.constraint(equalTo: buttons.centerYAnchor),
         ])
         return text
@@ -396,6 +427,16 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         subject.wipe()
         body.wipe()
         show(.editing)
+    }
+}
+
+/// The compose sheet's background: the text background, as a page. Chrome.
+private final class ComposeBackground: NSView {
+    override var isOpaque: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.textBackgroundColor.setFill()
+        dirtyRect.fill()
     }
 }
 
