@@ -10,7 +10,8 @@
 // HardenedWindow applies it to every sheet it begins and every child window
 // it adds (CLAUDE.md §3.2: they get the same settings as their parent).
 // `sharingType = .none` is the first capture defence; the protected content
-// layer (ContentView) is the second (§3.2, D-0034).
+// layer (ContentView) is the second (§3.2, D-0034). A BREV_DEV build
+// (Debug only; CLAUDE.md §2, D-0115) leaves both out, so screenshots work.
 
 import AppKit
 
@@ -23,7 +24,9 @@ enum Hardening {
 
     /// `window`, its child windows and its sheets, and theirs.
     static func apply(_ window: NSWindow) {
+        #if !BREV_DEV
         window.sharingType = .none
+        #endif
         window.isExcludedFromWindowsMenu = true
         window.isRestorable = false
         window.tabbingMode = .disallowed
@@ -34,7 +37,9 @@ enum Hardening {
     /// Debug builds: after presenting a sheet, check that every window is
     /// still excluded from capture.
     static func assertAllWindows() {
+        #if !BREV_DEV
         assert(NSApp.windows.allSatisfy { $0.sharingType == .none }, "a Brev window can be captured")
+        #endif
     }
 }
 

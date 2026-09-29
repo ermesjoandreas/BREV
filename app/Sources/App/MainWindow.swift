@@ -50,6 +50,9 @@ final class MainWindow: HardenedWindow {
             defer: false
         )
         Hardening.apply(self)
+        #if BREV_DEV
+        DevBuild.addLabel(to: self)
+        #endif
 
         // §1.5: the title is the app name (or, on the mail screen, a selected
         // mailbox's fixed name) and must never carry message content.

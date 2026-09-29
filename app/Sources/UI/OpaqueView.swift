@@ -160,7 +160,10 @@ class ContentView: OpaqueView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        // A BREV_DEV build (Debug only; CLAUDE.md §2, D-0115) can be captured.
+        #if !BREV_DEV
         protectedLayer.preventsCapture = true
+        #endif
         protectedLayer.videoGravity = .resize
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay

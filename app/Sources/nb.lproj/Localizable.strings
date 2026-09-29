@@ -234,3 +234,6 @@
 
 /* Title of the main window. Always the app name; never message content or a sender name. */
 "window.main.title" = "Brev";
+
+/* Only in a dev build (BREV_DEV, the Debug configuration; D-0115): the label in the title bar, so a build without capture protection or automatic locks is never taken for Brev. */
+"dev.label" = "UTVIKLER";

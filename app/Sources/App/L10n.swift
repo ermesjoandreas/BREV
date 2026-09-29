@@ -168,6 +168,10 @@ enum L10n {
     #endif
 
     static let windowMainTitle = tr("window.main.title")
+    #if BREV_DEV
+    /// «UTVIKLER»: a dev build's label in the title bar (DevBuild).
+    static let devLabel = tr("dev.label")
+    #endif
 
     // MARK: - A letter's proof (docs/AUTHORSHIP.md §6)
 

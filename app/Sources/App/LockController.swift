@@ -84,17 +84,20 @@ final class LockController: NSObject {
     /// Starts observing every lock trigger except idle, which runs only
     /// while unlocked.
     func start() {
-        let app = NotificationCenter.default
         let workspace = NSWorkspace.shared.notificationCenter
-        observe(app, NSApplication.didResignActiveNotification, .resignActive)
         observe(workspace, NSWorkspace.willSleepNotification, .sleep)
         observe(workspace, NSWorkspace.screensDidSleepNotification, .sleep)
         observe(workspace, NSWorkspace.sessionDidResignActiveNotification, .sessionResign)
+        // A BREV_DEV build (Debug only; CLAUDE.md §2, D-0115) does not lock
+        // on resign active or screen lock.
+        #if !BREV_DEV
+        observe(NotificationCenter.default, NSApplication.didResignActiveNotification, .resignActive)
         // Only the selector API takes a suspension behaviour; the block API
         // has the default, which the spike saw held back while inactive.
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(screenLocked(_:)),
                                                             name: Self.screenIsLocked, object: nil,
                                                             suspensionBehavior: .deliverImmediately)
+        #endif
     }
 
     private static let screenIsLocked = Notification.Name("com.apple.screenIsLocked")
@@ -154,8 +157,14 @@ final class LockController: NSObject {
         idleTimer?.invalidate()
         idleTimer = commonModeTimer(every: LockState.idleCheckInterval) { [weak self] in
             guard let self else { return }
+            // A BREV_DEV build (Debug only; D-0115) has no idle lock of its
+            // own; Rust's idle deadline stays.
+            #if BREV_DEV
+            let idle = false
+            #else
             let idle = LockState.isIdle(now: clock_gettime_nsec_np(CLOCK_MONOTONIC),
                                         lastInput: BrevApplication.lastHumanInput)
+            #endif
             // Rust wipes on its own idle deadline; the screen is blanked here.
             if idle || (self.state.unlocked && self.session?.brev.isLocked() == true) {
                 self.lock(.idle)

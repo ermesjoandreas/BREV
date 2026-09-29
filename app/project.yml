@@ -222,6 +222,13 @@ targets:
           ONLY_ACTIVE_ARCH: "YES"
           # The self-scan exists only in the Verify configuration.
           EXCLUDED_SOURCE_FILE_NAMES: SelfScan.swift scan.c
+          # The dev flag (CLAUDE.md §2; docs/DECISIONS.md D-0115), in Debug
+          # only: no capture protection, no lock on resign active, screen
+          # lock or Brev's idle clock, and the «UTVIKLER» label in the title
+          # bar (App/DevBuild.swift). scripts/check-dev-flag.sh, run by
+          # scripts/build.sh and scripts/test.sh, fails if Release or Verify
+          # sets it or a Release binary holds its marker.
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) BREV_DEV"
           # Debug deliberately keeps Xcode's default CODE_SIGN_INJECT_BASE_ENTITLEMENTS
           # (YES): that injects com.apple.security.get-task-allow so lldb can attach
           # while developing. This entitlement must NEVER reach a shipped build —

@@ -17,8 +17,8 @@
 # against it, each run with a root invite of its own (macOS), a type-check
 # of spike P1's variant (b) (macOS), a
 # compile check of the view host (macOS), a type-check of the verification
-# tools and capture-probe's self-test (macOS) and an Xcode compile check
-# (macOS with xcodegen).
+# tools and capture-probe's self-test (macOS), an Xcode compile check
+# (macOS with xcodegen) and the check that the dev flag is in Debug only.
 # Exits non-zero on the first failure.
 #
 # Usage: scripts/test.sh
@@ -754,8 +754,20 @@ else
   # scripts/build.sh. -allowProvisioningUpdates: team signing (D-0035), as
   # in build.sh.
   echo "==> xcodebuild (Debug compile check, $ARCH)"
-  xcodebuild -project "$REPO_ROOT/app/Brev.xcodeproj" -allowProvisioningUpdates -scheme Brev -configuration Debug \
-    -destination "platform=macOS,arch=$ARCH" ONLY_ACTIVE_ARCH=YES build
+  XCODE_ARGS=(-project "$REPO_ROOT/app/Brev.xcodeproj" -scheme Brev -configuration Debug
+              -destination "platform=macOS,arch=$ARCH" ONLY_ACTIVE_ARCH=YES)
+  xcodebuild "${XCODE_ARGS[@]}" -allowProvisioningUpdates build
+  # The dev flag (CLAUDE.md §2, D-0115): in Debug only, its marker in the
+  # Debug build just made (the control), and in no Release build of either
+  # instance that scripts/build.sh left in app/build or app/build-b.
+  echo "==> dev flag: Debug only, not in a Release build"
+  DEV_ARGS=(--debug "$(xcodebuild "${XCODE_ARGS[@]}" -showBuildSettings 2>/dev/null \
+    | sed -n 's/^ *CODESIGNING_FOLDER_PATH = //p')")
+  for release_app in "$REPO_ROOT/app/build/Build/Products/Release/Brev.app" \
+                     "$REPO_ROOT/app/build-b/Build/Products/Release/Brev B.app"; do
+    if [[ -d "$release_app" ]]; then DEV_ARGS+=(--release "$release_app"); fi
+  done
+  "$REPO_ROOT/scripts/check-dev-flag.sh" "${DEV_ARGS[@]}"
 fi
 
 echo "==> all checks passed"

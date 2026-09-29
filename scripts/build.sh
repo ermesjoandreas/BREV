@@ -135,6 +135,14 @@ if [[ ! -d "$APP" ]]; then
   exit 1
 fi
 
+# The dev flag (CLAUDE.md §2, D-0115) is in Debug only, and a Release
+# build holds none of its code; a Debug build holds its marker (the control).
+if [[ "$CONFIGURATION" == Release ]]; then
+  "$REPO_ROOT/scripts/check-dev-flag.sh" --release "$APP"
+else
+  "$REPO_ROOT/scripts/check-dev-flag.sh" --debug "$APP"
+fi
+
 echo
 echo "Built: $APP"
 echo "Run it with:  open \"$APP\"   (or: scripts/build.sh${INSTANCE:+ --instance $INSTANCE} --open)"
