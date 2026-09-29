@@ -8,7 +8,8 @@
 // when a lock starts, while a letter may still be open (the control), and
 // once when the lock sequence has finished. tools/viewhost compiles it the
 // same way. It logs counts only. The marker is "BREV-SECRET-BODY", as in
-// scan.c; its glyph ids in the content font are the scanner's glyph needle,
+// scan.c; its glyph ids in the letter body's font (ContentView.fontF4, the
+// font of every letter body) are the scanner's glyph needle,
 // stored XORed, as in harness case 4. A shown letter leaves no live glyph
 // ids (ContentView draws each line into its pixel buffers, and Core Text
 // frees a line's glyphs once it is drawn), so the control also holds a
@@ -62,13 +63,19 @@ enum SelfScan {
         return (r.utf8_hits, r.utf16_hits, r.glyph_hits)
     }
 
-    /// The glyph count while a CTLine of the marker in GlyphFlush's content
-    /// font is alive: the glyph needle's positive control. Made as TextLayout
-    /// makes a line, from a buffer wiped afterwards; the lock sequence's
-    /// GlyphFlush and scribbling clear it like any other line. 0 without a
-    /// font.
+    /// The body font's attributes, as TextLayout makes them, once a letter
+    /// body has been laid out (GlyphFlush has seen the font); nil before.
+    private static var attrs: CFDictionary? {
+        GlyphFlush.fonts.first { CFEqual($0.font, ContentView.fontF4) }?.attrs
+    }
+
+    /// The glyph count while a CTLine of the marker in the body font is
+    /// alive: the glyph needle's positive control. Made as TextLayout makes a
+    /// line, from a buffer wiped afterwards; the lock sequence's GlyphFlush
+    /// and scribbling clear it like any other line. 0 before a body was laid
+    /// out.
     static func needleControl() -> UInt64 {
-        guard let attrs = GlyphFlush.attrs else { return 0 }
+        guard let attrs else { return 0 }
         setGlyphNeedle()
         var chars = [UInt16](repeating: 0, count: 16)
         for i in 0..<16 { chars[i] = UInt16(markerX[i] ^ 0x5A) }
@@ -85,10 +92,10 @@ enum SelfScan {
         return r.glyph_hits
     }
 
-    /// The marker's 16 glyph ids in GlyphFlush's content font, XORed. Until
-    /// a text has been laid out there is no font, and glyph stays 0.
+    /// The marker's 16 glyph ids in the body font, XORed. Until a body has
+    /// been laid out there is no font, and glyph stays 0.
     private static func setGlyphNeedle() {
-        guard let attrs = GlyphFlush.attrs,
+        guard let attrs,
               let value = CFDictionaryGetValue(attrs, Unmanaged.passUnretained(kCTFontAttributeName).toOpaque())
         else { return }
         let font = Unmanaged<CTFont>.fromOpaque(value).takeUnretainedValue()

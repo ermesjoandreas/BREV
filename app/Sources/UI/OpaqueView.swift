@@ -74,10 +74,29 @@ class OpaqueView: NSView {
 }
 
 class ContentView: OpaqueView {
-    /// The one content font (docs/PHASE2_DESIGN.md §6.4): every TextLayout
-    /// that draws content uses it, so GlyphFlush's sweep covers them all.
-    static let contentFont = NSFont.systemFont(ofSize: 13) as CTFont
-    /// Metadata (dates) and nothing else.
+    // The four content fonts (docs/UI_REDESIGN.md §3.1). Every TextLayout
+    // that draws content uses one of them, and GlyphFlush sweeps each one it
+    // has seen (docs/PHASE2_DESIGN.md §6.4). A fifth needs a reason in
+    // docs/DECISIONS.md.
+    /// F1, SF 13 regular: list subjects, sidebar names, codes, compose
+    /// recipient and subject.
+    static let fontF1 = NSFont.systemFont(ofSize: 13) as CTFont
+    /// F2, SF 13 semibold: a list row's first line, the ContactBar's and the
+    /// reading header's name.
+    static let fontF2 = NSFont.systemFont(ofSize: 13, weight: .semibold) as CTFont
+    /// F3, SF 17 semibold: the reading header's subject.
+    static let fontF3 = NSFont.systemFont(ofSize: 17, weight: .semibold) as CTFont
+    /// F4, New York 15 (SF 15 if the serif design is missing): letter
+    /// bodies and the compose body, so what is written looks like what is read.
+    static let fontF4: CTFont = {
+        let sf = NSFont.systemFont(ofSize: 15)
+        guard let serif = sf.fontDescriptor.withDesign(.serif), let font = NSFont(descriptor: serif, size: 15)
+        else { return sf as CTFont }
+        return font as CTFont
+    }()
+    /// F4's line height: 15 pt text on a 22 pt line.
+    static let bodyLineHeight: CGFloat = 22
+    /// Metadata (dates, «Mottatt»/«Sendt», a letter's class) and nothing else.
     static let metaFont = NSFont.systemFont(ofSize: 11) as CTFont
 
     /// Buffers per view: one shown, one queued, one being drawn.
@@ -371,5 +390,55 @@ class ContentView: OpaqueView {
         ctx.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         ctx.textPosition = CGPoint(x: x, y: baseline)
         CTLineDraw(CTLineCreateWithAttributedString(a), ctx)
+    }
+
+    /// The width of one line of metadata in the meta font.
+    static func metaWidth(_ text: String) -> CGFloat {
+        let attrs = [kCTFontAttributeName: metaFont] as CFDictionary
+        guard let a = CFAttributedStringCreate(nil, text as CFString, attrs) else { return 0 }
+        return ceil(CGFloat(CTLineGetTypographicBounds(CTLineCreateWithAttributedString(a), nil, nil, nil)))
+    }
+
+    /// An SF Symbol (never content) tinted `color`, drawn into `rect` of a
+    /// context whose y grows downward.
+    func drawSymbol(_ name: String, in ctx: CGContext, rect: CGRect, color: NSColor) {
+        guard let image = Self.symbol(name, pointSize: rect.height, color: color, appearance: effectiveAppearance)
+        else { return }
+        ctx.saveGState()
+        ctx.translateBy(x: rect.minX, y: rect.maxY)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(image, in: CGRect(origin: .zero, size: rect.size))
+        ctx.restoreGState()
+    }
+
+    /// Symbol images, made once per name, size, colour and appearance.
+    private static var symbols: [String: CGImage] = [:]
+
+    private static func symbol(_ name: String, pointSize: CGFloat, color: NSColor,
+                               appearance: NSAppearance) -> CGImage? {
+        let key = "\(name) \(pointSize) \(color) \(appearance.name.rawValue)"
+        if let made = symbols[key] { return made }
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize * 0.8, weight: .regular)
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        else { return nil }
+        let px = Int(pointSize * 2)
+        guard let ctx = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        // The symbol's aspect kept, centred in the square.
+        let size = base.size, scale = min(CGFloat(px) / size.width, CGFloat(px) / size.height)
+        let fit = CGRect(x: (CGFloat(px) - size.width * scale) / 2, y: (CGFloat(px) - size.height * scale) / 2,
+                         width: size.width * scale, height: size.height * scale)
+        guard let cg = base.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        ctx.draw(cg, in: fit)
+        var tint = color.cgColor
+        appearance.performAsCurrentDrawingAppearance { tint = color.cgColor }
+        ctx.setBlendMode(.sourceIn)
+        ctx.setFillColor(tint)
+        ctx.fill(CGRect(x: 0, y: 0, width: px, height: px))
+        let image = ctx.makeImage()
+        symbols[key] = image
+        return image
     }
 }
