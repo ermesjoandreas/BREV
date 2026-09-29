@@ -1241,6 +1241,12 @@ func caseDEK() {
         var h = scan()
         check("baseline: the DEK is in its SecretBytes only (positive control); no ECIES secret",
               h.needle(0) == 1 && (1..<n).allSatisfy { h.needle($0) == 0 }, "\(h)")
+        // Onboarding wraps the new DEK before Brev.create (UnlockService):
+        // Security reads it through a no-copy view and keeps no copy.
+        let wrappedAgain = SecKeyCopyPublicKey(kek).flatMap { try? Enclave.wrap(dek: dek, to: $0) }
+        h = scan()
+        check("after Enclave.wrap (onboarding): the DEK is still in its SecretBytes only",
+              wrappedAgain?.count == Enclave.wrappedLength && h.needle(0) == 1, "\(h)")
         let session: Session
         do {
             session = try Session.create(dir: dir.path, relay: offlineRelay, dek: dek,
@@ -1635,6 +1641,19 @@ func setSecretNeedles(_ code: SecretBytes) -> Bool {
         && brev_scan_set_needle(1, raw, raw.count) == 0
 }
 
+/// Scanner needles 2 and 3: `address`'s units as UTF-16LE bytes and
+/// `code`'s bytes (an identity code), each XORed as scan.c takes them, so no
+/// plain copy is made here.
+func setContactNeedles(address: SecretText, code: SecretBytes) -> Bool {
+    var a = UnsafeRawBufferPointer(start: address.units, count: 2 * address.length).map { $0 ^ 0x5A }
+    var c = code.withBytes { $0.map { $0 ^ 0x5A } }
+    defer {
+        _ = a.withUnsafeMutableBytes { memset_s($0.baseAddress!, $0.count, 0, $0.count) }
+        _ = c.withUnsafeMutableBytes { memset_s($0.baseAddress!, $0.count, 0, $0.count) }
+    }
+    return c.count == 35 && brev_scan_set_needle(2, a, a.count) == 0 && brev_scan_set_needle(3, c, c.count) == 0
+}
+
 /// A copy of `code` with the first character of its fingerprint changed
 /// (still base32, so it parses). The caller wipes it.
 func editedFingerprint(_ code: SecretBytes, address: String) -> SecretBytes {
@@ -1662,7 +1681,9 @@ func editedFingerprint(_ code: SecretBytes, address: String) -> SecretBytes {
 /// controls: the code's secret as text in Swift, as 16 bytes in Rust);
 /// after the wipe, the flush and the locks, nothing: no UTF-8, UTF-16 or
 /// glyph copy of the marker, and no copy of the code's secret, as text or
-/// as bytes.
+/// as bytes. The same holds for contact data (docs/SWIFT_MEMORY_REVIEW.md):
+/// B's address as UTF-16 and B's identity code, seen while B's own and A's
+/// reads of them are held, and gone after the wipe and the locks.
 func caseInvite() {
     requireScribble(true)
     let relay = relayURL()
@@ -1806,16 +1827,29 @@ func caseInvite() {
             + bThreads.flatMap { try! b.session.messages(thread: $0.id) }.map { try! b.session.body(message: $0.id) }
         check("A and B each hold both marker letters at full length",
               letters.count == 4 && letters.allSatisfy { $0.length == 1002 })
+        // Contact data, as the screens hold it: B's own address and code
+        // (the header's line 1), A's contacts (the list's names) and B's
+        // details at A (line 2). Needle 2 is B's address as UTF-16, the form
+        // SecretText keeps (the harness's own Strings are UTF-8); needle 3
+        // B's identity code.
+        let meB = try! b.session.me(), infoB = try! a.session.contactInfo(contact: aSeesB.id)
+        let namesA = try! a.session.contacts()
+        check("scanner takes B's address (UTF-16) and identity code as needles 2 and 3",
+              setContactNeedles(address: meB.address, code: meB.code))
         let drawing = Drawing(font: font)
         letters.forEach(drawing.draw)
         h = scan()
         check("while open: the letters are in memory (positive control)", h.u16 > 0, "\(h)")
         check("before the lock: D's opened invite still holds the secret's 16 bytes (positive control)",
               h.needle(1) > 0, "\(h)")
+        check("while read: B's address and identity code are in memory (positive control)",
+              h.needle(2) >= 3 && h.needle(3) >= 2, "\(h)")
         h = drawing.scanWithLiveLine(letters[0], font: font)
         check("while a line of one is alive: the glyph needle sees it (positive control)", h.glyph > 0, "\(h)")
         letters.forEach { $0.wipe() }
         (aThreads + bThreads).forEach { $0.subject.wipe() }
+        for t in [meB.address, infoB.address] + namesA.map(\.name) { t.wipe() }
+        for s in [meB.code, infoB.code, infoB.newCode] { s.wipe() }
         GlyphFlush.flush()
         drawing.layout.reset()
         for u in [a, b, c, d] { u.lock() }
@@ -1826,6 +1860,8 @@ func caseInvite() {
         check("after wipe, flush and lock: no copy of the marker (UTF-8, UTF-16, glyphs) or of the code's secret (text, bytes)",
               h.u8 == 0 && h.u16 == 0 && h.glyph == 0 && h.needle(0) == 0 && h.needle(1) == 0
                   && [a, b, c, d].allSatisfy { $0.session.brev.isLocked() }, "\(h)")
+        check("after wipe and lock: no copy of B's address (UTF-16) or identity code",
+              h.needle(2) == 0 && h.needle(3) == 0, "\(h)")
     }
 }
 

@@ -30,7 +30,8 @@
 //   pixels (docs/PHASE3_DESIGN.md §6.5, docs/PHASE4_DESIGN.md §6.1);
 // - a replaced line of the contact header has its pixels zeroed, and a
 //   lock ends a compose sheet without reporting a close, so AppDelegate
-//   reads nothing again while Brev locks (WP5 review);
+//   reads nothing again while Brev locks (WP5 review), after zeroing its
+//   draft and its copy of the recipient's name (docs/SWIFT_MEMORY_REVIEW.md);
 // - a signature's Touch ID prompt with LockState's U4 switch in both
 //   positions (docs/PHASE3_DESIGN.md §3.2): on, every content view is blank
 //   during the prompt, and as this process is never the active app, its end
@@ -500,10 +501,22 @@ check("control: Avbryt closes the compose sheet and reports the close",
       cancelled != nil && window.attachedSheet == nil && reports == ["unlocked"], "reports \(reports)")
 composing.newLetter(nil)
 let sheetAtLock = window.attachedSheet as? ComposeSheet
+// A draft in both fields (docs/SWIFT_MEMORY_REVIEW.md): the lock wipes it
+// and the recipient's copy of the name before it ends the sheet.
+let draftFields = [sheetAtLock?.subject, sheetAtLock?.body].compactMap { $0 }
+for f in draftFields { _ = Array("Utkast".utf16).withUnsafeBufferPointer { f.model.insert($0) } }
+let recipientName = sheetAtLock?.recipient.name
+let drafted = draftFields.count == 2 && draftFields.allSatisfy { $0.model.text.length == 6 }
+    && (recipientName?.length ?? 0) > 0
 lock.lock(.manual)
 check("lock: the compose sheet ends without reporting a close, so nothing is read or laid out again while Brev locks",
       sheetAtLock != nil && window.attachedSheet == nil && reports == ["unlocked"] && session.brev.isLocked(),
       "reports \(reports)")
+check("lock: the compose sheet's draft (subject, body) and its copy of the recipient's name are zeroed (control: both typed, the name shown)",
+      drafted && sheetAtLock?.recipient.name == nil
+          && ([recipientName?.store].compactMap { $0 } + draftFields.map(\.model.text.store)).allSatisfy { s in
+              s.count == 0 && UnsafeRawBufferPointer(start: s.base, count: s.capacity).allSatisfy { $0 == 0 }
+          })
 
 // MARK: - A signature's prompt, with the U4 switch on and off
 
