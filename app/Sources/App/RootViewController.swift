@@ -23,12 +23,14 @@ final class RootViewController: NSViewController {
         view = BlankContentView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
     }
 
-    /// Replaces the current screen with `next`, at the root's size.
+    /// Replaces the current screen with `next`, at the root's size. Only
+    /// the mail screen has a toolbar (docs/UI_REDESIGN.md §2.1).
     func show(_ next: NSViewController) {
         if let old = child {
             old.view.removeFromSuperview()
             old.removeFromParent()
         }
+        (view.window as? MainWindow)?.setToolbar((next as? MailViewController)?.toolbar)
         addChild(next)
         next.view.frame = view.bounds
         next.view.autoresizingMask = [.width, .height]

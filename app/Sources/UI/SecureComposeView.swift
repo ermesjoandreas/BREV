@@ -19,8 +19,8 @@
 // by a click or the keys, and does not blink. Secure event input is on while
 // the field has focus in the key window of the active app (SecureInput). A
 // dead key waits without a mark; a named key drops it, and Delete removes
-// only it. The lines are laid out by TextLayout in the one content font
-// (GlyphFlush covers them) and drawn through the protected layer
+// only it. The lines are laid out by TextLayout in a content font (F4 for
+// the body, F1 for the rest; GlyphFlush covers them) and drawn through the protected layer
 // (ContentView, D-0034). The view is the document view of an NSScrollView:
 // the body wraps at the scroll view's width and grows down, the subject is
 // one line that grows sideways, and either scrolls to keep the caret in
@@ -53,7 +53,7 @@ class SecureComposeView: ContentView, NSTextInputTraits {
     /// keys that would change the text do nothing (the caret still moves).
     var isEditable = true
 
-    private let layout = TextLayout(font: ContentView.contentFont)
+    private let layout: TextLayout
     private let keys: KeyTranslator
     /// True from becomeFirstResponder until the field loses focus.
     private(set) var hasFocus = false
@@ -62,9 +62,13 @@ class SecureComposeView: ContentView, NSTextInputTraits {
     private var focusObservers: [NSObjectProtocol] = []
 
     /// A field of at most `maxBytes` UTF-8 bytes (Rust's limits()); the
-    /// body is `multiline`, the subject and an address are not.
+    /// body is `multiline`, the subject and an address are not. The body is
+    /// drawn in the letter font (F4, on its 22 pt lines), every other field
+    /// in F1 (docs/UI_REDESIGN.md §3.1).
     init(maxBytes: Int, multiline: Bool, charset: EditModel.Charset = .text) {
         model = EditModel(maxBytes: maxBytes, multiline: multiline, charset: charset)
+        layout = multiline ? TextLayout(font: ContentView.fontF4, lineHeight: ContentView.bodyLineHeight)
+            : TextLayout(font: ContentView.fontF1)
         keys = KeyTranslator(.current)!   // only a named layout can be missing
         super.init(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
         if #available(macOS 15.2, *) { writingToolsCoordinator = nil }
@@ -257,6 +261,13 @@ class SecureComposeView: ContentView, NSTextInputTraits {
     }
 
     // MARK: - Layout
+
+    /// Lays the text out again after `model` changed without a key (the
+    /// snapshot tool puts its fake text in through the model, never by
+    /// focus or key events).
+    func relayout() {
+        edited()
+    }
 
     override func resize(withOldSuperviewSize oldSize: NSSize) {
         fitSize()

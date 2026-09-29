@@ -139,8 +139,10 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
         return sheet
     }
 
-    private init(contact: ContactItem, session: Session, sampler: @escaping (NSWindow?) -> Sample,
-                 signer: @escaping Signer, limits: Limits) {
+    /// Made by `present`; the snapshot tool makes one to draw it offscreen,
+    /// never shown and never started.
+    init(contact: ContactItem, session: Session, sampler: @escaping (NSWindow?) -> Sample,
+         signer: @escaping Signer, limits: Limits) {
         subject = SecureComposeView(maxBytes: Int(limits.maxSubject), multiline: false)
         body = SecureComposeView(maxBytes: Int(limits.maxBody), multiline: true)
         self.contact = contact.id
@@ -401,7 +403,7 @@ final class ComposeSheet: HardenedWindow, ContentHolder {
 /// SecretText that the view owns (a copy of the contact's name), clipped at
 /// the view's edge, in the content font.
 final class RecipientView: ContentView {
-    private let layout = TextLayout(font: ContentView.contentFont)
+    private let layout = TextLayout(font: ContentView.fontF1)
     private(set) var name: SecretText?
 
     /// Shows `name` from now on. The view owns it and wipes it in `clear()`.

@@ -29,6 +29,14 @@ final class ConfirmSheet: HardenedWindow {
     /// pressed Slett alt (or Godta); every other ending (Avbryt, Escape, a
     /// lock) is false.
     static func present(on parent: NSWindow, _ kind: Kind = .reset, completion: @escaping (Bool) -> Void) {
+        let sheet = make(kind)
+        parent.beginSheet(sheet) { _ in completion(sheet.confirmed) }
+        Hardening.assertAllWindows()
+    }
+
+    /// The sheet, hardened, not shown: `present` shows it; the snapshot
+    /// tool draws it offscreen.
+    static func make(_ kind: Kind) -> ConfirmSheet {
         let sheet = ConfirmSheet(contentRect: NSRect(x: 0, y: 0, width: 440, height: 180),
                                  styleMask: [.titled], backing: .buffered, defer: false)
         Hardening.apply(sheet)
@@ -36,8 +44,7 @@ final class ConfirmSheet: HardenedWindow {
         let content = sheet.makeContent(kind)
         sheet.contentView = content
         sheet.setContentSize(content.fittingSize)
-        parent.beginSheet(sheet) { _ in completion(sheet.confirmed) }
-        Hardening.assertAllWindows()
+        return sheet
     }
 
     private func makeContent(_ kind: Kind) -> NSView {

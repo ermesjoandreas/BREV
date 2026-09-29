@@ -10,7 +10,12 @@
 // minimise button, disabled), so there is no Dock thumbnail of it
 // (docs/PHASE2_DESIGN.md §8.1). The window holds one RootViewController for
 // its whole life; screens change inside it, so the window never resizes on
-// lock or unlock.
+// lock or unlock. The mail screen brings a unified toolbar (MailToolbar);
+// adding or removing it puts the window's frame back, so the frame is the
+// same on every screen, and removing it clears the subtitle (a mailbox's
+// name), so the lock screen never keeps it. No .fullSizeContentView
+// (docs/UI_REDESIGN.md review 1): nothing lies under the toolbar, which
+// blurs what it covers.
 
 import AppKit
 
@@ -28,6 +33,9 @@ final class BlankContentView: NSView {
 final class MainWindow: HardenedWindow {
     /// Holds the current screen (onboarding, lock screen or mail).
     let root = RootViewController()
+
+    /// The smallest content size: the three panes' minimums and dividers.
+    static let minContentSize = NSSize(width: 880, height: 540)
 
     /// Creates the main window with all hardening flags applied.
     ///
@@ -51,11 +59,23 @@ final class MainWindow: HardenedWindow {
         isReleasedWhenClosed = false
 
         backgroundColor = NSColor.windowBackgroundColor
+        toolbarStyle = .unified
+        contentMinSize = Self.minContentSize
         // Set once, at the content size: setting a content view controller
         // resizes the window to its view (NSWindow.h), so it never changes.
         root.view.frame = NSRect(origin: .zero, size: contentSize)
         contentViewController = root
         setContentSize(contentSize)
+    }
+
+    /// Shows `toolbar` (the mail screen's) or none, with the frame kept. A
+    /// removed toolbar takes the subtitle with it.
+    func setToolbar(_ next: NSToolbar?) {
+        guard toolbar !== next else { return }
+        let kept = frame
+        toolbar = next
+        if next == nil { subtitle = "" }
+        setFrame(kept, display: false)
     }
 
     /// Custom windows must opt in explicitly to receive key events.

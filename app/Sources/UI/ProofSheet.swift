@@ -21,6 +21,13 @@ final class ProofSheet: HardenedWindow {
 
     /// Shows the detail of `proof` on `parent`.
     static func present(on parent: NSWindow, _ proof: Proof) {
+        parent.beginSheet(make(proof))
+        Hardening.assertAllWindows()
+    }
+
+    /// The sheet, hardened, not shown: `present` shows it; the snapshot
+    /// tool draws it offscreen.
+    static func make(_ proof: Proof) -> ProofSheet {
         let sheet = ProofSheet(contentRect: NSRect(x: 0, y: 0, width: 440, height: 200),
                                styleMask: [.titled], backing: .buffered, defer: false)
         Hardening.apply(sheet)
@@ -28,8 +35,7 @@ final class ProofSheet: HardenedWindow {
         let content = sheet.makeContent(proof)
         sheet.contentView = content
         sheet.setContentSize(content.fittingSize)
-        parent.beginSheet(sheet)
-        Hardening.assertAllWindows()
+        return sheet
     }
 
     /// The detail's lines, in order (docs/AUTHORSHIP.md §6).

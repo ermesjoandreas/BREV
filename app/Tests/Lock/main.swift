@@ -20,15 +20,18 @@
 //   part is skipped, and says so, if this process may not post events;
 // - a successful unlock that LockController discards (Brev not the active
 //   app, or a lock meanwhile) leaves Rust locked (design §5.4 step 3);
-// - the lock sequence on the mail screen wipes it, the contact header's
-//   addresses and codes included, zeroes every content view's pixel buffers
+// - the mail screen opens no letter by itself (docs/UI_REDESIGN.md §2.4): a
+//   letter opens only after a human's ↓ in the message list;
+// - the lock sequence on the mail screen wipes it, the contact bar's
+//   address and code and the reading header included, zeroes every content
+//   view's pixel buffers
 //   in place, locks Rust and shows the lock screen (design §8.4; D-0034;
 //   docs/PHASE3_DESIGN.md §6.4);
 // - the lock sequence on the address page wipes the text typed at its
 //   invite step, and at its address step (the second user's code opened)
 //   the typed address and the inviter's address and code, and zeroes their
 //   pixels (docs/PHASE3_DESIGN.md §6.5, docs/PHASE4_DESIGN.md §6.1);
-// - a replaced line of the contact header has its pixels zeroed, and a
+// - a replaced line of the contact bar has its pixels zeroed, and a
 //   lock ends a compose sheet without reporting a close, so AppDelegate
 //   reads nothing again while Brev locks (WP5 review), after zeroing its
 //   draft and its copy of the recipient's name (docs/SWIFT_MEMORY_REVIEW.md);
@@ -52,9 +55,10 @@
 //   sample with sudo running, through LockController's `observeNow`, has
 //   Rust lock at once and runs the lock sequence with the notice for the
 //   lock screen; the received letter on the mail screen carries its badge
-//   («Skrevet i Brev · klasse C»: a software key, which the test archive
-//   sends in, allow-software-keys) and the sent one none, the badges are
-//   all that accessibility sees of the letter pane, and the badge's detail
+//   in the reading header («Skrevet i Brev · klasse C»: a software key,
+//   which the test archive sends in, allow-software-keys), the letter pane
+//   offers accessibility nothing and the reading header only the badge's
+//   fixed title, and the badge's detail
 //   ends with «Appen er ikke bekreftet av Apple». Rust gets a fixed clean
 //   sample everywhere else, so a sudo in a terminal cannot fail the probe.
 // The mail screen lives in a MainWindow that is never ordered onto the
@@ -365,6 +369,16 @@ let mail = MailViewController(session: session)
 window.root.show(mail)
 mail.start()
 mail.view.layoutSubtreeIfNeeded()
+check("the mail screen opens no letter by itself: the first contact's list, the reading pane empty",
+      mail.messageList.count == 2 && mail.messageList.selected == nil && mail.letters.isEmpty && mail.proofs.isEmpty)
+/// ↓ as a human's key (source PID 0), handed to `view`.
+func humanDown(_ view: NSView) {
+    guard let cg = CGEvent(keyboardEventSource: nil, virtualKey: 125, keyDown: true) else { return }
+    cg.setIntegerValueField(.eventSourceUnixProcessID, value: 0)
+    NSEvent(cgEvent: cg).map(view.keyDown)
+}
+humanDown(mail.messageList)   // the newest letter: the peer's answer
+mail.view.layoutSubtreeIfNeeded()
 let views = all(ContentView.self, in: mail.view)
 let inSight = views.filter { !$0.visibleRect.intersection($0.bounds).isEmpty }
 inSight.forEach { $0.updateLayer() }   // the display pass: each draws into its pool
@@ -374,7 +388,7 @@ check("control: the contacts, threads and letters are pixels in their buffers",
       drawn.contains { $0 is SecureListView } && drawn.contains { $0 is SecureTextView },
       "\(drawn.count) of \(inSight.count) views in sight drew")
 let header = mail.header
-check("control: the header shows both addresses and codes, as pixels in their buffers",
+check("control: the contact bar shows the address and code, as pixels in their buffers",
       [header.addresses, header.codes].allSatisfy { (v: ContactTextView) in
           v.lines.allSatisfy { $0 != nil } && drawn.contains { $0 === v }
       }
@@ -398,15 +412,16 @@ check("Hand's sample of no window sets neither window setting",
       !EnvironmentProbe.sample(for: nil).sharingNone)
 // The badge (docs/AUTHORSHIP.md §6): the newest thread is the peer's answer.
 let pane = all(LetterStackView.self, in: mail.view).first
-let badges = pane?.badges ?? []
-let badgeTitles = badges.map { $0?.title }
+let badge = mail.readingHeader.badge
 let verifiedC = L10n.badge(verified: true, classCode: 3)
-check("the received letter carries its badge, verified in class C (a software key); a sent letter has none",
-      badgeTitles == [verifiedC] && mail.proofs.count == 1 && mail.proofs[0]?.verified == true
-          && mail.proofs[0]?.class == 3,
-      "\(badgeTitles)")
-check("accessibility sees the badges of the letter pane and nothing else in it",
-      (pane?.accessibilityChildren() as? [NSButton]).map { $0.map(\.title) } == [verifiedC])
+check("the received letter carries its badge in the reading header, verified in class C (a software key)",
+      badge?.title == verifiedC && badge?.isHidden == false && mail.proofs.count == 1
+          && mail.proofs[0]?.verified == true && mail.proofs[0]?.class == 3,
+      "\(String(describing: badge?.title))")
+let headerButtons = all(NSButton.self, in: mail.readingHeader).filter { !$0.isHidden }.map(\.title)
+check("accessibility sees nothing of the letter pane, and of the reading header only the badge's fixed text",
+      (pane?.accessibilityChildren() ?? []).isEmpty && headerButtons == [verifiedC]
+          && all(ContentView.self, in: mail.readingHeader).allSatisfy { !$0.isAccessibilityElement() })
 let detail = mail.proofs.first.flatMap { $0 }.map(ProofSheet.lines) ?? []
 check("the badge's detail lists what the sender's app reported, and ends with «Appen er ikke bekreftet av Apple»",
       detail.last == L10n.proofAttest && detail.contains(L10n.proofKey(L10n.proofNo))
@@ -421,8 +436,9 @@ check("lock: every pixel buffer of every content view is zero, also those of let
 check("lock: the lists and letters are wiped",
       all(SecureListView.self, in: mail.view).allSatisfy { $0.count == 0 }
           && all(LetterStackView.self, in: mail.view).allSatisfy { $0.isEmpty })
-check("lock: the header's addresses and codes are wiped",
-      all(ContactTextView.self, in: header).allSatisfy { $0.lines.allSatisfy { $0 == nil } } && header.newCode == nil)
+check("lock: the contact bar's address and code, and the reading header's subject and name, are wiped",
+      (all(ContactTextView.self, in: header) + all(ContactTextView.self, in: mail.readingHeader))
+          .allSatisfy { $0.lines.allSatisfy { $0 == nil } } && header.newCode == nil)
 check("lock: Rust is locked", session.brev.isLocked())
 check("lock: the lock screen is shown", lockScreens == 1, "\(lockScreens)")
 
@@ -514,16 +530,16 @@ composing.view.layoutSubtreeIfNeeded()
 let headerLines = [composing.header.addresses, composing.header.codes]
 headerLines.forEach { $0.updateLayer() }
 let linePools = headerLines.flatMap { $0.pool }
-check("control: the header's line 2 (the contact's address and code) is pixels in its buffers",
-      headerLines.allSatisfy { $0.lines[1] != nil } && linePools.contains(where: hasPixels))
+check("control: the contact bar (the contact's address and code) is pixels in its buffers",
+      headerLines.allSatisfy { $0.lines[0] != nil } && linePools.contains(where: hasPixels))
 // What a new selection, an added contact, an accepted key or a closed
-// compose sheet does to the header: line 2 is replaced.
+// compose sheet does to the bar: its lines are replaced.
 composing.reloadContacts(selecting: nil)
-check("a replaced header line has its pixels zeroed in every buffer of the pool, until the next frame",
-      headerLines.allSatisfy { $0.lines[1] != nil } && !linePools.contains(where: hasPixels),
+check("a replaced bar line has its pixels zeroed in every buffer of the pool, until the next frame",
+      headerLines.allSatisfy { $0.lines[0] != nil } && !linePools.contains(where: hasPixels),
       "\(linePools.filter(hasPixels).count) of \(linePools.count) buffers")
 headerLines.forEach { $0.updateLayer() }
-check("control: the next frame draws the header again", headerLines.allSatisfy { $0.pool.contains(where: hasPixels) })
+check("control: the next frame draws the bar again", headerLines.allSatisfy { $0.pool.contains(where: hasPixels) })
 
 // AppDelegate's compose wiring: after a close it reads the contacts, the
 // subjects and the letters again. `reports` notes whether Brev was unlocked
@@ -534,7 +550,7 @@ composing.onNewLetter = { [weak composing] contact in
     ComposeSheet.present(on: window, to: contact, session: session, keyOrigin: EnvironmentProbe.origin(of: identity),
                          sampler: { _ in clean }, signer: { _, _, done in done(.failure(BrevError.Signing)) }) { thread in
         reports.append(lock.state.unlocked ? "unlocked" : "locking")
-        if let thread { composing?.showSent(thread: thread, contact: id) } else { composing?.reloadContacts(selecting: id) }
+        if let thread { composing?.showSent(thread: thread, contact: id) } else { composing?.reloadContacts(selecting: nil) }
     }
 }
 composing.newLetter(nil)

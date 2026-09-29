@@ -78,12 +78,30 @@
 "address.invite.body" = "Du trenger en invitasjonskode fra en som bruker Brev. Lim den inn med ⌘V.";
 "address.invite.next" = "Fortsett";
 
-/* The mail window. %@ is a date from DateFormatter (nb): metadata, never content. */
-"mail.new" = "Nytt brev";
-"mail.lock" = "Lås";
-"mail.nothreads" = "Ingen brev ennå";
+/* The mail window (docs/UI_REDESIGN.md §2). mail.sent and mail.received head each letter of an older thread with more than one letter; %@ is a date from DateFormatter (nb): metadata, never content. */
 "mail.sent" = "Sendt %@";
 "mail.received" = "Mottatt %@";
+
+/* The sidebar: the two mailboxes, «Legg til kontakt» (opens Kontakter) and the line under «Kontakter» while there are none. The toolbar's two items. */
+"mailbox.inbox" = "Innboks";
+"mailbox.sent" = "Sendt";
+"sidebar.add" = "Legg til kontakt";
+"sidebar.nocontacts" = "Ingen kontakter ennå";
+"toolbar.new" = "Nytt brev";
+"toolbar.lock" = "Lås";
+
+/* The message list: empty states, the direction of a contact's letter, and a received letter's class (%@ is A, B or C). */
+"list.empty.inbox" = "Ingen brev";
+"list.empty.sent" = "Ingen sendte brev";
+"list.empty.contact" = "Ingen brev med denne kontakten";
+"list.received" = "Mottatt";
+"list.sent" = "Sendt";
+"chip.class" = "Klasse %@";
+
+/* The reading pane: no letter open, and the label before the other party's name (drawn in the protected layer). */
+"reading.none" = "Ingen brev valgt";
+"reading.from" = "Fra:";
+"reading.to" = "Til:";
 
 /* The compose sheet. */
 "compose.to" = "Til:";
@@ -150,6 +168,12 @@
 
 /* Kontakter (docs/PHASE4_DESIGN.md §6.1, §6.2): the button on the mail window and the sheet it opens. The own address, an invite code, an inviter's address and code, and the field are drawn only in the protected layer; Kopier adressen min and Kopier koden put the address or the code on the pasteboard, which Brev empties again after 60 seconds and when it quits. A code is made with one click, without Touch ID. */
 "contacts.title" = "Kontakter";
+/* The Kontakter sheet's three groups and its labels (docs/UI_REDESIGN.md §2.7); «Sikkerhetskode» also labels the code in the contact bar. */
+"contacts.section.me" = "Deg";
+"contacts.section.invite" = "Inviter noen";
+"contacts.section.add" = "Legg til kontakt";
+"contacts.address" = "Adresse";
+"contacts.code" = "Sikkerhetskode";
 "contacts.me" = "Din adresse:";
 "contacts.copyme" = "Kopier adressen min";
 "contacts.field" = "Adresse eller invitasjonskode:";
@@ -179,9 +203,7 @@
 "request.accept" = "Godta";
 "request.decline" = "Avslå";
 
-/* The contact header (docs/PHASE3_DESIGN.md §6.3, §6.5): fixed labels beside the addresses and identity codes, which are drawn in the protected layer. Phase 4 (docs/PHASE4_DESIGN.md §5.2, §6.1, owner answer 6): the contact's state, and Blokker, one click that stops letters both ways. */
-"header.me" = "Du:";
-"header.code" = "Sikkerhetskode:";
+/* The contact bar (docs/PHASE3_DESIGN.md §6.3, §6.5; docs/UI_REDESIGN.md §2.4): fixed labels beside the address and identity code, which are drawn in the protected layer. Phase 4 (docs/PHASE4_DESIGN.md §5.2, §6.1, owner answer 6): the contact's state, and Blokker, one click that stops letters both ways. */
 "contact.waiting" = "Venter på svar";
 "contact.verified" = "Bekreftet med invitasjon";
 "contact.blocked" = "Blokkert";

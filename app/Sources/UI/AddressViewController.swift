@@ -142,7 +142,7 @@ final class AddressViewController: NSViewController, ContentHolder {
         self.addressScroll = addressScroll
         inviterView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            inviterView.widthAnchor.constraint(equalToConstant: ContactHeaderView.codeWidth),
+            inviterView.widthAnchor.constraint(equalToConstant: ContactBar.codeWidth),
             inviterView.heightAnchor.constraint(equalToConstant: 2 * ContactTextView.rowHeight),
         ])
         let inviter = NSStackView(views: [InterfaceText(L10n.inviteFrom, width: 90, alignment: .right), inviterView])

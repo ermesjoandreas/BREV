@@ -48,7 +48,7 @@ final class ContactSheet: HardenedWindow, ContentHolder {
     private static let log = Logger(subsystem: "no.brev.app", category: "contact")
     private static let width: CGFloat = 600
     private static let margin: CGFloat = 20
-    private static let codeWidth = ContactHeaderView.codeWidth
+    private static let codeWidth = ContactBar.codeWidth
 
     let field = ContactField()
     /// Row 0: the own address.
@@ -112,7 +112,9 @@ final class ContactSheet: HardenedWindow, ContentHolder {
         return sheet
     }
 
-    private init(session: Session) {
+    /// Made by `present`; the snapshot tool makes one to draw it offscreen,
+    /// never shown.
+    init(session: Session) {
         self.session = session
         super.init(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 420), styleMask: [.titled],
                    backing: .buffered, defer: false)
@@ -264,7 +266,8 @@ final class ContactSheet: HardenedWindow, ContentHolder {
         }
     }
 
-    private func made(_ result: Result<SecretBytes, Error>) {
+    /// A code from Lag invitasjon (the snapshot tool hands it one directly).
+    func made(_ result: Result<SecretBytes, Error>) {
         switch result {
         case .success(let made):
             clearCode()

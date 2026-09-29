@@ -1,8 +1,12 @@
 // LetterStackView.swift — the letters of one thread, one under the other.
 //
-// Upholds CLAUDE.md §1.2, §1.10 and §3.2 (docs/PHASE2_DESIGN.md §6.4, §7.2).
-// The flipped document view of the letter pane's NSScrollView; scrolling is
-// the stock scroll view's. Each letter is a header ("Sendt …" or
+// Upholds CLAUDE.md §1.2, §1.10 and §3.2 (docs/PHASE2_DESIGN.md §6.4, §7.2;
+// docs/UI_REDESIGN.md §2.5). The flipped document view of the reading
+// pane's NSScrollView; scrolling is the stock scroll view's. A thread holds
+// one letter since Phase 3: then the pane shows only its body (a
+// SecureTextView), and the ReadingHeaderView above the pane shows the
+// subject, the name, the date and the badge. An older thread with more
+// letters shows each after a hairline and a header ("Sendt …" or
 // "Mottatt …" and a date: metadata, drawn by an OpaqueView) above a
 // SecureTextView with the body. A received letter's header has its badge at
 // the right (docs/AUTHORSHIP.md §6): «Skrevet i Brev · klasse A» or «Ikke
@@ -26,9 +30,9 @@ final class LetterStackView: OpaqueView {
         var badge: String? = nil
     }
 
-    static let top: CGFloat = 12
-    static let headerHeight: CGFloat = 24
-    static let gap: CGFloat = 20
+    static let top: CGFloat = 20
+    static let headerHeight: CGFloat = 28
+    static let gap: CGFloat = 24
 
     /// A human pressed the badge of the letter at this index.
     var onBadge: (Int) -> Void = { _ in }
@@ -43,13 +47,15 @@ final class LetterStackView: OpaqueView {
     /// Replaces the letters shown (the old bodies are wiped first).
     func show(_ new: [Letter]) {
         clear()
+        let single = new.count == 1
         for (i, l) in new.enumerated() {
             let header = LetterHeaderView(l.header)
             let body = SecureTextView()
             body.show(l.body)
+            header.isHidden = single
             addSubview(header)
             addSubview(body)
-            let badge = l.badge.map { title -> HumanButton in
+            let badge = (single ? nil : l.badge).map { title -> HumanButton in
                 let b = HumanButton(title: title, target: self, action: #selector(badgePressed(_:)))
                 b.bezelStyle = .inline
                 b.controlSize = .small
@@ -99,13 +105,13 @@ final class LetterStackView: OpaqueView {
         let width = visible.width
         var y = Self.top
         for l in letters {
-            l.header.frame = NSRect(x: 0, y: y, width: width, height: Self.headerHeight)
+            l.header.frame = NSRect(x: 0, y: y, width: width, height: l.header.isHidden ? 0 : Self.headerHeight)
             if let badge = l.badge {
                 let size = badge.frame.size
                 badge.frame = NSRect(x: max(0, width - SecureTextView.inset - size.width),
                                      y: y + (Self.headerHeight - size.height) / 2, width: size.width, height: size.height)
             }
-            y += Self.headerHeight
+            y += l.header.frame.height
             let h = ceil(l.body.height(forWidth: width))
             l.body.frame = NSRect(x: 0, y: y, width: width, height: h)
             y += h + Self.gap
