@@ -239,8 +239,8 @@ If any check fails, do not open the app, and report it (`docs/SECURITY.md`
 
 What these checks prove: the app was signed by team `AV26DNQ5SC`, Apple
 scanned it, and nobody changed it since. They do not prove that the binary
-was built from the published source. That needs a reproducible build, which
-is a Phase 5 item not yet done.
+was built from the published source. That needs a reproducible build:
+`docs/REPRODUCIBLE_BUILD.md` (not yet usable for a release; its §5).
 
 ## 7. Open for the owner
 
