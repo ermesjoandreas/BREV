@@ -45,7 +45,8 @@
 // docs/VERIFY.md V67, V68, V69, V72, V73, V79): the host starts
 // unregistered; its contact ($ADDR_B), an inviter ($ADDR_C) and two askers
 // ($ADDR_D, $ADDR_E) register with root invites. ContactPasteboard uses a
-// named pasteboard (no pasteboard alert, the user's own untouched), with its
+// named pasteboard (no pasteboard alert, the user's own untouched) that
+// records how each write began and what the text was set beside, with its
 // self-clear shortened to 1.5 s; "another app's copy" is this host writing
 // to that pasteboard. The address page's invite step (the real
 // AddressViewController, signing with this host's software key) → ⌘V of a
@@ -58,11 +59,13 @@
 // ContactSheet: no responder answers copy:, cut:, paste:, pasteAsPlainText:
 // or selectAll: → Kopier adressen min, Lag invitasjon and Kopier koden
 // refuse the same → Kopier adressen min (called as a human's press): the
-// address, concealed and transient, on the pasteboard → another app's copy
-// survives the self-clear → Lag invitasjon: a code on two lines → Kopier
-// koden → the self-clear empties the pasteboard → ⌘V of $ADDR_C's code with
-// one fingerprint character changed: InviteMismatch after one
-// /v1/invites/open, no redeem (V77) → ⌘V of the right code: «Invitert av:»
+// address, concealed and transient, on the pasteboard (for this Mac only,
+// the text set after both markers; the same for Kopier koden) → another
+// app's copy survives the self-clear → Lag invitasjon: a code on two lines
+// → Kopier koden → the self-clear empties the pasteboard → ⌘V of
+// $ADDR_C's code with one fingerprint character changed: InviteMismatch
+// after one /v1/invites/open, no redeem (V77) → ⌘V of the right code:
+// «Invitert av:»
 // → Legg til and Godta invitasjonen refuse the same → ready → (hold) →
 // Godta invitasjonen redeems it («Bekreftet med invitasjon») → Kontakter,
 // $ADDR_B typed, Return asks it (request.sent) → Escape («Venter på svar»)
@@ -516,7 +519,53 @@ var relayProcess: Process?
 /// The contacts mode's pasteboard: a named one (ContactPasteboard.board),
 /// so no pasteboard alert can ask and the user's own is never touched;
 /// released at the end.
-var namedBoard: NSPasteboard?
+var namedBoard: RecordingBoard?
+
+/// A named pasteboard that records how each new contents began (a clear,
+/// or a prepare with its options) and which types it held each time plain
+/// text was set: ContactPasteboard's write must be for this Mac only (no
+/// Universal Clipboard) and set the text after both markers (WP5 review).
+final class RecordingBoard: NSPasteboard {
+    private(set) var starts: [String] = []
+    private(set) var beforeText: [Set<String>] = []
+
+    func reset() {
+        starts = []
+        beforeText = []
+    }
+
+    /// Since `reset()`: one write, begun with prepareForNewContents(with:
+    /// .currentHostOnly), whose plain text was set once, with both markers
+    /// already there.
+    var wroteHostOnlyMarkersFirst: Bool {
+        let markers = Set(ContactPasteboard.markers.map(\.rawValue))
+        return starts == ["hostOnly"] && beforeText.count == 1 && beforeText[0].isSuperset(of: markers)
+    }
+
+    @discardableResult
+    override func clearContents() -> Int {
+        starts.append("clear")
+        return super.clearContents()
+    }
+
+    @discardableResult
+    override func prepareForNewContents(with options: NSPasteboard.ContentsOptions = []) -> Int {
+        starts.append(options == .currentHostOnly ? "hostOnly" : "prepare \(options.rawValue)")
+        return super.prepareForNewContents(with: options)
+    }
+
+    @discardableResult
+    override func declareTypes(_ newTypes: [NSPasteboard.PasteboardType], owner newOwner: Any?) -> Int {
+        starts.append("declare")
+        return super.declareTypes(newTypes, owner: newOwner)
+    }
+
+    @discardableResult
+    override func setData(_ data: Data?, forType dataType: NSPasteboard.PasteboardType) -> Bool {
+        if dataType == .string { beforeText.append(Set((types ?? []).map(\.rawValue))) }
+        return super.setData(data, forType: dataType)
+    }
+}
 func finish() -> Never {
     relayProcess?.terminate()
     relayProcess?.waitUntilExit()
@@ -1277,7 +1326,10 @@ let editActions = ["copy:", "cut:", "paste:", "pasteAsPlainText:", "selectAll:"]
 /// host's software key.
 func contactsStart() {
     if scanning { print("skip --scan: --contacts shows no letters") }
-    let board = NSPasteboard(name: NSPasteboard.Name("no.brev.viewhost.\(getpid())"))
+    guard let board = RecordingBoard.withUniqueName() as? RecordingBoard else {
+        check("contacts: a named pasteboard that records the writes", false)
+        finish()
+    }
     namedBoard = board
     ContactPasteboard.board = board
     ContactPasteboard.lifetime = boardLifetime
@@ -1445,9 +1497,13 @@ func contactSheetStage() {
     later(0.5) {
         check("contact sheet: Kopier adressen min, Lag invitasjon and Kopier koden refuse a click made in code and an AX press: no pasteboard write, no /v1/invites, no code",
               refused && boardCount() == count && relayTrace.count("/v1/invites") == invites && sheet.code == nil)
+        namedBoard?.reset()
         sheet.copyAddress(nil)   // as a human's press of Kopier adressen min
         check("Kopier adressen min: the pasteboard holds the own address as plain text, concealed and transient",
               boardTypes() == writtenTypes && boardText() == Array(addrA.utf8), "\(boardTypes())")
+        check("Kopier adressen min: written for this Mac only (no Universal Clipboard), the text after both markers",
+              namedBoard?.wroteHostOnlyMarkersFirst == true,
+              "\(namedBoard?.starts ?? []) \(namedBoard?.beforeText ?? [])")
         copyElsewhere(Array("annen app".utf8))
         later(boardLifetime + 0.5) {
             check("self-clear: after the lifetime, a later copy by another app is left alone",
@@ -1460,9 +1516,13 @@ func contactSheetStage() {
                       made && relayTrace.count("/v1/invites", 201) == invites + 1 && me.signatures == 1
                           && isInvite(code, of: addrA, identity: ownCode(session))
                           && holds(sheet.codeView.lines[0], code[..<cut]) && holds(sheet.codeView.lines[1], code[cut...]))
+                namedBoard?.reset()
                 sheet.copyCode(nil)   // as a human's press of Kopier koden
                 check("Kopier koden: the pasteboard holds the code as plain text, concealed and transient",
                       boardTypes() == writtenTypes && boardText() == code)
+                check("Kopier koden: written for this Mac only (no Universal Clipboard), the text after both markers",
+                      namedBoard?.wroteHostOnlyMarkersFirst == true,
+                      "\(namedBoard?.starts ?? []) \(namedBoard?.beforeText ?? [])")
                 checkAX("contact sheet with a code", [window, sheet], control: L10n.contactsTitle)
                 checkProtected("contact sheet: the own address and the code", [sheet.ownAddress, sheet.codeView])
                 later(boardLifetime + 0.5) {

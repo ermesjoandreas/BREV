@@ -8,12 +8,14 @@
 // named outside ContactField, ContactSheet and AppDelegate's quit hook).
 // `write` has two callers in ContactSheet: Kopier adressen min (the own
 // address) and Kopier koden (a code from `createInvite`). It clears the
-// pasteboard, then sets the bytes as plain text with nspasteboard.org's
-// concealed and transient markers beside them (clipboard managers that honour
-// them neither show nor keep the entry), and remembers the change count. The
-// self-clear (the owner's rule, 2026-09-29): 60 s after the write, and when
-// Brev quits, the pasteboard is cleared if its change count is still the one
-// Brev's write left, so whatever another app copied since is never touched.
+// pasteboard for this Mac only (no Universal Clipboard to other devices),
+// sets nspasteboard.org's concealed and transient markers (clipboard managers
+// that honour them neither show nor keep the entry), then the bytes as plain
+// text, so the text is never there without the markers, and remembers the
+// change count. The self-clear (the owner's rule, 2026-09-29): 60 s after
+// the write, and when Brev quits, the pasteboard is cleared if its change
+// count is still the one Brev's write left, so whatever another app copied
+// since is never touched.
 // Not at a lock: Brev locks as soon as another app is active, which would
 // clear a code before it can be pasted there. `read` is for ContactField's
 // ⌘V only: the plain text's bytes, at most EditModel.maxPaste, copied into a
@@ -45,13 +47,17 @@ enum ContactPasteboard {
     static func write(_ bytes: SecretBytes) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard bytes.count > 0 else { return }
-        board.clearContents()
+        // Clears it, as clearContents does, and keeps the entry on this Mac:
+        // Universal Clipboard does not offer it to the user's other devices.
+        _ = board.prepareForNewContents(with: .currentHostOnly)
+        // The markers first: only the clear moves the change count, so a
+        // reader that looks in between must never find the text without them.
+        for m in markers { _ = board.setData(Data(), forType: m) }
         // A view of Brev's buffer; the pasteboard copies it before this returns.
         bytes.withBytes { b in
             _ = board.setData(Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: b.baseAddress!), count: b.count,
                                    deallocator: .none), forType: .string)
         }
-        for m in markers { _ = board.setData(Data(), forType: m) }
         written = board.changeCount
         timer?.invalidate()
         let clear = Timer(timeInterval: lifetime, repeats: false) { _ in clearOwn() }

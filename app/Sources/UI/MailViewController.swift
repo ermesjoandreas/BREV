@@ -590,6 +590,8 @@ final class MailViewController: NSViewController, ContentHolder, MailActions, NS
     /// Blokker on the selected contact: one click, no Touch ID
     /// (`blockContact` on `Session.net`). The local block holds at once; if
     /// the relay was not told, net.error shows and Blokker tells it again.
+    /// Rust also keeps that sealed, and every sync tells the relay until it
+    /// answers, so a lock (which forgets `blockFailed`) loses nothing.
     func blockSelected() {
         guard !blocking, !composing, let session, let contact = selectedContact else { return }
         let id = contact.id, generation = syncGeneration

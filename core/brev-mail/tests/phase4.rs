@@ -6,7 +6,8 @@
 //! (`invite_with_wrong_fingerprint_is_rejected`,
 //! `a_stranger_cannot_reach_an_inbox`), *Blokker* (owner answer 6), and the
 //! deferred WP2 review note: a blocked peer cannot get an event into the
-//! blocker's queue.
+//! blocker's queue; and the WP5 review's: a block the relay missed is told
+//! by the next sync, also after a lock.
 //!
 //! Where a test needs the relay to lie (or a same-user program to edit its
 //! file, CLAUDE.md §2), it writes the relay's file through a second
@@ -908,4 +909,54 @@ fn a_blocked_peer_cannot_reach_the_blockers_queue() {
     assert_eq!(events_at(&relay, "anna"), 1);
     assert!(a.b.sync().unwrap().contacts_changed);
     assert_eq!(state(&a, "carl"), (false, false, false));
+}
+
+/// The WP5 review: a block the relay did not hear of (it was down) is not
+/// lost at a lock. The sealed flag holds at once, and the next sync that
+/// reaches the relay tells it, after the lock too, and only once. Until
+/// then the relay still stores B's letters and A's flag drops them; after
+/// it, B's letters are refused.
+#[test]
+fn a_block_the_relay_missed_is_told_by_the_next_sync() {
+    let mut relay = Relayed::new();
+    let (a, b, b_at_a, a_at_b) = pair(&relay);
+    relay.stop();
+    assert!(matches!(
+        a.b.block_contact(b_at_a.clone()),
+        Err(BrevError::Network)
+    ));
+    assert!(matches!(a.b.sync(), Err(BrevError::Network)));
+    relay.restart();
+    assert_eq!(state(&a, "bert"), (false, true, true), "the flag holds");
+    b.send(&a_at_b, b"s", b"the relay was not told");
+    assert_eq!(relay.waiting(), 1, "not told: the relay stores it");
+
+    a.b.lock();
+    common::unlock_active(&a.b, &a.dek);
+    assert_eq!(a.b.sync().unwrap().letters, 0, "the flag drops it");
+    assert_eq!(relay.waiting(), 0);
+    let link: i64 = relay
+        .sql()
+        .query_row(
+            "SELECT state FROM links WHERE owner = ?1 AND peer = ?2",
+            [relay.id_of("anna"), relay.id_of("bert")],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(link, 2, "declined: the sync told the relay");
+    assert!(matches!(
+        b.b.prepare_send(a_at_b.clone()),
+        Err(BrevError::NotApproved)
+    ));
+    b.b.force_ticket_for_test(a_at_b.clone()).unwrap();
+    assert!(matches!(
+        sign_and_submit(&b, &a_at_b, b"after"),
+        Err(BrevError::NotApproved)
+    ));
+    assert_eq!(relay.waiting(), 0);
+
+    // Told once: a later sync asks only for the events and the inbox.
+    let before = relay.requests();
+    a.b.sync().unwrap();
+    assert_eq!(relay.requests() - before, 2);
 }

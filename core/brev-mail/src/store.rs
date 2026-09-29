@@ -53,7 +53,7 @@ CREATE TABLE contacts (
     bundle     BLOB NOT NULL,              -- ct: pinned bundle
     address    BLOB NOT NULL,              -- ct: the address, also shown as the name
     pending    BLOB NOT NULL,              -- ct: empty, or the other bundle the relay returned
-    flags      BLOB NOT NULL               -- ct: one byte: 1 takes my letters, 2 key verified by an invite, 4 blocked
+    flags      BLOB NOT NULL               -- ct: one byte: 1 takes my letters, 2 key verified by an invite, 4 blocked, 8 relay not yet told of the block
 ) STRICT;
 CREATE TABLE invites (
     id         BLOB PRIMARY KEY,           -- pt: 16 random bytes, local
@@ -102,6 +102,10 @@ pub(crate) const VERIFIED: u8 = 2;
 /// `contacts.flags`: the user blocked the contact (*Blokker*): nothing is
 /// sent to it and its letters are dropped.
 pub(crate) const BLOCKED: u8 = 4;
+/// `contacts.flags`, beside `BLOCKED`: the relay has not yet answered the
+/// block (`/v1/block`), so every sync tells it again until it does. Sealed,
+/// so a lock does not forget it (WP5 review).
+pub(crate) const BLOCK_UNTOLD: u8 = 8;
 
 /// Days a local invite is kept after the day it was made: the relay's
 /// default life (docs/PHASE4_DESIGN.md §4.4).
@@ -636,6 +640,28 @@ impl Core {
             params![sealed, &contact.0[..]],
         )?;
         Ok(true)
+    }
+
+    /// The blocked contacts the relay has not answered yet (`BLOCKED` and
+    /// `BLOCK_UNTOLD`), each with the identity id of its pinned key: the
+    /// peer `/v1/block` names.
+    pub(crate) fn untold_blocks(&self) -> Result<Vec<(ContactId, IdentityId)>, Error> {
+        let ids: Vec<[u8; 16]> = {
+            let mut stmt = self
+                .db()
+                .prepare("SELECT id FROM contacts ORDER BY rowid")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let mut out = Vec::new();
+        for id in ids {
+            let contact = ContactId(id);
+            let untold = BLOCKED | BLOCK_UNTOLD;
+            if self.contact_flags(contact)? & untold == untold {
+                out.push((contact, self.contact_bundle(contact)?.id()));
+            }
+        }
+        Ok(out)
     }
 
     /// Pins `bundle` as the contact at `address` with `flags` added, for a

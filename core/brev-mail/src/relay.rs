@@ -362,6 +362,11 @@ impl Mailbox<'_> {
     pub(crate) fn answer(&self, peer: &[u8; 32], yes: bool) -> Result<(), NetError> {
         self.relay.answer(&self.caller, &self.token, peer, yes)
     }
+
+    /// This identity's block of `peer` (*Blokker*), told again.
+    pub(crate) fn block(&self, peer: &[u8; 32]) -> Result<(), NetError> {
+        self.relay.block(&self.caller, &self.token, peer)
+    }
 }
 
 impl Transport for Mailbox<'_> {

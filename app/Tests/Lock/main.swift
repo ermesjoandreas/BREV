@@ -25,8 +25,9 @@
 //   in place, locks Rust and shows the lock screen (design §8.4; D-0034;
 //   docs/PHASE3_DESIGN.md §6.4);
 // - the lock sequence on the address page wipes the text typed at its
-//   invite step and zeroes its pixels (docs/PHASE3_DESIGN.md §6.5,
-//   docs/PHASE4_DESIGN.md §6.1);
+//   invite step, and at its address step (the second user's code opened)
+//   the typed address and the inviter's address and code, and zeroes their
+//   pixels (docs/PHASE3_DESIGN.md §6.5, docs/PHASE4_DESIGN.md §6.1);
 // - a replaced line of the contact header has its pixels zeroed, and a
 //   lock ends a compose sheet without reporting a close, so AppDelegate
 //   reads nothing again while Brev locks (WP5 review);
@@ -305,6 +306,8 @@ guard unlockRust() else {
     check("unlock for the mail screen", false)
     finish()
 }
+/// An invite code of the second user's, for the address page's step 2.
+let peerInvite = SecretBytes(capacity: Int(limits().maxInvite))
 do {
     // A second user, and a letter each way through the relay.
     let peerKEK = softwareKey(), peerIdentity = softwareKey()
@@ -321,6 +324,9 @@ do {
     let code = try session.createInvite()
     defer { code.wipe() }
     try register(peer, peerIdentity, other, invite: code)
+    let peerCode = try peer.createInvite()
+    peerCode.withBytes { _ = peerInvite.append($0) }
+    peerCode.wipe()
     _ = try session.sync()
     let peerAtMe = try contact(session, other), meAtPeer = try contact(peer, me)
     try send(session, identity, to: peerAtMe, subject: "Et testbrev",
@@ -397,12 +403,15 @@ if let t = KeyTranslator(.current) {
         }
     }
 }
-for u in "brev-address".utf16 {
-    guard let (k, f) = keyFor[u], let cg = CGEvent(keyboardEventSource: nil, virtualKey: k, keyDown: true) else { continue }
-    cg.flags = f
-    cg.setIntegerValueField(.eventSourceUnixProcessID, value: 0)
-    NSEvent(cgEvent: cg).map(page.inviteField.keyDown)
+func typeKeys(_ s: String, into field: SecureComposeView) {
+    for u in s.utf16 {
+        guard let (k, f) = keyFor[u], let cg = CGEvent(keyboardEventSource: nil, virtualKey: k, keyDown: true) else { continue }
+        cg.flags = f
+        cg.setIntegerValueField(.eventSourceUnixProcessID, value: 0)
+        NSEvent(cgEvent: cg).map(field.keyDown)
+    }
 }
+typeKeys("brev-address", into: page.inviteField)
 // The page opens at its invite step (docs/PHASE4_DESIGN.md §6.1), whose
 // field takes the typed text.
 let typedField = page.inviteField
@@ -415,6 +424,37 @@ check("lock: the address page's field is wiped, its pixels zero, Rust locked",
       typedField.model.text.length == 0 && (0..<typedField.model.text.maxUnits).allSatisfy { typedField.model.text.units[$0] == 0 }
           && !fieldPool.contains(where: hasPixels) && session.brev.isLocked() && lockScreens == 2,
       "length \(typedField.model.text.length), lock screens \(lockScreens)")
+
+// Step 2 (WP5 review): the second user's code, put in as ⌘V puts it, and
+// Fortsett show «Invitert av:» with its address and code; an address is
+// typed; the lock wipes the address field and the inviter too.
+guard unlockRust() else {
+    check("unlock for the address page's step 2", false)
+    finish()
+}
+_ = lock.state.endUnlock(lock.state.beginUnlock(), succeeded: true, appActive: true)
+peerInvite.withBytes { _ = page.inviteField.model.insertPasted($0) }
+peerInvite.wipe()
+page.next()   // Fortsett, as a human's press
+let opening = Date(timeIntervalSinceNow: 10)
+while page.inviterView.lines[0] == nil && Date() < opening {
+    _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+}
+typeKeys("brev-address", into: page.field)
+page.view.layoutSubtreeIfNeeded()
+let stepTwo: [ContentView] = [page.field, page.inviterView]
+stepTwo.forEach { $0.updateLayer() }
+let stepTwoPools = stepTwo.flatMap { $0.pool }
+check("control: on the address page's step 2, the typed address and the inviter's address and code are pixels in their buffers",
+      page.field.model.text.length == 12 && page.inviterView.lines.allSatisfy { $0 != nil }
+          && stepTwo.allSatisfy { $0.pool.contains(where: hasPixels) },
+      "length \(page.field.model.text.length), inviter \(page.inviterView.lines.map { $0 != nil })")
+lock.lock(.manual)
+check("lock: the address page's step 2 is wiped (the address field and the inviter), its pixels zero, Rust locked",
+      page.field.model.text.length == 0 && (0..<page.field.model.text.maxUnits).allSatisfy { page.field.model.text.units[$0] == 0 }
+          && page.inviterView.lines.allSatisfy { $0 == nil } && !stepTwoPools.contains(where: hasPixels)
+          && session.brev.isLocked() && lockScreens == 3,
+      "length \(page.field.model.text.length), inviter \(page.inviterView.lines.map { $0 != nil }), lock screens \(lockScreens)")
 
 // MARK: - A new header line, and the lock sequence with a compose sheet open
 

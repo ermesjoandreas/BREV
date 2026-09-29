@@ -45,7 +45,9 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{self, Plaintext};
 use crate::relay::{Incoming, Mailbox, RelayTransport};
-use crate::store::{is_permanent, today, Letter, APPROVED_ME, BLOCKED, MAIL, VERIFIED};
+use crate::store::{
+    is_permanent, today, Letter, APPROVED_ME, BLOCKED, BLOCK_UNTOLD, MAIL, VERIFIED,
+};
 use crate::transport::{NetError, Transport};
 use crate::{ContactId, Core, Error, IdentityId, MessageId, PublicBundle, ThreadId};
 
@@ -977,28 +979,32 @@ impl Brev {
     /// the approval of `contact`. First the sealed local flag, which stops
     /// sending to it and drops its letters, and forgets a ticket or letter
     /// for it; then the relay is told to store no more letters or requests
-    /// from it. `Network` means the relay was not told (the flag is set);
-    /// calling this again tells it.
+    /// from it. Until the relay answers, the sealed `BLOCK_UNTOLD` stays
+    /// beside the flag, and every `sync` tells the relay again, also after
+    /// a lock (WP5 review). An error means the relay was not told yet (the
+    /// flag is set); calling this again tells it too.
     pub fn block_contact(&self, contact: Vec<u8>) -> Result<(), BrevError> {
         let contact = ContactId(id(&contact)?);
-        let (caller, token, peer) = {
+        let (caller, token, peer, epoch) = {
             let mut s = self.session()?;
             let (caller, token) = s.credentials()?;
             let peer = s.me.contact_bundle(contact)?.id();
-            s.me.change_flags(contact, BLOCKED, 0)?;
+            s.me.change_flags(contact, BLOCKED | BLOCK_UNTOLD, 0)?;
             if matches!(s.ticket, Some((c, _)) if c == contact) {
                 s.ticket = None;
             }
             if s.letter.as_ref().is_some_and(|l| l.contact() == contact) {
                 s.letter = None;
             }
-            (caller, token, peer)
+            (caller, token, peer, s.epoch)
         };
-        match self.net.block(&caller, &token, &peer.0) {
-            // 404: the relay no longer knows that identity.
-            Ok(()) | Err(NetError::Refused(404)) => Ok(()),
-            Err(e) => Err(e.into()),
-        }
+        let told = self.net.block(&caller, &token, &peer.0);
+        drop(token);
+        told_block(told)?;
+        self.resume(epoch)?
+            .me
+            .change_flags(contact, 0, BLOCK_UNTOLD)?;
+        Ok(())
     }
 
     /// The contacts, in the order they were added.
@@ -1255,8 +1261,9 @@ impl Brev {
         s.letter = None;
     }
 
-    /// Deletes the local invites past their life, then handles the events
-    /// waiting at the relay (docs/PHASE4_DESIGN.md §5.3: requests,
+    /// Deletes the local invites past their life, tells the relay again of
+    /// each block it has not answered yet (`block_contact`), then handles
+    /// the events waiting at the relay (docs/PHASE4_DESIGN.md §5.3: requests,
     /// redeemed invites, approvals) and answers them, then fetches the
     /// letters waiting at the relay, stores each, and acknowledges the
     /// stored ones and the ones refused for good (docs/PHASE3_DESIGN.md
@@ -1266,13 +1273,15 @@ impl Brev {
     /// lock comes in between (nothing more is stored and nothing is
     /// acknowledged, so the letters and events come again).
     pub fn sync(&self) -> Result<SyncResult, BrevError> {
-        let (caller, token, epoch) = {
+        let (caller, token, epoch, untold) = {
             let mut s = self.session()?;
             let (caller, token) = s.credentials()?;
             s.me.sweep_invites(today())?;
-            (caller, token, s.epoch)
+            let untold = s.me.untold_blocks()?;
+            (caller, token, s.epoch, untold)
         };
         let mailbox = self.net.mailbox(caller, token);
+        self.blocks_via(&mailbox, &untold, epoch)?;
         let contacts_changed = self.events_via(&mailbox, epoch)?;
         let letters = self.sync_via(&mailbox, epoch)?;
         let requests = self.resume(epoch)?.requests.len();
@@ -1400,6 +1409,25 @@ impl Brev {
             Err(_) if arrived > 0 => Ok(arrived),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// The first step of `sync`: each block in `untold` is told to the
+    /// relay again without the mutex, and one it answers loses its
+    /// `BLOCK_UNTOLD`. One it does not answer keeps it for the next sync.
+    fn blocks_via(
+        &self,
+        net: &Mailbox<'_>,
+        untold: &[(ContactId, IdentityId)],
+        epoch: u64,
+    ) -> Result<(), BrevError> {
+        for (contact, peer) in untold {
+            if told_block(net.block(&peer.0)).is_ok() {
+                self.resume(epoch)?
+                    .me
+                    .change_flags(*contact, 0, BLOCK_UNTOLD)?;
+            }
+        }
+        Ok(())
     }
 
     /// The events step of `sync` (docs/PHASE4_DESIGN.md §5.3): fetch the
@@ -1696,6 +1724,15 @@ fn proof(
 /// contact with another key (now pending).
 fn pinned((contact, _): (Option<ContactId>, bool)) -> Result<ContactId, BrevError> {
     contact.ok_or(BrevError::KeyChanged)
+}
+
+/// The relay's answer to `/v1/block`: 204, or 404 (it no longer knows
+/// that identity), means it takes nothing more from that peer.
+fn told_block(answer: Result<(), NetError>) -> Result<(), NetError> {
+    match answer {
+        Ok(()) | Err(NetError::Refused(404)) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
