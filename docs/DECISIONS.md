@@ -3080,3 +3080,1013 @@ design's other entries take numbers after D-0068, in its order.
   - CLAUDE.md §1–§2 against `docs/THREAT_MODEL.md`: identical (D-0065).
   - Not yet run: a letter from the real app, which needs Touch ID (V56 and
     V57 in the human run). Only then does a real report reach class A.
+
+---
+
+## Phase 3 — real transport (2026-09-28)
+
+The entries `docs/PHASE3_DESIGN.md` §10 plans as its D-0037 to D-0052,
+written on 2026-09-29 for what is built on `claude/phase4`. Its D-0036 (the
+owner answers) is D-0065. Its D-0053 (VERIFY results and the phase summary)
+is not written: the rows that need Touch ID, Brev B or letters wait for the
+human run (`docs/USER_SESSION.md`). "At `60d4e1b`" below means the machine
+run of `docs/VERIFY-RESULTS.md` (V45: `scripts/test.sh` exit 0, 136 Rust
+tests), which covers Phase 3 WP0 to WP5 and the vault split. brev-core is
+called brev-mail since D-0066. Where a design, `docs/VERIFY.md` or a commit
+cites a design number, this table gives the entry:
+
+| Design §10 | Topic | Entry |
+|---|---|---|
+| D-0036 | owner answers Q1–Q4 | D-0065 |
+| D-0037 | crates and features | D-0069 |
+| D-0038 | protocol v1 wire | D-0070 |
+| D-0039 | payload padding | D-0071 |
+| D-0040 | signatures | D-0072 |
+| D-0041 | the letter flow | D-0073 |
+| D-0042 | relay token | D-0074 |
+| D-0043 | relay | D-0075 |
+| D-0044 | RelayTransport | D-0076 |
+| D-0045 | schema v3 | D-0077 |
+| D-0046 | contacts by address, TOFU | D-0078 |
+| D-0047 | identity code | D-0079 |
+| D-0048 | addresses | D-0080 |
+| D-0049 | contact data in the protected layer | D-0081 |
+| D-0050 | `network.client`, no ATS | D-0082 |
+| D-0051 | echo peers removed | D-0083 |
+| D-0052 | two instances | D-0084 |
+| D-0053 | VERIFY results, summary | not yet (human run) |
+
+### D-0069 — Crates and features for the transport
+
+- **Date:** 2026-09-28
+- **Decision:** Workspace dependencies `p256` 0.14 (default features off,
+  `ecdsa`), `reqwest` 0.13 (default features off, `blocking`: no TLS, no
+  system proxy, no JSON), `axum` 0.8 (`http1`, `tokio`) and `tokio` 1.53
+  (`rt`, `net`, `macros`). p256 is a normal dependency of brev-proto only
+  (the one verifier, D-0072) and a dev-dependency of brev-mail and
+  brev-relay (test signers); reqwest is brev-mail's client and the relay
+  tests' client; axum and tokio are brev-relay's. `ed25519-dalek` is gone
+  from both manifests. No DER code of ours: p256 always turns on ecdsa's
+  `der`, so `Signature::from_der` exists. brev-core's `rust-version` became
+  1.88 (url → idna → ICU4X 2.3 declares it), superseding D-0015 for that
+  crate; D-0067 has since raised the whole workspace to 1.89, so the
+  design's "brev-proto and brev-relay stay at 1.85" no longer holds.
+  `uniffi-bindgen` stays at 1.88. `scripts/test.sh` pins p256's and
+  reqwest's features in `cargo tree`.
+- **Reasoning:** All four crates are in CLAUDE.md §4, each with the smallest
+  feature set that works: reqwest without `system-proxy` links no
+  CF/SC/Security symbol and cannot be sent through a proxy; axum without its
+  defaults parses no HTTP/2, JSON or forms. p256 is not independently
+  audited (its README) and only handles public inputs here. The Ed25519 test
+  signer had no user left once envelopes carry P-256 signatures (D-0072).
+- **Verified:** `eafae9b` (Cargo.lock 123 → 139, `cargo audit` clean),
+  `fae89f9` (→ 211), `2f1d4a6` (→ 209 once ed25519 and ed25519-dalek left;
+  audit clean over 209 crates), `239de4a` (the feature pins in test.sh).
+  Design §0: `nm -u libbrev_core.a` names no CF/SC/Security symbol. At
+  `60d4e1b`: `cargo audit` clean over 210 crates (brev-vault added, D-0066).
+  Phase 4 added no crate: `Cargo.lock` still lists 210 packages.
+
+### D-0070 — Protocol v1 wire format
+
+- **Date:** 2026-09-28
+- **Decision:** `PROTOCOL_VERSION` 0 → 1. The wire is `"BREV"` ‖ version
+  (u16 BE) ‖ sender id 32 ‖ recipient id 32 ‖ nonce 24 ‖ ciphertext (padded
+  payload ‖ 16-byte tag) ‖ signature 64 (raw r ‖ s). `signed_bytes` is
+  D-0018's layout, everything before the signature. The envelope id is
+  SHA-256(`signed_bytes`); the relay dedupes and acks by it. At least 430
+  bytes; `MAX_WIRE` = 1 048 750. `from_wire` refuses a length outside that
+  range, wrong magic, a version other than 1, and a ciphertext that is not a
+  padded length plus 16; `to_wire` refuses a signature that is not 64 bytes.
+  The other relay bodies are binary `POST`s (design §2.4). Phase 4 keeps
+  version 1 and changes only the relay bodies around the wire (D-0087,
+  D-0090).
+- **Reasoning:** The plaintext inside the AEAD changed (D-0071), so a v0
+  reader would misparse it; the version is in the AD and in the signed
+  bytes, so a v0 envelope fails everywhere. Fixed-length header and
+  signature make the parse unambiguous without length fields, and the relay
+  rebuilds `signed_bytes` byte for byte (D-0018's rule). The id leaves out
+  the signature, so signature malleability changes no id.
+- **Verified:** `eafae9b`: `wire_round_trip_and_layout`,
+  `from_wire_refuses`, `identity_id_matches_d0016`. `fae89f9`: brev-relay's
+  `submit_checks` (`MAX_WIRE + 1` gives 413). All pass at `60d4e1b`.
+
+### D-0071 — Envelope payload padding
+
+- **Date:** 2026-09-28
+- **Decision:** `seal_message` pads the payload (D-0020) with Phase 2's
+  `pad_into` (u32 BE length ‖ content ‖ zeros) to 256 B, 1 KiB, 4 KiB, 16
+  KiB, then multiples of 16 KiB; `open_message` calls `unpad`, and bad
+  padding under a valid tag is `Malformed`. The hard maximum of 1 MiB padded
+  holds in the app (`padded_len` gives none: `Malformed`) and at the relay
+  (`from_wire`, and axum's `DefaultBodyLimit` answers 413 before parsing). A
+  real letter pads to at most 80 KiB (256-byte subject, 64 KiB body). The
+  padding functions live in brev-vault since D-0066; brev-proto re-exports
+  them.
+- **Reasoning:** This implements D-0027's padding item and closes the Phase
+  1 TODO: the relay sees a bucket, not a length. The stored columns already
+  use the same functions (D-0041).
+- **Verified:** `2f1d4a6`: `envelope_payload_is_padded` (design §8: sizes
+  within one bucket give equal ciphertext lengths; the boundary sizes;
+  `MAX_PADDED − 3` is `Malformed`); `padded_lengths_only`; the relay's
+  `submit_checks`. All pass at `60d4e1b`.
+
+### D-0072 — Signatures: P-256 from the Enclave, verified in Rust before decryption
+
+- **Date:** 2026-09-28
+- **Decision:**
+  - ECDSA P-256/SHA-256 with the identity key (the Enclave `SecKey` of
+    CLAUDE.md §3.2, unchanged). Rust computes SHA-256 of the preimage and
+    Swift signs that digest with `.ecdsaSignatureDigestX962SHA256`
+    (`Enclave.sign(digest:key:)` in `Shared/`), so 32 bytes cross the FFI
+    and what is signed is still `signed_bytes`. Domains: envelopes start
+    with `"BREV"`, registration with `"brev/v1/register\0"` (v2 since
+    D-0087); no preimage is valid in both.
+  - On the wire, raw r ‖ s, 64 bytes, either S (Security.framework does not
+    normalise; about half are high-S). `brev_proto::sig::verify` is the one
+    verifier, used by brev-mail and brev-relay: the key exactly 65 bytes,
+    `04`, on the curve; `Signature::from_slice`; p256's verify. `der_to_raw`
+    uses `from_der`.
+  - A signing key must be a valid uncompressed P-256 point in
+    `Core::create`, in a lookup answer and at registration. This ends
+    D-0016's "opaque, 1..=255 bytes".
+  - Receive order (extends D-0020): addressed to me; the keyed tag finds a
+    contact; the pinned bundle opens and hashes to the sender; the signature
+    with the pinned key; only then AEAD, unpad, payload, thread owner and
+    insert. Each failure is permanent (acked and dropped) or local (a
+    damaged row or a failed write: not acked, fetched again), D-0076.
+  - No `SigningKey` in production code: test signers are in
+    `src/test_keys.rs` (`cfg(test)`) and `tests/`, and test.sh greps for it.
+- **Reasoning:** CLAUDE.md §5 Phase 3 and D-0027: Swift only signs, Rust
+  verifies. A letter not signed by the pinned key never reaches the AEAD,
+  and D-0017's key-compromise impersonation narrows: a leaked X25519 secret
+  no longer lets anyone forge letters to its owner. A low-S rule would
+  protect nothing, since the id leaves out the signature.
+- **Verified:** Design §0: 550 of 550 Security.framework signatures (150
+  from Enclave keys) parse from DER and verify with p256 0.14 as produced.
+  `eafae9b`: `verify_rules`, `der_to_raw` with four committed Swift vectors.
+  `2f1d4a6`: `receive_verifies_before_decrypting`,
+  `attach_refuses_foreign_signature`. `239de4a`: the `SigningKey` grep. All
+  pass at `60d4e1b`. The real identity key's Touch ID signature (V55, V56):
+  pending human run.
+
+### D-0073 — The letter flow across UniFFI (supersedes D-0019)
+
+- **Date:** 2026-09-28
+- **Decision:** No call that takes content does network I/O, and no network
+  call takes content. One letter:
+  1. `prepare_send(contact)` on the serial queue `no.brev.net`: a token
+     lookup of the contact's key, without the session mutex. A changed key
+     goes into `pending` and gives `KeyChanged`; otherwise a one-use send
+     ticket is set. (Since D-0068 the class-A check runs first; since Phase
+     4 the lookup's status can give `NotApproved`, D-0088.)
+  2. `sign_request(contact, subject, body)` on main, no I/O: takes the
+     ticket, pads and seals the payload, builds the unsigned envelope and
+     the rows to store, keeps them in one slot, drops every plaintext and
+     the X25519 secret, and returns the digest.
+  3. Swift signs with Touch ID (`send.reason`): the one prompt per letter. A
+     cancel calls `cancel_send()`, and the draft stays.
+  4. `attach_signature(der)` checks the signature against the own key in the
+     identity row (`Signing` otherwise). `submit()` posts the wire and
+     stores the letter only after 202 or 200. `Network` keeps the signed
+     slot, and *Prøv igjen* calls `submit()` again with no second prompt;
+     another 4xx clears it.
+
+  `lock()` and `cancel_send()` clear ticket and slot; `sync()` never sends.
+  Registration uses the same two steps (`register_request`, `register`). The
+  send prompt does not suspend auto-lock:
+  `LockState.signPanelTakesActivation` is false, every signature goes
+  through `LockController.beginSign`/`endSign`, and the design's fallback
+  (every content view blank during the prompt) is built behind that switch.
+- **Reasoning:** §5 Phase 3's `sign_request` → Touch ID →
+  `attach_signature`. With the lookup outside the content call, no Swift
+  buffer is borrowed during I/O and a lock never waits on the network. The
+  draft and the letter panes are on screen during the send prompt, so
+  resign-active must lock unless U4 shows that the Touch ID panel itself
+  takes activation.
+- **Verified:** `2f1d4a6`: `sign_request_needs_a_fresh_prepare`,
+  `sign_request_and_register_request_make_no_request`,
+  `lock_and_cancel_clear_the_pending_letter`,
+  `nothing_decrypted_is_alive_on_the_network`, `submit_retry_is_idempotent`.
+  `ab2f14d`: harness case 2 and the lock probe run the switch in both
+  positions. All pass at `60d4e1b`. U4 (logged in category `touchid`), V56,
+  V62 and V63: pending human run.
+
+### D-0074 — A relay token instead of signed relay requests
+
+- **Date:** 2026-09-28
+- **Decision:** `Core::create` draws a 32-byte relay token from the OS RNG
+  and seals it in `identity.keys`. Registration, signed with the identity
+  key, carries SHA-256(token), and the relay keeps only that hash. Lookup,
+  inbox and ack start with a 64-byte prefix, caller id ‖ token; an unknown
+  id or a wrong token gives 401. No clock window and no nonce map. In Phase
+  3 submit carried no token (the envelope's signature names the sender);
+  Phase 4 adds the prefix to submit and to every new endpoint except invite
+  open (D-0090).
+- **Reasoning:** The design review dropped a third Enclave key, signed
+  polls, a ±300 s clock rule and a nonce map (design §12): on loopback,
+  capturing the token needs root or Brev's memory, both outside CLAUDE.md
+  §2. The token is usable only while Brev is unlocked. The stored hash does
+  not give the token, so the comparison needs no constant time. Signed
+  requests were to return with TLS and a remote relay; Phase 4 kept the
+  local relay (D-0085), so the token stays.
+- **Verified:** `fae89f9`: `requests_need_the_token` (unknown id, wrong
+  token, another identity's token: 401); passes at `60d4e1b`. A captured
+  token can be replayed; design §11 lists it with the residual risks.
+
+### D-0075 — The relay
+
+- **Date:** 2026-09-28
+- **Decision:** `brev-relay` is a library and a thin binary. Binary `POST`
+  endpoints: `/v1/register` (201, 200 for the same registration, 409, 400,
+  401), `/v1/lookup` (the 97-byte bundle, 404), `/v1/envelopes` (202 stored,
+  200 already waiting, 400, 403, 404, 413), `/v1/inbox` (oldest first, at
+  most 16 envelopes and 4 MiB, deletes nothing), `/v1/inbox/ack` (204, only
+  the caller's envelopes); `GET /v1/health`. Body limits: `MAX_WIRE` on
+  envelopes, 16 KiB elsewhere. SQLite schema v1 (`identities`, `envelopes`,
+  index `inbox`), `application_id` "BRLY", `journal_mode = DELETE`,
+  `secure_delete = ON`, folder 0700, file 0600, absolute paths only. The ack
+  deletes the row; no timestamps, tombstones, IP addresses or request log.
+  An envelope's recipient is looked up only after its signature verifies, so
+  an unsigned request cannot probe the directory. `Policy` hooks (register,
+  submit, request; Deny is 429 before any write), `Open` in Phase 3. `serve`
+  binds `127.0.0.1:<port>` only (`--port-file`; `--trace` prints path and
+  status per request, stores nothing). `release --db <path> <address>` is
+  the operator's command. One `Mutex<Connection>` on a current-thread tokio
+  runtime. `scripts/relay.sh` serves on 127.0.0.1:8787 with the database in
+  `~/Library/Application Support/brev-relay/`. Phase 4 replaces the schema
+  and adds its rules (D-0089).
+- **Reasoning:** CLAUDE.md §5 Phase 3: a minimal axum server that stores
+  only ciphertext and routing metadata, deletes after delivery and has no
+  accounts beyond a key and its address. `secure_delete` zeroes the cells of
+  delivered envelopes. Loopback only, because there is no TLS; the owner
+  accepted the local relay for test letters (D-0065 item 1).
+- **Verified:** `fae89f9`: `register_rules`, `requests_need_the_token`,
+  `submit_checks`, `inbox_and_ack`, `ack_deletes_bytes_from_the_file`,
+  `relay_file_holds_no_plaintext`, `policy_hook_denies_before_writing`,
+  `release_frees_an_address`, `listen_refuses_anything_but_127_0_0_1`; with
+  `secure_delete` off both file tests failed. `2f1d4a6`: brev-mail's
+  `relay_file_holds_no_plaintext` (a DoD test). test.sh passes at `60d4e1b`.
+  V54, V58, V59 and V64 on the real relay: pending human run.
+
+### D-0076 — RelayTransport: the client, the mutex rule and `sync`
+
+- **Date:** 2026-09-28
+- **Decision:**
+  - `relay.rs` in brev-mail: one `reqwest::blocking::Client` per `Brev` with
+    `no_proxy()`, no redirects, 3 s to connect, 15 s in all. Answers are
+    read through caps and parsed strictly; 4xx is `Refused`, anything else
+    that is not the expected answer is `Network`. The relay URL comes from
+    Info.plist `BrevRelayURL` (build setting `BREV_RELAY_URL`, default
+    `http://127.0.0.1:8787`) and must be exactly `http://127.0.0.1:<port>`
+    (`Malformed` otherwise).
+  - No network call holds the session mutex: gate and copy under it, release
+    it, do the request, take it again. A lock epoch makes that second half
+    return `Locked`, so nothing is stored or acked after a lock.
+  - `Transport` is `send`, `poll` (deletes nothing) and `ack`; `receive_all`
+    is gone. `sync()` polls, stores each envelope under its own mutex hold,
+    then acks the stored ones and the ones refused for good (D-0072); a
+    local failure stays at the relay. Delivery is at least once to the core
+    and exactly once into the store (message-id dedupe), which closes
+    D-0026's at-most-once.
+  - Swift syncs on `no.brev.net` right after unlock, every 5 s while
+    unlocked and registered, and after a send; a tick is skipped while a
+    sync runs, and failures are logged once per change.
+  - `BrevError` gains the unit variants `KeyChanged`, `AddressTaken`,
+    `Network` and `Refused`.
+- **Reasoning:** An IP literal means no resolver runs, so no local process
+  can answer for `localhost` on `[::1]` (design §0), and no build can send
+  metadata off the Mac over plain HTTP. Only ciphertext, public data and the
+  token pass through reqwest, and the zeroing allocator covers its frees.
+  `lock()` on main never waits on a timeout.
+- **Verified:** `2f1d4a6`: `no_network_under_the_session_mutex`,
+  `ack_after_store`, `locked_session_makes_no_request`. `8997ead`:
+  `redirects_are_not_followed`, `an_answer_over_its_cap_is_network`,
+  `inbox_reads_no_further_than_its_cap` and `proxy_variables_are_ignored`,
+  each shown to fail with its protection removed. All pass at `60d4e1b`. V63
+  and V64: pending human run.
+
+### D-0077 — Schema v3
+
+- **Date:** 2026-09-28
+- **Decision:** `SCHEMA_VERSION` 3; a v2 store opens as `Corrupt` and must
+  be reset. `identity.keys` holds X25519 secret ‖ X25519 public ‖ P-256 key
+  (65) ‖ relay token (32); `identity.address` is sealed and empty until
+  registered. `contacts` has a local id (16 random bytes, kept across a key
+  change), `tag` (HKDF-SHA256 over the identity id under the DEK, info
+  `"brev/v1/contact-tag"`, UNIQUE), and sealed `bundle`, `address` and
+  `pending` (always sealed, so the file shows no "key changed" flag). Column
+  ADs use the local id and no AD holds the identity id, so accepting a key
+  re-encrypts nothing. A bundle whose id's tag is not the row's tag is
+  `Corrupt`. D-0068 made the schema v4, Phase 4 v5 (D-0091).
+- **Reasoning:** A reader of `brev.db` sees neither a contact's identity id
+  nor its address, so the file cannot be joined with the relay's directory
+  (CLAUDE.md §3.1: only queryable metadata in plaintext). v2 stores held
+  only echo letters, so no migration.
+- **Verified:** `2f1d4a6`: `store_holds_no_contact_id_or_address`,
+  `column_ad_uses_local_contact_id`, `local_row_failures_are_corrupt`,
+  `v2_store_is_refused`; all pass at `60d4e1b`.
+
+### D-0078 — Contacts by address, pinned on first use; a changed key blocks sending
+
+- **Date:** 2026-09-28
+- **Decision:** `add_contact(address)` takes an address typed in a key-only
+  field and passed like content: normalise and validate it, refuse the own
+  address (`Malformed`) and a known one (`Duplicate`), look it up with the
+  token, and pin the answer (TOFU). A key change is detected only in
+  `prepare_send`, at each *Send*: the other bundle goes into `pending`,
+  `sign_request` gives `KeyChanged` before it seals anything,
+  `ContactRow.key_changed` turns *Nytt brev* off, and the header shows the
+  warning and both codes. *Godta ny kode* opens `ConfirmSheet`, then
+  `accept_new_key(contact, new_code)`, which Rust refuses unless `new_code`
+  is the code of the current `pending`. Letters from a new key that is not
+  yet accepted are a stranger's: dropped and acked (D-0065, Q2). Phase 4
+  puts contact requests in front of this (D-0088).
+- **Reasoning:** D-0031. There is no lookup when a contact is selected, so
+  the relay does not learn which conversation is open. Binding the
+  acceptance to the code on screen catches a relay that swaps the pending
+  key between showing and accepting. First contact trusts the relay;
+  comparing codes (D-0079) or an invite (D-0086) catches a false first key.
+- **Verified:** `2f1d4a6`: `changed_key_warns_and_blocks_sending` (a DoD
+  test), `accept_is_bound_to_the_shown_code`,
+  `registration_and_contacts_by_address`, `strangers_are_dropped_and_acked`.
+  `ab2f14d`: the view host's `--contacts` run makes a real key change
+  (`brev-relay release`, a new identity) and accepts it; PASS at `60d4e1b`
+  (V69). V60 in the two apps: pending human run.
+
+### D-0079 — Identity code
+
+- **Date:** 2026-09-28
+- **Decision:** RFC 4648 base32 (A–Z, 2–7) of the first 150 bits of the
+  identity id: 30 characters in 6 groups of 5, 35 ASCII bytes
+  (`brev_proto::identity_code`, a hand-written table lookup). The id formula
+  is D-0016's, moved to `brev_proto::identity_id` so the relay computes the
+  same id. Shown for oneself and per contact; comparing it is optional; no
+  QR code, no link. Phase 4 uses the same 150 bits, without spaces, as an
+  invite's fingerprint (D-0086).
+- **Reasoning:** D-0016 asks for at least 128 bits, because a k-bit prefix
+  can be matched in about 2^k tries. Groups of 5 can be read aloud.
+- **Verified:** `eafae9b`: `identity_code_known_answers` (design §3.4's
+  known answers), `identity_id_matches_d0016`; both pass at `60d4e1b`. V61
+  (the code Brev shows for Brev B equals Brev B's own): pending human run.
+
+### D-0080 — Addresses
+
+- **Date:** 2026-09-28
+- **Decision:** 3 to 32 characters of `a–z`, `0–9` and `-`, the first a
+  letter, checked in one place (`brev_proto::is_valid_address`); one per
+  identity; permanent, so only the operator's `brev-relay release` frees one
+  (D-0065, Q3). The address is registered after the first unlock, on the
+  address page (`AddressViewController`): a key-only field (A–Z folded,
+  anything else beeps), *Registrer*, one Touch ID. A 409 shows
+  `address.error.taken`; after `Network` the same signed body is posted
+  again with no second prompt. Phase 4 adds an invite step before it
+  (D-0087).
+- **Reasoning:** ASCII addresses have no look-alikes and need no Unicode
+  normalisation. A permanent address keeps self-service release, which would
+  need a request signed by the old key, out of the relay.
+- **Verified:** `fae89f9`: `register_rules` (charset, length, first letter,
+  taken, idempotent), `release_frees_an_address`. `ab2f14d`: the address
+  page in the view host's `--contacts` run; PASS at `60d4e1b`. V55: pending
+  human run.
+
+### D-0081 — Contact data is drawn only in the protected layer
+
+- **Date:** 2026-09-28
+- **Decision:** Addresses (one's own and each contact's) and identity codes
+  are content in the UI. They are drawn only by `ContactTextView`s in the
+  capture-protected layer, never through `L10n`, `InterfaceText` or the
+  accessibility tree. Addresses cross the FFI as `OpenText` (closed on
+  lock); codes as 35-byte `Vec<u8>`, which Swift keeps in `SecretBytes` and
+  wipes on lock. No string in `Localizable.strings` takes an address, a name
+  or a code. No pasteboard in Phase 3: D-0031's address copy came with Phase
+  4's contact screen (D-0094).
+- **Reasoning:** A contact's name is its address, and Phase 2 treats names
+  as content (CLAUDE.md §1.5). The relay's directory holds addresses in
+  clear, but there they are routing metadata, not something shown by the
+  app.
+- **Verified:** `ab2f14d`: the lock probe draws the header's addresses and
+  codes and checks that the lock sequence wipes them and zeroes their
+  pixels; the view host's `--contacts` run finds no address marker or code
+  in the AX tree. `244175e` (the review of Phase 3 WP5, although its subject
+  says Phase 2): a replaced header line now zeroes its pixels, and a lock no
+  longer reads contacts through the compose sheet's close; the lock probe
+  fails on the code before the fix. V69 PASS at `60d4e1b`. V68 on the real
+  app with a contact: pending human run.
+
+### D-0082 — `network.client`, no ATS key, no `URLSession`
+
+- **Date:** 2026-09-28
+- **Decision:** The entitlements add `com.apple.security.network.client`,
+  never `network.server`. Info.plist has no `NSAppTransportSecurity` key:
+  reqwest uses BSD sockets, which ATS does not govern. The forbidden-API
+  grep adds `URLSession` and `NSURLConnection`, so Swift never opens a
+  second, ATS-governed path.
+- **Reasoning:** Design §0: a sandboxed probe could not connect to the
+  loopback relay without the entitlement. An ATS exception would only
+  suggest a URL-loading path that does not exist.
+- **Verified:** `239de4a` (entitlement, grep). At `60d4e1b`: V1 and V53 pass
+  on the Release and Verify builds (`network.client` present,
+  `network.server` absent); V66 passes (no ATS key; no `URLSession` or
+  `NSURLConnection` in `nm -u`). V54 (Brev connects only to 127.0.0.1:8787
+  and listens nowhere): pending human run.
+
+### D-0083 — The echo peers are removed (closes D-0042)
+
+- **Date:** 2026-09-28
+- **Decision:** `echo.rs`, the stores `peer-1.db` and `peer-2.db`,
+  `Unsigned`, `Signer`, `send_new`, `receive_all`, `Delivery` and the echo
+  `sync` are deleted, and `KeyStore`'s known names lose the peer files. The
+  tools that used them moved to the relay (`239de4a`): the harness, the lock
+  probe, the view host (its own relay and users), `padcheck` (one store),
+  `capture-probe` and `TouchIDProbe`. The owner's edit `ba70411` removed the
+  two CLAUDE.md §2 mentions of the echo stores; `docs/THREAT_MODEL.md` was
+  re-synced.
+- **Reasoning:** CLAUDE.md §5 Phase 3 replaces the `MockTransport` contacts
+  with the relay. The echo stores were a Phase 2 residual risk (D-0033 item
+  3). `MockTransport` stays for the Rust tests behind `test-hooks` (D-0066).
+- **Verified:** `2f1d4a6` (the deletions; Cargo.lock 211 → 209), `239de4a`,
+  `ba70411`. At `60d4e1b` the Release binary has no `MockTransport` symbol
+  (D-0066).
+
+### D-0084 — Two instances by bundle id ("Brev B")
+
+- **Date:** 2026-09-28
+- **Decision:** The second instance is the same code built with
+  `PRODUCT_BUNDLE_IDENTIFIER=no.brev.app.b` and `PRODUCT_NAME="Brev B"`:
+  `scripts/build.sh --instance b`, derived data in `app/build-b`. The
+  keychain group entitlement is
+  `$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)` and
+  `KeyStore.accessGroup` is `AV26DNQ5SC.` plus the bundle id (`239de4a`);
+  `CFBundleName` and `CFBundleDisplayName` come from `$(PRODUCT_NAME)`, so
+  the Dock and the Touch ID dialogs say «Brev B» (`63fc44f`). Brev B has its
+  own container, `.lock`, Enclave keys and wrapped DEK in group
+  `AV26DNQ5SC.no.brev.app.b`; both apps use the one relay. The default build
+  passes no overrides.
+
+  **No App ID was registered:** automatic signing signed Brev B with the
+  team's wildcard profile `Mac Team Provisioning Profile: *`
+  (`AV26DNQ5SC.*`, D-0052 item 6), as it signs Brev, so the approval of a
+  second App ID `no.brev.app.b` (D-0065 item 2) was not used. The comment in
+  `scripts/build.sh` and design §7 still say the first build registers it.
+- **Reasoning:** Container, data folder, `.lock` and keychain items all
+  follow from the bundle id, which the code signature covers. Rejected:
+  `open -n` of the same app (same container; `.lock` refuses it) and a
+  runtime switch (LaunchGuard refuses arguments and environment).
+- **Verified:** `63fc44f`: the default Release build's entitlements, built
+  Info.plist, bundle id, signature summary and embedded profile are
+  byte-identical before and after; Brev B was built once and not launched
+  (`no.brev.app.b`, «Brev B», group `AV26DNQ5SC.no.brev.app.b`, the wildcard
+  profile); test.sh green. V57, the two-instance DoD run: pending human run.
+
+---
+
+## Phase 4 — anti-noise (2026-09-28 to 2026-09-29)
+
+The entries `docs/PHASE4_DESIGN.md` §10 plans as D-0069 to D-0080, and one
+for *Blokker*, which the owner added. The design expected its numbers to
+move up by 17 once Phase 3's entries landed; Phase 3 took 16 (D-0069 to
+D-0084) and *Blokker* has an entry of its own, so:
+
+| Design §10 | Topic | Entry |
+|---|---|---|
+| D-0069 | owner answers Q1–Q7 | D-0085 |
+| D-0070 | invite codes | D-0086 |
+| D-0071 | registration v2 | D-0087 |
+| D-0072 | approval at the relay | D-0088 |
+| D-0073 | relay schema v2, clock, `release` | D-0089 |
+| D-0074 | rate limits | D-0090 |
+| D-0075 | brev-mail schema v5, events | D-0091 |
+| – | *Blokker* (owner answer 6) | D-0092 |
+| D-0076 | FFI additions | D-0093 |
+| D-0077 | pasteboard | D-0094 |
+| D-0078 | App Attest stub | D-0095 |
+| D-0079 | `IdentityVerifier` | D-0096 |
+| D-0080 | review record; VERIFY results | D-0097 (results not yet: human run) |
+
+"test.sh green at `4c8c231`" below is what the commit messages of WP4 and
+WP5 and their reviews record.
+
+### D-0085 — Owner answers to Phase 4's questions
+
+- **Date:** 2026-09-28
+- **Decision:** Yes to all seven recommendations (`cff3e69`, the design's
+  "Owner answers"):
+  1. Phase order (b): WP0 to WP2 at once on branch `claude/phase4`; WP3
+     onward after the Phase 3 DoD run is signed off.
+  2. A contact request carries no text: address and safety code only.
+  3. Limits per identity and UTC day: 50 letters, 10 requests, 3 invites
+     made; 5 open invites; 16 pending requests per recipient; invites live 7
+     days. All are relay flags (D-0090).
+  4. The relay keeps the approval graph, and CLAUDE.md §2's local-relay line
+     covers Phases 3 and 4.
+  5. A requester is not told of a decline.
+  6. *Blokker* is added now (D-0092).
+  7. Creating an invite is one human click, no Touch ID.
+
+  Later, in WP5 (2026-09-29), the owner decided that the contact pasteboard
+  clears after 60 s and at quit, not at a lock (D-0094). As built, WP3 to
+  WP5 followed on 2026-09-29 (`c05a7ba` to `4c8c231`) before the Phase 3 DoD
+  run, and `docs/USER_SESSION.md` (`f40794a`) now tests Phases 2 to 4 in one
+  human run. Not found: a commit or document in which the owner changed
+  answer 1.
+- **Reasoning:** Answer 4 is the price of D-0030's relay-side approval
+  check: who takes letters from whom now stays at the relay, where Phase 3
+  kept who writes to whom only until delivery. Answer 2 adds no content path
+  and leaves a spammer only a 32-character address. Answer 7: the invitee's
+  registration is signed, and the inviter checks the invitee's tag (D-0086).
+- **Verified:** `0c7ac4b`: CLAUDE.md §2 (answer 4: the line names the
+  invite and approval graphs as relay metadata) and §5 Phase 4 (answers 2,
+  5, 6 and 7) edited, `docs/THREAT_MODEL.md` synced. `c93850e`:
+  `config_defaults_are_the_owners_values` pins answer 3.
+
+### D-0086 — Invite codes
+
+- **Date:** 2026-09-28
+- **Decision:**
+  - Text `brev1.<address>.<fingerprint>.<secret>`, lower-case ASCII, at most
+    96 bytes; a root invite (made by the operator, no inviter) is
+    `brev1.<secret>`. The fingerprint is the inviter's identity code without
+    spaces (D-0079). The secret `s` is 16 bytes from the OS RNG in base32
+    (26 characters, padding bits zero). `parse` trims whitespace, folds
+    case, and needs the prefix, 2 or 4 parts, a valid address and canonical
+    base32; it writes `s` into a buffer the caller owns and zeroes it on a
+    refusal. Codes are text, never links.
+  - The relay sees only `a` = SHA-256(`"brev/invite/relay\0"` ‖ s) and
+    stores SHA-256(a); it never parses a code. The invitee's proof to the
+    inviter is `tag` = HKDF-SHA256(ikm = s, info = `"brev/invite/peer\0"` ‖
+    invitee id ‖ inviter id ‖ L ‖ invitee address).
+  - Both directions are checked. The invitee checks the relay's answer to
+    `a` against the code's form, address and fingerprint (`InviteMismatch`:
+    nothing stored or sent). The inviter keeps `s` sealed (D-0091) and pins
+    an invitee only when a tag recomputed from the event's bundle and
+    address matches.
+  - One use, a 7-day life; 5 open and 3 made a day per identity (D-0090).
+- **Reasoning:** D-0031 and CLAUDE.md §5 Phase 4: redeeming makes both
+  people approved contacts with the inviter's key verified. A lying relay
+  cannot fit a 150-bit fingerprint to its own key, and knowing only `a` it
+  can neither forge an *invited* event nor swap the invitee's key or name.
+  The invitee's address is in the tag because the id covers only the keys
+  (`bd4c1fc`).
+- **Verified:** `cff9b26`, `bd4c1fc`:
+  `invite_code_round_trip_and_known_answers`, `invite_parse_refuses`,
+  `base32_decode_inverts_identity_code`, `invite_derivations_known_answers`
+  (vectors recomputed with Python's `hmac`; reverting the address in the
+  info fails it). brev-mail (`c05a7ba`, `b565da4`):
+  `invite_with_wrong_fingerprint_is_rejected` (a DoD test, five cases),
+  `invite_makes_both_approved_and_verified`,
+  `forged_invited_event_is_dropped`, `open_invite_on_existing_contact`.
+  brev-relay: `relay_file_holds_no_invite_secret`. Harness case 9
+  (`8ac082e`, `4c97502`): an edited fingerprint gives `InviteMismatch`, and
+  after the lock there is no copy of the secret as text or as its 16 raw
+  bytes, 5 of 5. test.sh green at `4c8c231`. V71 and V77: pending human run.
+
+### D-0087 — Registration v2 needs an invite
+
+- **Date:** 2026-09-28
+- **Decision:** The body is `L ‖ address ‖ signing key 65 ‖ X25519 32 ‖
+  SHA-256(token) ‖ a ‖ tag ‖ signature 64 ‖ attestation length u16 ‖
+  attestation` (0 to 8 192 bytes), signed over `"brev/v2/register\0"` ‖
+  bytes [0, 194 + L), so a v1 body never verifies. The attestation is made
+  over the signed digest and is not itself signed. The relay's order: parse,
+  signature, attestation (feature `app-attest`, D-0095), the same
+  registration again (200), the invite (403 if unknown, used or expired),
+  only then an address or id conflict (409), `IdentityVerifier` (428),
+  `Policy` (429). A 409 does not use up the invite. `invited_by` records the
+  inviter (NULL for a root invite); a non-root invite approves both
+  directions and queues an *invited* event for the inviter. The address page
+  gets an invite step first: paste the code, *Fortsett* (`open_invite`),
+  then «Invitert av:» with the inviter's address and code (protected) or
+  `invite.root`, then Phase 3's address field and *Registrer*. `brev-relay
+  invite --db <path>` prints a root code, the only way in for the first
+  identity.
+- **Reasoning:** CLAUDE.md §5 Phase 4: a new identity needs an invite, and
+  the relay tracks the invite graph. Checking the invite before the conflict
+  keeps Phase 3's promise that nobody without an invite can probe which
+  addresses are taken (design §12, finding 7). The 8 KiB cap keeps the
+  largest body under the 16 KiB limit (finding 9).
+- **Verified:** `cff9b26`: `registration_v2_layout`. `c93850e`:
+  `registration_needs_an_invite` (the largest body through the real router),
+  `registration_does_not_probe_the_directory`, `invite_graph_is_recorded`,
+  `invites_are_one_time_and_expire`, `invite_command_prints_a_root_code`.
+  `cb3af17`: the invite step in the view host's `--contacts` run; `4c8c231`:
+  the lock probe wipes step 2's field and the inviter's address and code.
+  test.sh green at `4c8c231`. V71: pending human run.
+
+### D-0088 — Approval at the relay
+
+- **Date:** 2026-09-28
+- **Decision:**
+  - The relay keeps directed `links(owner, peer)`, approved (the owner takes
+    letters from the peer) or declined. An envelope S→R is stored only if
+    `links(R, S)` is approved; otherwise 409, and nothing is written.
+  - `add_contact` always sends a request (`/v1/requests`, prefix ‖ address,
+    no text). It approves the other direction for the requester, lifts the
+    requester's own earlier decline, and, unless R already approved S, gives
+    R a *request* event. The answer is 202 for new, pending, declined and
+    over R's cap of 16 pending requests alike, so a requester cannot learn
+    of a decline; at the daily limit every request gets 429.
+  - *Godta* and *Avslå* are one `HumanButton` click, no Touch ID.
+    `/v1/events` returns at most 32, *invited* and *approved* before
+    requests, each oldest first; an *approved* event never replaces a
+    waiting *invited* one.
+  - The lookup answer gains a status byte (1: the target takes my letters).
+    `prepare_send` gives `NotApproved` on 0, before any digest or prompt;
+    `submit`'s 409 is `NotApproved` too.
+  - Locally a contact exists only for a peer the user added, approved or
+    verified by invite, and brev-mail still drops letters from non-contacts,
+    so a relay cannot widen who reaches the inbox.
+- **Reasoning:** CLAUDE.md §5 Phase 4: letters only from approved contacts,
+  and one short request, approved or declined with one click. The relay's
+  check keeps spam out of its store; the client's holds even against the
+  relay. Invites and approvals come first so that 16 old requests can never
+  hide them (finding 5).
+- **Verified:** `c93850e`: `unapproved_sender_cannot_reach_an_inbox` (DoD),
+  `requests_once_per_pair`, `event_answer_rules`,
+  `crossing_requests_approve_each_other`,
+  `request_answers_do_not_reveal_a_decline`,
+  `re_adding_a_declined_peer_unblocks_them`,
+  `events_put_invited_and_approved_before_requests`,
+  `approved_envelope_is_delivered_on_the_next_poll` (DoD, immediate
+  delivery); 14 mutations of the rules each fail a test. `c05a7ba`:
+  `a_stranger_cannot_reach_an_inbox` (DoD), `request_approve_and_decline`,
+  `add_contact_always_requests`. Harness case 9 (`8ac082e`): C cannot send
+  to A until A's one click. test.sh green at `4c8c231`. V74, V75 and V76:
+  pending human run.
+
+### D-0089 — Relay schema v2, the UTC-day clock and `release`
+
+- **Date:** 2026-09-28
+- **Decision:** `user_version` 2; a v1 file is refused as `NotRelay` and
+  left untouched. New: `identities.invited_by` (NULL for a root invite),
+  `links`, `events` (one per pair; a newer event replaces the older),
+  `invites` (SHA-256(a), inviter, UTC day, `redeemed_by`) and `counts`
+  (identity, kind, day, n). Days only, never times: `Clock` gives `unix_secs
+  / 86 400`, and tests use a manual clock. Each invite write deletes expired
+  invites, and a count row from an older day is reset on write. Each rule
+  runs in one transaction that only a success commits, so a 403, 404, 409,
+  428 or 429 writes nothing. `release` also deletes the identity's links,
+  events, invites made and counts; its invitees keep a dangling
+  `invited_by`. New endpoints: `/v1/requests`, `/v1/events`,
+  `/v1/events/answer`, `/v1/invites`, `/v1/invites/open` (no prefix),
+  `/v1/invites/redeem` and `/v1/block`. WP2's transitional `serve --phase3`
+  mode was removed in WP4 (`8ac082e`).
+- **Reasoning:** What the relay learns now (design §4.5): the invite graph
+  for an identity's life, the approval graph for good (answer 4), pending
+  requests, and each identity's counts for the day; never content, contact
+  names or `s`. On a local relay the user can move the clock (design §11).
+- **Verified:** `c93850e`: `v1_relay_file_is_refused`,
+  `release_deletes_links_events_invites_counts`,
+  `serve_takes_the_limit_flags`; 38 relay tests green with and without
+  `app-attest`. test.sh green at `4c8c231`. V80, the byte scan of the real
+  `relay.db`: pending human run.
+
+### D-0090 — Rate limits, and the sender's token on submit
+
+- **Date:** 2026-09-28
+- **Decision:** Per identity and UTC day: 50 letters, 10 requests, 3 invites
+  made; 5 open invites; 16 pending requests per recipient; invites live 7
+  days (answer 3; `Config` defaults and `serve` flags). Submit is `prefix ‖
+  wire`: the token must match and the caller must be the envelope's sender
+  (403); then approval (409); then an envelope already waiting answers 200;
+  then the letter count (429). Only an inserted letter (202) counts. Lookups
+  are not limited.
+- **Reasoning:** CLAUDE.md §5 Phase 4: at most N letters a day per identity,
+  enforced by the relay. With the token on submit, nobody holding a signed
+  wire, the recipient included, can spend the sender's quota by replaying it
+  (finding 6). A waiting envelope is answered first, so a retry of a stored
+  letter is never told 429. What the caps do not stop: without real App
+  Attest or BankID each identity can bring in 3 more a day (design §4.4,
+  §11).
+- **Verified:** `c93850e`: `letters_are_rate_limited_per_identity_per_day`
+  (DoD), `requests_are_rate_limited`, `invites_are_capped`,
+  `pending_requests_per_recipient_are_capped`,
+  `submit_needs_the_senders_token`. `5406ac9`: a blocked sender's resend
+  gets 409 before the duplicate check, not 200 (from which it would learn
+  the blocker's read state). `c05a7ba`: `rate_limited_maps_to_error`.
+  test.sh green at `4c8c231`. V78: pending human run.
+
+### D-0091 — brev-mail schema v5 and the order of `sync`
+
+- **Date:** 2026-09-29
+- **Decision:**
+  - `SCHEMA_VERSION` 5; a v4 store opens as `Corrupt` and must be reset.
+    `contacts.flags` is one sealed byte (`APPROVED_ME` 1, `VERIFIED` 2,
+    `BLOCKED` 4, `BLOCK_UNTOLD` 8) with AD `contacts.flags` ‖ local id ‖ the
+    row's `tag`, so a flags cell from before `accept_new_key` does not open
+    under the new key (`b565da4`). A sealed `invites` table holds `s` ‖ UTC
+    day for each open invite. Incoming requests and an opened invite live
+    only in the session and are cleared on lock.
+  - `sync` runs in this order: delete local invites past 7 days; tell the
+    relay of each block it has not answered (D-0092); handle the relay's
+    events (a stranger's request goes to the session; a contact's request is
+    answered yes if the key is the same, and puts a changed key into
+    `pending`; an *invited* event pins only on a tag match; *approved* sets
+    `APPROVED_ME`), answered without the mutex; then the letters (poll,
+    store, ack). It returns `SyncResult { letters, contacts_changed,
+    requests }`.
+  - Accepting a changed key clears the old key's flags; a block stays.
+- **Reasoning:** Events come before letters so that a letter from an invitee
+  or an approver arrives in the same sync that pins its sender; in the other
+  order it would meet an unknown sender, which the stranger rule drops and
+  acks. Sealed flags keep the file from showing who is approved, verified or
+  blocked.
+- **Verified:** `c05a7ba`: `schema_v5`, `v4_store_is_refused`,
+  `flags_and_invites_are_sealed`, `expired_local_invites_are_deleted`,
+  `session_invite_and_requests_cleared_on_lock`,
+  `events_are_processed_once`, `invite_calls_carry_no_content`,
+  `invite_makes_both_approved_and_verified` (letters both ways); `b565da4`:
+  `key_change_through_a_request` writes the old flags cell back and gets
+  `Crypto`. test.sh green at `4c8c231`. Found while writing this entry:
+  `tools/verify/padcheck.swift` still requires `user_version` 4 and does not
+  check `contacts.flags` or `invites.body`, and V18 still names schema v4,
+  so V18 fails as written on a v5 store until both are updated. V18: pending
+  human run.
+
+### D-0092 — *Blokker* (owner answer 6)
+
+- **Date:** 2026-09-28 (relay), 2026-09-29 (app)
+- **Decision:** One click in the contact header (a `HumanButton`, no Touch
+  ID). `block_contact` first seals `BLOCKED | BLOCK_UNTOLD` into the
+  contact's flags and forgets any send ticket, then calls `/v1/block`
+  (prefix ‖ peer id). The relay sets `links(me, them)` declined, drops
+  pending events about them, and drops the blocker's own request waiting at
+  them (its answer would put an *approved* event in the blocker's queue).
+  `BLOCK_UNTOLD` is cleared when the relay answers 204 or 404; until then
+  each sync tells the relay again first, without the mutex (`4c8c231`). A
+  blocked contact cannot be written to (`NotApproved` at the seal, *Nytt
+  brev* off), its events are declined, and its letters get 409 at the relay.
+  A block survives `accept_new_key`; the user lifts it by sending the peer a
+  request. Residual: another invite code of the blocker's that the peer
+  holds overrides the relay link when redeemed; the sealed local flag still
+  keeps the peer out.
+- **Reasoning:** Without it an approval, or a stolen invite code (a bearer
+  secret that sits on the pasteboard), could not be undone in Phase 4
+  (design Q6). The retry through sync means a relay that was down, a 4xx or
+  a lock cannot leave the link approved.
+- **Verified:** `c93850e`, `5406ac9`: `blokker_stops_letters_and_requests`
+  (a letter stored before the block, sent again, gets 409). `c05a7ba`,
+  `b565da4`, `4c8c231`: `blokker_blocks_sending_and_receiving` (a ticket
+  from before the block is forgotten; one set after it is refused at the
+  seal), `blokker_holds_through_a_key_change`,
+  `a_blocked_peer_cannot_reach_the_blockers_queue`, and
+  `a_block_the_relay_missed_is_told_by_the_next_sync`, which fails without
+  the retry and without the clear. Harness case 9: after the block neither
+  side can send. test.sh green at `4c8c231`. V81: pending human run.
+
+### D-0093 — Phase 4 FFI additions
+
+- **Date:** 2026-09-29
+- **Decision:** `BrevError` gains `NotApproved`, `RateLimited`,
+  `InviteInvalid` and `InviteMismatch`, appended after `Environment` so no
+  index moves (D-0067's practice). `Limits.max_invite` (96). `ContactRow`
+  and `ContactInfo` gain `waiting`, `verified` and `blocked`. New records
+  `RequestRow` (peer id, address as `OpenText`, code), `InviteInfo` (root
+  flag, address, code) and `SyncResult`. New calls `create_invite`,
+  `open_invite(code, code_len)` (copies the code out before its request,
+  like `add_contact`), `redeem_invite`, `requests` (no I/O),
+  `answer_request(peer, approve)` and `block_contact`; `register(signature,
+  attestation)` and `sync()` changed. Codes cross as bytes and addresses as
+  `OpenText`, never `String`. In Swift, `Session` keeps codes in
+  `SecretBytes` and wipes the FFI copies.
+- **Reasoning:** CLAUDE.md §6: a minimal, opaque surface. D-0038's rules for
+  content also hold for contact data (D-0081).
+- **Verified:** `c05a7ba`: `scripts/ffi-surface.txt` updated. `8ac082e`: the
+  Swift callers; test.sh green, including the surface check. `4c97502`: case
+  9 scans for the invite secret's 16 raw bytes, and fails with
+  `Opened.secret` as a plain array or with a lock that does not clear the
+  opened invite.
+
+### D-0094 — The pasteboard, on the contact screen only
+
+- **Date:** 2026-09-29
+- **Decision:**
+  - `UI/ContactPasteboard.swift` is the only pasteboard user besides
+    OpaqueView's Services override. Two writes, from *Kopier adressen min*
+    (the bytes of the own address) and *Kopier koden* (the bytes
+    `create_invite` returned): `prepareForNewContents(with:
+    .currentHostOnly)`, then the `org.nspasteboard.ConcealedType` and
+    `TransientType` markers, then `.string`; the change count is kept.
+  - Self-clear 60 s after the write and when Brev quits, and only if the
+    change count is still Brev's; not at a lock (the owner's decision,
+    2026-09-29).
+  - One read, for ⌘V in `ContactField` only: at most 256 bytes into a
+    `SecretBytes`, through the contact charset filter into the field's
+    `EditModel`, never a `String`, drawn only in the protected layer.
+  - Spike P1, variant (a): ⌘V is handled in `keyDown` (hardware key-downs
+    only, no repeat, no ⇧, ⌥ or ⌃). Variant (b), a «Rediger» › «Lim inn»
+    menu with a `paste:` action, is kept behind the compilation condition
+    `BREV_PASTE_MENU`, off.
+  - Letter and compose views stay without a pasteboard. `pasteboardDisabled`
+    in the class-A report keeps its meaning: no responder takes copy, cut or
+    paste at *Send*.
+- **Reasoning:** D-0031 and CLAUDE.md §5 Phase 4: copy and paste of
+  addresses and codes only on the contact screen, never near content (§1.3).
+  The markers go first because only the clear moves the change count, so the
+  text is never there without them; host-only because Universal Clipboard
+  would offer a code to the owner's other devices (`4c8c231`). The owner
+  chose not to clear at a lock because Brev locks when another app becomes
+  active, which would clear the code before it could be pasted there.
+- **Verified:** `cb3af17`, `4c8c231`: test.sh's pasteboard greps (with
+  controls) and `allowed-apis.txt`'s two new lines; harness case 2 (the
+  paste rule); the view host's `--contacts` run (copy, self-clear on a named
+  pasteboard, a later copy by another app kept, refused pastes, the markers
+  present when the text is set, host-only; each half of the review fix
+  reverted fails two checks) PASS. P1 on the real pasteboard (V72: whether
+  ⌘V raises a system alert) and V73: pending human run.
+
+### D-0095 — App Attest is a stub
+
+- **Date:** 2026-09-28
+- **Decision:** brev-relay's feature `app-attest` (off by default) adds
+  `AttestVerifier` in `gates.rs` with `DevAttest`, which accepts only the
+  16-byte marker `BREV-DEV-ATTEST1`; with the feature on, a missing or
+  failing attestation gives 428 before any read, and with it off the field
+  is parsed (at most 8 192 bytes) and ignored. The attested data is the
+  registration digest, so a real attestation would bind this key, address,
+  token and invite. Swift has `Attestor` and `NoAttestor` (empty): no
+  `DCAppAttestService` call and no entitlement. Later, for the owner: a real
+  verifier needs CBOR and X.509 crates outside CLAUDE.md §4, must accept
+  both App IDs or drop Brev B from real builds, and depends on which App
+  Attest environment a Developer ID build gets.
+- **Reasoning:** `DCAppAttestService.isSupported` is false without the
+  entitlement, and `attestKey` talks to Apple, off loopback (design §0). An
+  attestation at registration would prove the app genuine once, not that its
+  defences are on, so CLAUDE.md §2's class-A line stays as it is (D-0068).
+- **Verified:** `c93850e`: `attestation_gate` (design §8, relay test 11);
+  the relay tests pass with and without the feature. `8ac082e`: `NoAttestor`
+  in `Session.register`; test.sh green.
+
+### D-0096 — `IdentityVerifier` and the BankID / ID-porten task
+
+- **Date:** 2026-09-28
+- **Decision:** `gates.rs` has `IdentityVerifier` with `DevVerifier` (always
+  yes), asked at registration with empty evidence; a no gives 428 and writes
+  nothing. The real integration is documented, not built (design §7.3): the
+  operator runs an ID-porten/BankID web login outside Brev that hands out a
+  one-time text code, pasted like an invite (no URL scheme, §1.4);
+  registration v3 would carry it, and the relay would keep only
+  SHA-256(pairwise `sub` ‖ relay salt): one person, one identity, at the
+  price of linking each identity to a real person.
+- **Reasoning:** CLAUDE.md §5 Phase 4 asks for the interface, a dev stub and
+  a documented integration. Until then any build registers and one person
+  can hold several identities, limited by invites (`docs/SECURITY.md` §7
+  item 4).
+- **Verified:** `c93850e`: `identity_verifier_is_consulted` (a refusing
+  verifier gives 428 and nothing is written).
+
+### D-0097 — Phase 4 review record
+
+- **Date:** 2026-09-29
+- **Decision:** What the reviews changed:
+  - The design critic's 11 findings, all confirmed and applied (design §12):
+    a daily cap on invites made and a cap on pending requests per recipient;
+    the relay sees `a`, not `s`, and the inviter checks the invitee's tag;
+    `add_contact` always requests; uniform 202 answers; *invited* and
+    *approved* events first; the sender's token on submit; no directory
+    probe at registration; `open_invite` on an existing contact; the 8 KiB
+    attestation cap; V80 as a hex byte scan; the design's base commit, both
+    App IDs and the pasteboard exposure.
+  - The package reviews: the invite tag binds the invitee's address
+    (`bd4c1fc`); a blocked sender's resend gets 409 before the duplicate
+    check (`5406ac9`); `contacts.flags` bound to the pinned key's tag, and
+    the Blokker and root-form invite checks pinned by tests (`b565da4`);
+    case 9 scans for the invite secret's raw bytes with an opened invite
+    held over the lock (`4c97502`); Blokker retried by sync, the
+    pasteboard's markers first and host-only, the address page's step 2 in
+    the lock probe (`4c8c231`).
+  - Phase 4's VERIFY results (V71 to V81 and the rewritten rows) are not
+    recorded here; they need the human run and go in a later entry.
+- **Reasoning:** CLAUDE.md §1 "ALWAYS": a reviewer finds here what changed
+  and why, and each package fix came with a check that fails without it.
+- **Verified:** Each review commit above records a mutation or a revert that
+  fails its new check. test.sh green and the view host's `--contacts --hold
+  1` PASS at `4c8c231`. The human rows: pending human run.
+
+---
+
+## Phase 5 — the items that need no human (2026-09-29)
+
+### D-0098 — cargo-deny policy and a CI workflow file
+
+- **Date:** 2026-09-29
+- **Decision:** `core/deny.toml` checks the graph with every feature on.
+  Advisories: vulnerabilities, unmaintained and unsound crates anywhere in
+  the graph, and yanked versions all fail. Licences: only those `Cargo.lock`
+  needs today (Apache-2.0, BSD-3-Clause, MIT, MPL-2.0, Unicode-3.0, read
+  from `cargo deny list -l license`); a new one needs the owner. Bans:
+  multiple versions warn (syn 2 and 3 today); wildcards fail, except the
+  workspace's own path dependencies. Sources: crates.io only, no git.
+  `scripts/test.sh` runs `cargo deny check` after `cargo audit` and skips it
+  loudly if cargo-deny is missing. `.github/workflows/ci.yml` runs on
+  `ubuntu-latest` with Rust 1.91.1: fmt, clippy with default and with all
+  features (`-D warnings`), `cargo test --no-default-features`, `cargo
+  audit` and `cargo deny check`. The Swift, Xcode, harness and relay steps
+  stay on the Mac.
+- **Reasoning:** CLAUDE.md §4 (tooling) and §5 Phase 5. `cargo audit` covers
+  only advisories; the policy also makes a new licence, registry or git
+  source fail. CI checks the Rust side on a machine that is not the
+  developer's Mac.
+- **Verified:** `8378819` records the policy and the workflow file; its
+  message records no `cargo deny check` result. The workflow has never run:
+  nothing is pushed, so the Linux run is pending (it needs the owner to
+  push).
+
+### D-0099 — Swift and C warnings are errors
+
+- **Date:** 2026-09-29
+- **Decision:** `app/project.yml` sets `SWIFT_TREAT_WARNINGS_AS_ERRORS` and
+  `GCC_TREAT_WARNINGS_AS_ERRORS` to YES in the Brev target's base settings,
+  so for Debug, Release and Verify. Every build `scripts/test.sh` runs does
+  the same: `swiftc -warnings-as-errors` for the harness, the lock probe, P1
+  variant (b), the view host and the `tools/verify` type-checks, and `clang
+  -Werror` for `scan.c`. One exception: `tools/verify/capture-probe.swift`
+  keeps `-suppress-warnings`, for that file only. It calls the capture APIs
+  that macOS 14 deprecates on purpose (V7), Swift 6.0 (Xcode 16.2, the
+  stated minimum) has no switch per warning group, and a protocol-witness
+  shim cannot call its script-mode functions.
+- **Reasoning:** CLAUDE.md §5 Phase 5. A warning in security code (an unused
+  result, a deprecated call) should stop the build instead of scrolling
+  past. The probe is a verification tool and is never linked into Brev.app.
+- **Verified:** `807d99e`: no source had a warning when the settings were
+  turned on.
+
+### D-0100 — Swift memory review
+
+- **Date:** 2026-09-29
+- **Decision:** `docs/SWIFT_MEMORY_REVIEW.md` lists every place Swift holds
+  content, contact data or key material, over `app/Sources` and the patched
+  bindings: the type, the owner, the wipe point and the check. No code gap
+  was found: each such value is in a `SecretBytes` or `SecretText` (or, for
+  one call, a no-copy view of one, a `CFData` wiped in place or an FFI
+  `Data` wiped in place), never a `String`, `[UInt8]` or `NSString`. Three
+  coverage gaps were closed: harness case 3 wraps the DEK in-process and
+  scans after onboarding's `Enclave.wrap`; case 9 scans for an address
+  (UTF-16) and an identity code while held and after the wipe and the lock;
+  the lock probe checks that a lock zeroes the compose sheet's draft and its
+  copy of the recipient's name. Not covered by a heap scan: the AppKit
+  holders (the lock probe checks those), single keystrokes, and Swift's own
+  stack frames.
+- **Reasoning:** CLAUDE.md §5 Phase 5: find every place plaintext exists in
+  Swift and make sure it is a zeroed buffer, never a `String` that lingers.
+  The rules are D-0044's.
+- **Verified:** `6e7f4a5`: each new check has a positive control and fails
+  with its wipe left out (case 9 with `infoB` unwiped:
+  `needles=[0,0,1,1,…]`, run by hand). The review asked for this entry.
+
+### D-0101 — Reproducible build: one Mac, two folders, identical
+
+- **Date:** 2026-09-29
+- **Decision:**
+  - `scripts/repro-build.sh` exports one commit twice with `git archive`
+    into two temp folders, builds the Rust archive and an unsigned
+    `xcodebuild archive` of Release in each (`CODE_SIGNING_ALLOWED=NO`,
+    `ARCHS` from the Rust archive), and compares `libbrev_core.a` and the
+    app executable after replacing its signature with an ad-hoc one and then
+    removing it. `--against <Brev.app>` compares a downloaded build too.
+  - Remapped: the build folder, `CARGO_HOME` and rustup's `rust-src` path
+    (`--remap-path-prefix`, `-ffile-prefix-map`, Swift's `-file-prefix-map`,
+    both spellings of `/tmp`). `ZERO_AR_DATE=1`; `SOURCE_DATE_EPOCH` is the
+    commit's time. `archive` strips the installed product, so Xcode's debug
+    map is not in the executable.
+  - The release profile stays cargo's default: no `lto`, `strip` or
+    `codegen-units` (D-0001 left them to this phase; the archive is
+    identical without them). No `rust-toolchain.toml`; CI uses 1.91.1.
+  - `scripts/build.sh` stays for development: its executables name the build
+    folder. A release is built as `docs/DISTRIBUTION.md` §3 says, with the
+    script's flags and folder layout.
+- **Reasoning:** CLAUDE.md §5 Phase 5: a user can check that a download is
+  what the published source builds. The signature is replaced before it is
+  removed because `codesign --remove-signature` alone leaves `__LINKEDIT`'s
+  `vmsize` sized for the old signature.
+- **Verified:** `e68bac3`, `docs/REPRODUCIBLE_BUILD.md` §1: commit `6e7f4a5`
+  built twice on this Mac (macOS 26.2, Xcode 26.2, rustc 1.91.1, XcodeGen
+  2.46.0): `libbrev_core.a` and the executable identical (same LC_UUID), and
+  neither names the build or home folder; the dSYM differs and is not
+  compared. `--against` matched a copy re-signed ad hoc with the hardened
+  runtime and the entitlements. Not checked: a second Mac, a real Developer
+  ID signature, Intel, and a universal build (D-0004's universal build is
+  still open).
+
+### D-0102 — `docs/SECURITY.md` and `docs/DISTRIBUTION.md`
+
+- **Date:** 2026-09-29
+- **Decision:** `docs/SECURITY.md` is for outside reviewers: the promise
+  (CLAUDE.md §1), the threat model by reference, the components and what
+  Rust enforces versus what it takes from Swift, key management, what the
+  relay sees, how to verify, the known gaps (§7: the human run pending, this
+  Mac's signing key, the local relay, the self-reported class, the Phase 5
+  items left, the design limits) and a placeholder for reporting.
+  `docs/DISTRIBUTION.md` covers Developer ID signing with a Developer ID
+  provisioning profile and the same keychain group `AV26DNQ5SC.no.brev.app`,
+  the entitlement and hardened-runtime checks, a release built the way
+  `scripts/repro-build.sh` builds and checked with `--against`, `notarytool`
+  and stapling, and how a user checks a download with `codesign` and
+  `spctl`.
+- **Reasoning:** CLAUDE.md §5 Phase 5, and D-0033 item 5: Developer ID
+  before Brev holds real letters. The gaps are listed, not left for a
+  reviewer to find.
+- **Verified:** `dffa394` ("documented, not run"); `f40794a` brought both in
+  line with the Phase 5 state. No Developer ID build, notarization or
+  `spctl` check has been made: pending the owner, who holds the Developer ID
+  certificate. That a Developer ID build opens the keys a development build
+  made is expected, not verified (`docs/DISTRIBUTION.md` §1).
