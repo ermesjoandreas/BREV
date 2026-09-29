@@ -125,7 +125,7 @@ The Secure Enclave can only hold P-256 keys, so:
 
 ## 4. Approved dependencies
 
-Rust: `uniffi`, `rusqlite` (features `bundled`), `chacha20poly1305` (XChaCha), `x25519-dalek`, `ed25519-dalek` (relay-side only), `p256` (feature `ecdsa`; verifies Secure Enclave P-256 signatures in `brev-core` and `brev-relay`; Swift only signs), `poly1305` (feature `zeroize` only, to wipe the one-time MAC key), `zeroizing-alloc` (1Password; `brev-core`'s global allocator, zeroes every freed block), `hkdf`, `sha2`, `rand` (with `getrandom`), `zeroize`, `serde` + `serde_json`, `thiserror`, `anyhow` (bin crates only), `tokio` + `axum` + `reqwest` (relay/transport only), `tracing` (never log content).
+Rust: `uniffi`, `rusqlite` (features `bundled`), `chacha20poly1305` (XChaCha), `x25519-dalek`, `ed25519-dalek` (relay-side only), `p256` (feature `ecdsa`; verifies Secure Enclave P-256 signatures in `brev-core` and `brev-relay`; Swift only signs), `poly1305` (feature `zeroize` only, to wipe the one-time MAC key), `zeroizing-alloc` (1Password; `brev-core`'s global allocator, zeroes every freed block), `ciborium` (CBOR, for the authorship token and Apple's App Attest objects; `brev-hand` only), `x509-cert` with `der`/`spki` (RustCrypto; App Attest certificate-chain checks in `brev-hand`), `hkdf`, `sha2`, `rand` (with `getrandom`), `zeroize`, `serde` + `serde_json`, `thiserror`, `anyhow` (bin crates only), `tokio` + `axum` + `reqwest` (relay/transport only), `tracing` (never log content).
 
 Swift: Foundation, AppKit, Security, LocalAuthentication, CryptoKit (only if an Enclave operation needs it), AVFoundation + CoreMedia + CoreVideo (only for the capture-protected content layer), UserNotifications, DeviceCheck (Phase 4). No third-party Swift packages without asking.
 

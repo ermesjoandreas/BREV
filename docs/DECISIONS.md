@@ -4168,3 +4168,29 @@ WP5 and their reviews record.
   machine tests and design only.
 - **Verified:** Not applicable (a decision not to run tests). The list of
   untested rows was checked against `docs/VERIFY-RESULTS.md`.
+
+### D-0107 — Authorship attestation ("Hand"): owner decisions before the spike
+
+- **Date:** 2026-09-29
+- **Decision:** The owner asked for Phase 3b, authorship attestation
+  ("Hand"): each letter carries a signed, App-Attest-backed token proving
+  it was written in Brev, with Touch ID at send and a measured environment,
+  and the recipient verifies it. Before any code the owner approved:
+  1. New crates: `ciborium` (CBOR) and `x509-cert` with `der`/`spki`
+     (RustCrypto) for the token and App Attest verification; added to
+     CLAUDE.md §4. The content hash is SHA-256 (already approved), not
+     BLAKE3.
+  2. Hand lives in a new crate `brev-hand`, beside `brev-vault`, so the
+     vault's dependency whitelist stays as it is.
+  3. An environment fact the app cannot read (for example because the
+     sandbox blocks it) gives class B, never A.
+  4. The inbox badge says «Skrevet i Brev · klasse A», not «Menneske ·
+     verifisert»: on a Mac holding the team signing key a modified Brev can
+     also be attested, so the badge must not claim more than is proven.
+  Hand is built on top of the existing relay and Phase 4 code (the spec's
+  "before the relay and Phase 4" no longer applies; both are built).
+- **Reasoning:** CBOR and X.509 parsing of attacker-supplied bytes should
+  use maintained libraries, not hand-written parsers. A separate crate
+  keeps the vault small and its whitelist meaningful.
+- **Verified:** decision only. First step: a spike on App Attest support
+  and on which environment facts a sandboxed, team-signed app can read.
