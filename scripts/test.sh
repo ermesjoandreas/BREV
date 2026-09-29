@@ -11,7 +11,7 @@
 # the forbidden-API grep, the pasteboard greps (the contact screen only),
 # the check that AVFoundation, CoreMedia and CoreVideo stay in the protected
 # layer, the check that the Xcode minimum is stated alike, the dependency
-# audit, a relay
+# audit, the cargo-deny policy (core/deny.toml), a relay
 # on 127.0.0.1 with a fresh database and the owner's limits (macOS; stopped
 # when the script ends), the Swift heap-scan harness and the lock probe
 # against it, each run with a root invite of its own (macOS), a type-check
@@ -478,6 +478,17 @@ if cargo audit --version >/dev/null 2>&1; then
 else
   echo "warning: cargo-audit is not installed; dependency audit SKIPPED." >&2
   echo "         Install it with: cargo install cargo-audit" >&2
+fi
+
+# cargo-deny checks core/deny.toml (CLAUDE.md §5, Phase 5): advisories,
+# licenses, bans and sources. Optional on a dev machine like cargo-audit, so
+# skipping it is loud; CI (.github/workflows/ci.yml) always runs it.
+if cargo deny --version >/dev/null 2>&1; then
+  echo "==> cargo deny check"
+  (cd "$REPO_ROOT/core" && cargo deny check)
+else
+  echo "warning: cargo-deny is not installed; dependency policy check SKIPPED." >&2
+  echo "         Install it with: cargo install cargo-deny --locked" >&2
 fi
 
 # The relay the harness and the lock probe send letters through

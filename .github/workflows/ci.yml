@@ -1,0 +1,55 @@
+# The Rust workspace's checks on Linux (CLAUDE.md §5, Phase 5): formatting,
+# clippy, tests, cargo-audit and cargo-deny. The Swift, Xcode, harness and
+# relay steps of scripts/test.sh need macOS and stay local.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The toolchain every local test.sh run so far used (docs/DECISIONS.md).
+  RUST_TOOLCHAIN: "1.91.1"
+  MANIFEST: core/Cargo.toml
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Install cargo-audit and cargo-deny
+        run: cargo install --locked cargo-audit cargo-deny
+
+      - name: cargo fmt --check
+        run: cargo fmt --manifest-path "$MANIFEST" --all --check
+
+      - name: cargo clippy (warnings are errors)
+        run: cargo clippy --manifest-path "$MANIFEST" --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo clippy --all-features (warnings are errors)
+        run: cargo clippy --manifest-path "$MANIFEST" --workspace --all-targets --all-features --locked -- -D warnings
+
+      # Without the default features, which turns brev-vault's launch guard
+      # off, as in scripts/test.sh.
+      - name: cargo test (--no-default-features)
+        run: cargo test --manifest-path "$MANIFEST" --workspace --no-default-features --locked
+
+      - name: cargo audit
+        working-directory: core
+        run: cargo audit
+
+      - name: cargo deny check
+        working-directory: core
+        run: cargo deny check

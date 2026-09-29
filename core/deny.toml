@@ -1,0 +1,57 @@
+# cargo-deny policy for the Rust workspace (CLAUDE.md §4 Tooling, §5 Phase 5).
+# Run from core/: `cargo deny check` (scripts/test.sh and CI do).
+
+[graph]
+# Every feature, so brev-vault's and brev-mail's `test-hooks` dependencies
+# are checked too. No target filter: the graph for every platform is checked.
+all-features = true
+
+[advisories]
+# Vulnerability advisories always fail. Unmaintained and unsound crates fail
+# anywhere in the graph, and so does a yanked version in Cargo.lock.
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# The licenses the current Cargo.lock needs (from `cargo deny list -l
+# license`). Licenses that appear there only as one choice of an OR
+# expression whose other choice is allowed (LGPL-2.1-or-later in r-efi,
+# BSD-1-Clause in fiat-crypto, Unlicense in memchr, Apache-2.0 WITH
+# LLVM-exception in rustix, linux-raw-sys and wasi) are left out. A crate
+# with a license outside this list fails; a new license needs the owner's
+# approval before it is added here.
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[licenses.private]
+# The workspace crates are `publish = false` and `license = "UNLICENSED"`.
+ignore = true
+
+[bans]
+# The graph has one duplicate today (syn 2 and syn 3, both pulled in by
+# dependencies), so duplicates warn instead of failing.
+multiple-versions = "warn"
+wildcards = "deny"
+# The workspace crates use path dependencies without a version; they are
+# `publish = false`, so cargo-deny may accept those.
+allow-wildcard-paths = true
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# crates.io only: no other registry, no git dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
